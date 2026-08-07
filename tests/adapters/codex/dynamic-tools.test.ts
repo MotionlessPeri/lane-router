@@ -1,70 +1,47 @@
 import { expect, test, vi } from "vitest";
-import { LANE_TOOL_NAMES } from "../../../src/tools/tool-contract.js";
-import { CodexDynamicToolDispatcher, codexDynamicTools, StaleCodexThreadError } from "../../../src/adapters/codex/dynamic-tools.js";
 
-test("exports exactly eight strict shared logical schemas", () => {
+import { LANE_TOOL_NAMES } from "../../../src/tools/tool-contract.js";
+import { CodexDynamicToolDispatcher, codexDynamicTools, UnknownCodexThreadError } from "../../../src/adapters/codex/dynamic-tools.js";
+
+test("exports exactly four strict shared logical schemas", () => {
   const tools = codexDynamicTools();
   expect(tools.map((tool) => tool.name)).toEqual(LANE_TOOL_NAMES);
-  expect(tools).toHaveLength(8);
-  for (const tool of tools) {
-    expect(tool.type).toBe("function");
-    expect(tool.inputSchema).toMatchObject({ type: "object", additionalProperties: false });
-  }
+  expect(tools).toHaveLength(4);
+  for (const tool of tools) expect(tool.inputSchema).toMatchObject({ type: "object", additionalProperties: false });
+  expect(tools.find((tool) => tool.name === "lane_attach_current")?.description).toMatch(/explicit confirmation/i);
 });
 
-test("authoritative thread binding supplies identity and duplicate calls have one effect", async () => {
-  const call = vi.fn(() => ({ lane: "b" }));
-  const dispatcher = new CodexDynamicToolDispatcher({
-    resolveThread: (threadId) => threadId === "th" ? { bindingId: "binding", generation: 4 } : undefined,
-    call,
-  });
-  const request = { threadId: "th", turnId: "turn", callId: "call", tool: "lane_send", arguments: { operation_id: "spoof", target: "p/b", kind: "normal", body: "x", metadata: {}, actor: "spoof" } } as const;
+test("authoritative App Server thread identity and call ID become caller context", async () => {
+  const call = vi.fn(() => ({ id: "message-1" }));
+  const dispatcher = new CodexDynamicToolDispatcher({ ownsThread: (threadId) => threadId === "thread-1", call });
+  const request = { threadId: "thread-1", turnId: "turn-1", callId: "call-1", tool: "lane_send", arguments: { target: "alpha/test", kind: "normal", body: "x" } } as const;
   const [first, second] = await Promise.all([dispatcher.dispatch(request), dispatcher.dispatch(request)]);
   expect(first).toEqual(second);
   expect(call).toHaveBeenCalledTimes(1);
-  expect(call).toHaveBeenCalledWith("lane_send", expect.objectContaining({ operation_id: 'codex:["th","turn","call"]' }), { bindingId: "binding", generation: 4 });
-  expect(call.mock.calls[0]?.[1]).not.toHaveProperty("actor");
+  expect(call).toHaveBeenCalledWith("lane_send", request.arguments, {
+    backend: "codex", conversationId: "thread-1", requestKey: 'codex:["thread-1","turn-1","call-1"]',
+  });
 });
 
-test("tuple encoding cannot collide when identifiers contain colons", async () => {
-  const call = vi.fn(() => ({ ok: true }));
-  const dispatcher = new CodexDynamicToolDispatcher({ resolveThread: () => ({ bindingId: "binding", generation: 1 }), call });
-  await dispatcher.dispatch({ threadId: "a:b", turnId: "c", callId: "d", tool: "lane_status", arguments: {} });
-  await dispatcher.dispatch({ threadId: "a", turnId: "b:c", callId: "d", tool: "lane_status", arguments: {} });
-  expect(call).toHaveBeenCalledTimes(2);
-});
-
-test("completed replay cache expires and remains bounded under 10000 calls", async () => {
+test("tuple request keys cannot collide and completed calls remain bounded", async () => {
   let now = 1_000;
   const call = vi.fn(() => ({ ok: true }));
-  const dispatcher = new CodexDynamicToolDispatcher({ resolveThread: () => ({ bindingId: "binding", generation: 1 }), call, now: () => now, completedTtlMs: 50, maxCompletedEntries: 32 });
-  const request = (callId: string) => ({ threadId: "th", turnId: "tu", callId, tool: "lane_status", arguments: {} } as const);
-  await dispatcher.dispatch(request("ttl"));
-  await dispatcher.dispatch(request("ttl"));
-  expect(call).toHaveBeenCalledTimes(1);
-  now += 51;
-  await dispatcher.dispatch(request("ttl"));
+  const dispatcher = new CodexDynamicToolDispatcher({ ownsThread: () => true, call, now: () => now, completedTtlMs: 10, maxCompletedEntries: 2 });
+  const request = (threadId: string, turnId: string, callId: string) => ({ threadId, turnId, callId, tool: "lane_directory", arguments: { project: "alpha" } } as const);
+  await dispatcher.dispatch(request("a:b", "c", "d"));
+  await dispatcher.dispatch(request("a", "b:c", "d"));
   expect(call).toHaveBeenCalledTimes(2);
-  for (let index = 0; index < 10_000; index += 1) await dispatcher.dispatch(request(`call-${index}`));
-  await dispatcher.dispatch(request("call-0"));
-  expect(call).toHaveBeenCalledTimes(10_003);
+  await dispatcher.dispatch(request("a", "b:c", "d"));
+  expect(call).toHaveBeenCalledTimes(2);
+  now += 11;
+  await dispatcher.dispatch(request("a", "b:c", "d"));
+  expect(call).toHaveBeenCalledTimes(3);
 });
 
-test("duplicate rejected calls share one effect only while inflight and retain a bounded rejection", async () => {
-  const failure = new Error("boom");
-  const call = vi.fn(async () => { throw failure; });
-  const dispatcher = new CodexDynamicToolDispatcher({ resolveThread: () => ({ bindingId: "binding", generation: 1 }), call, maxCompletedEntries: 2 });
-  const request = { threadId: "th", turnId: "tu", callId: "failed", tool: "lane_status", arguments: {} } as const;
-  const [first, second] = await Promise.allSettled([dispatcher.dispatch(request), dispatcher.dispatch(request)]);
-  expect(first.status).toBe("rejected");
-  expect(second.status).toBe("rejected");
-  await expect(dispatcher.dispatch(request)).rejects.toBe(failure);
-  expect(call).toHaveBeenCalledTimes(1);
-});
-
-test("stale or unbound threads are rejected without an operation", async () => {
+test("rejects a thread not created or resumed by this Router", async () => {
   const call = vi.fn();
-  const dispatcher = new CodexDynamicToolDispatcher({ resolveThread: () => undefined, call });
-  await expect(dispatcher.dispatch({ threadId: "old", turnId: "t", callId: "c", tool: "lane_status", arguments: {} })).rejects.toBeInstanceOf(StaleCodexThreadError);
+  const dispatcher = new CodexDynamicToolDispatcher({ ownsThread: () => false, call });
+  await expect(dispatcher.dispatch({ threadId: "foreign", turnId: "t", callId: "c", tool: "lane_directory", arguments: { project: "alpha" } }))
+    .rejects.toBeInstanceOf(UnknownCodexThreadError);
   expect(call).not.toHaveBeenCalled();
 });

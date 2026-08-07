@@ -19,7 +19,7 @@ afterEach(async () => {
 test("protocol decoder accepts consumed messages and unknown fields", () => {
   expect(decodeServerMessage({ id: 1, result: { ok: true }, future: 1 })).toMatchObject({ kind: "response", id: 1 });
   expect(decodeServerMessage({ method: "turn/started", params: { threadId: "th", turn: { id: "tu", status: "inProgress", items: [] } } })).toMatchObject({ kind: "notification", method: "turn/started" });
-  expect(decodeServerMessage({ id: "r", method: "item/tool/call", params: { threadId: "th", turnId: "tu", callId: "ca", tool: "lane_status", arguments: {} } })).toMatchObject({ kind: "request", method: "item/tool/call" });
+  expect(decodeServerMessage({ id: "r", method: "item/tool/call", params: { threadId: "th", turnId: "tu", callId: "ca", tool: "lane_directory", arguments: {} } })).toMatchObject({ kind: "request", method: "item/tool/call" });
 });
 
 test.each([
@@ -56,7 +56,7 @@ test("client initializes, correlates responses, emits notifications, and answers
     if (message.method === "initialize") socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
     if (message.method === "echo") {
       socket.send(JSON.stringify({ method: "thread/status/changed", params: { threadId: "th", status: { type: "idle" } } }));
-      socket.send(JSON.stringify({ id: "tool-1", method: "item/tool/call", params: { threadId: "th", turnId: "tu", callId: "ca", tool: "lane_status", arguments: {} } }));
+      socket.send(JSON.stringify({ id: "tool-1", method: "item/tool/call", params: { threadId: "th", turnId: "tu", callId: "ca", tool: "lane_directory", arguments: {} } }));
       socket.send(JSON.stringify({ id: message.id, result: message.params }));
     }
   });
@@ -136,7 +136,7 @@ test("an old server request cannot answer a reconnected socket with the same id"
       received.push({ connection: current, message });
       if (message.method === "initialize") {
         socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
-        socket.send(JSON.stringify({ id: "same", method: "item/tool/call", params: { threadId: "th", turnId: "tu", callId: `call-${current}`, tool: "lane_status", arguments: {} } }));
+        socket.send(JSON.stringify({ id: "same", method: "item/tool/call", params: { threadId: "th", turnId: "tu", callId: `call-${current}`, tool: "lane_directory", arguments: {} } }));
       }
     });
   });

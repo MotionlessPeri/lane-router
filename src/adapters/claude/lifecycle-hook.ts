@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const MAX_INPUT_BYTES = 64 * 1024;
@@ -7,26 +10,30 @@ export async function reportClaudeLifecycle(options: {
   readonly input: string;
   readonly fetch?: typeof globalThis.fetch;
 }): Promise<boolean> {
-  const env = options.env ?? process.env;
   if (Buffer.byteLength(options.input, "utf8") > MAX_INPUT_BYTES) return false;
   let value: unknown;
   try { value = JSON.parse(options.input); } catch { return false; }
   if (!isLifecycleInput(value)) return false;
-  const baseUrl = env.LANE_ROUTER_URL;
-  const credential = env.LANE_ROUTER_BINDING_CREDENTIAL;
-  const connectionEpoch = env.LANE_ROUTER_CLAUDE_CONNECTION_EPOCH;
-  if (!baseUrl || !credential || !connectionEpoch || connectionEpoch.length > 128) return false;
+  const env = options.env ?? process.env;
+  const baseUrl = env.LANE_ROUTER_URL ?? discoveryUrl(env.LANE_ROUTER_DATA_ROOT);
+  if (!baseUrl) return false;
   try {
-    const response = await (options.fetch ?? globalThis.fetch)(`${baseUrl.replace(/\/$/u, "")}/v1/adapters/claude/state`, {
+    const response = await (options.fetch ?? globalThis.fetch)(`${baseUrl.replace(/\/$/u, "")}/claude/lifecycle`, {
       method: "POST",
-      headers: { authorization: `Session ${credential}`, "content-type": "application/json" },
-      body: JSON.stringify({ connectionEpoch, event: value.hook_event_name }),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ conversationId: value.session_id, event: value.hook_event_name }),
       signal: AbortSignal.timeout(2_000),
     });
     if (!response.ok) return false;
-    const body = await response.json() as { ok?: unknown; data?: { accepted?: unknown } };
-    return body.ok === true && body.data?.accepted === true;
+    return (await response.json() as { accepted?: unknown }).accepted === true;
   } catch { return false; }
+}
+
+function discoveryUrl(dataRoot = join(homedir(), ".lane-router")): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dataRoot, "discovery.json"), "utf8")) as { url?: unknown };
+    return typeof parsed.url === "string" ? parsed.url : undefined;
+  } catch { return undefined; }
 }
 
 function isLifecycleInput(value: unknown): value is { hook_event_name: "Stop" | "UserPromptSubmit"; session_id: string } {
@@ -38,11 +45,9 @@ function isLifecycleInput(value: unknown): value is { hook_event_name: "Stop" | 
 }
 
 async function readStdin(): Promise<string | undefined> {
-  const chunks: Buffer[] = [];
-  let size = 0;
+  const chunks: Buffer[] = []; let size = 0;
   for await (const chunk of process.stdin) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.length;
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); size += buffer.length;
     if (size > MAX_INPUT_BYTES) return undefined;
     chunks.push(buffer);
   }
@@ -50,18 +55,6 @@ async function readStdin(): Promise<string | undefined> {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  void readStdin().then(async (input) => {
-    if (input === undefined) return 0;
-    const event = parseHookEvent(input);
-    if (event === "StopFailure" || event === undefined) return 0;
-    const accepted = await reportClaudeLifecycle({ input });
-    return event === "UserPromptSubmit" && !accepted ? 2 : 0;
-  }).then((code) => { process.exitCode = code; }, () => { process.exitCode = 0; });
-}
-
-function parseHookEvent(input: string): "Stop" | "StopFailure" | "UserPromptSubmit" | undefined {
-  try {
-    const value = JSON.parse(input) as Record<string, unknown>;
-    return value.hook_event_name === "Stop" || value.hook_event_name === "StopFailure" || value.hook_event_name === "UserPromptSubmit" ? value.hook_event_name : undefined;
-  } catch { return undefined; }
+  void readStdin().then(async (input) => input === undefined ? false : reportClaudeLifecycle({ input }))
+    .then(() => { process.exitCode = 0; }, () => { process.exitCode = 0; });
 }

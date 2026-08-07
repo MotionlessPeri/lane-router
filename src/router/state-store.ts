@@ -151,6 +151,27 @@ export class RouterStateStore {
     return row ? mapBinding(row) : undefined;
   }
 
+  latestBindingForConversation(backend: BackendName, conversationId: string): BindingRecord | undefined {
+    const row = this.database.prepare(`
+      SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at
+      FROM binding WHERE backend=? AND conversation_id=? ORDER BY active_at DESC,id DESC LIMIT 1
+    `).get(backend, conversationId) as BindingRow | undefined;
+    return row ? mapBinding(row) : undefined;
+  }
+
+  activeBindings(backend?: BackendName): BindingRecord[] {
+    const rows = backend === undefined
+      ? this.database.prepare(`
+          SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at
+          FROM binding WHERE inactive_at IS NULL ORDER BY lane_address
+        `).all()
+      : this.database.prepare(`
+          SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at
+          FROM binding WHERE inactive_at IS NULL AND backend=? ORDER BY lane_address
+        `).all(backend);
+    return (rows as BindingRow[]).map(mapBinding);
+  }
+
   deactivateBinding(id: string, generation: number, now: number): boolean {
     return this.database.prepare(`
       UPDATE binding SET inactive_at=? WHERE id=? AND generation=? AND inactive_at IS NULL

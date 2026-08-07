@@ -1,9 +1,5 @@
-# Claude Channel fixtures
+# Claude Channel manual fixture
 
-`fake-channel-client.mjs` is the deterministic MCP client used by `lane-mcp-stdio.test.ts`. It spawns the production stdio entrypoint, advertises the experimental Claude Channel capability, and exposes received notifications to the test without interpreting message bodies.
+The V1 production boundary is exercised by the Claude section of `docs/manual-tests.md`. It uses the four-tool stdio MCP server, `CLAUDE_CODE_SESSION_ID`, the lifecycle hook, and file mailbox paths. The former credential-bound eight-tool fixture was removed with the legacy broker model.
 
-`real-channel-smoke.mjs` is a bounded manual fixture for an installed Claude CLI. It creates a temporary broker database and an isolated Claude config containing only the selected provider settings and fixture-owned lifecycle hooks, launches Claude through `pty-host.py`, and removes all temporary state on exit. Authenticated `Stop` and `UserPromptSubmit` hook events drive idle/busy state without forwarding prompts. The fixture checks idle and busy wake acceptance, recorded acknowledgment outcomes, disconnected pending behavior, and reconnect recovery. `pywinpty` is required on Windows.
-
-Build from a clean committed revision, then set `EXPECTED_RUNTIME_SHA` to that exact revision, `CLAUDE_SETTINGS_FILE` to the home Kimi settings file, `CLAUDE_APPROVAL_STATE_FILE` to the existing Claude state file, and `CLAUDE_APPROVED_PROJECT` to a disposable project whose preview approval already exists. Optionally set `CLAUDE_EXE`, `CLAUDE_VERSION`, and `CLAUDE_CHANNEL_SMOKE_TIMEOUT_MS`. Run `node tests/fixtures/claude/real-channel-smoke.mjs`. Its output contains only the stage, version, acceptance results, counts, reconnect flag, TUI flag, and elapsed time. It never prints credentials, prompts, message bodies, hook input, or model responses.
-
-The real fixture fails closed when Claude presents an interactive research-preview or organization-policy confirmation. Do not bypass such a gate by copying account state or requiring a person to approve it during an automated run; record the blocked result in `docs/manual-tests.md` instead.
+`pty-host.py` remains available for an isolated interactive Claude CLI run. No real-model result is part of the automated test gate.

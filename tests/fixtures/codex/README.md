@@ -1,7 +1,5 @@
-# Codex App Server fixture
+# Codex App Server manual fixture
 
-`fake-app-server.mjs` emulates only the App Server protocol surface consumed by Lane Router. It supports version/schema probing and a loopback WebSocket server. Set `FAKE_CODEX_SCHEMA=incompatible` to remove required methods and exercise the startup gate.
+The low-level App Server protocol and process manager have deterministic tests. The V1 real boundary is the interactive procedure in `docs/manual-tests.md`: `lane-router-codex`, busy correction steering, offline pending mail, and `lane-router-codex resume <thread-id>`.
 
-`real-app-server-smoke.mjs` requires `EXPECTED_RUNTIME_SHA` to be the full 40-character production commit SHA under test, in addition to the Codex executable and authentication environment variables documented in `docs/manual-tests.md`. It resolves the current fixture commit with Git, verifies that `EXPECTED_RUNTIME_SHA` is a commit, rejects staged or unstaged production-source changes, and confirms that current `src/` is identical to that production commit before starting Codex.
-
-`real-app-server-smoke.mjs` imports the built production runtime, process manager, client, broker, scheduler, and SQLite storage. Its outer cleanup scope starts immediately after disposable-root creation, so authentication copy, database-open, import, and process-start failures all close optional handles and remove the root. It advertises all eight tools, drives a body-free broker wake, verifies the requested tool effect, stops the first runtime, and verifies persisted history through a fresh production runtime. Child streams are discarded; output contains sanitized stages, commit identities, anonymous identifiers, and counts only.
+Real model and TUI behavior is not part of the unattended automated gate.

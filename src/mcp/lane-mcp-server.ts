@@ -2,40 +2,53 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
-import { BrokerClient } from "../client/broker-client.js";
-import { ChannelBridge, ClaudeChannelBridgeClient, type ClaudeChannelSink } from "../adapters/claude/channel-bridge.js";
-import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
-import { CLAUDE_CHANNEL_MCP_TOOLS, parseClaudeChannelToolArguments } from "./tool-schemas.js";
 
-export type LaneBrokerClient = Pick<BrokerClient, "call" | "status">;
-export interface LaneMcpIdentity { readonly bindingId: string; readonly generation: number }
+import type { ClaudeChannelNotification, ClaudeChannelSink } from "../adapters/claude/channel-bridge.js";
+import type { CallerContext } from "../router/types.js";
+import { LANE_ROUTER_INSTRUCTIONS, LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
+import { LANE_MCP_TOOLS, parseLaneToolArguments } from "./tool-schemas.js";
+
+export interface LaneRouterClient {
+  call(name: LaneToolName, args: Record<string, unknown>, context: CallerContext): Promise<unknown>;
+}
+
+export interface ClaudeChannelConnection {
+  attach(sink: ClaudeChannelSink): void;
+  detach(sink: ClaudeChannelSink): void;
+  close(): Promise<void>;
+}
 
 export class LaneMcpServer {
   private readonly protocol: Server;
   private readonly channelSink: ClaudeChannelSink;
   private connected = false;
 
-  constructor(private readonly options: { broker: LaneBrokerClient; identity: LaneMcpIdentity; channel?: ChannelBridge; onClose?: () => void | Promise<void> }) {
+  constructor(private readonly options: {
+    readonly router: LaneRouterClient;
+    readonly conversationId: string;
+    readonly channel?: ClaudeChannelConnection;
+    readonly newRequestKey?: () => string;
+    readonly onClose?: () => void | Promise<void>;
+  }) {
     this.protocol = new Server(
       { name: "lane-router", version: "0.1.0" },
-      { capabilities: { tools: {}, experimental: { "claude/channel": {} } }, instructions: "When a Lane Router readiness notification arrives, call lane_whoami once and copy its readiness_nonce exactly. For every delivery wake, fetch each message ID with lane_message_get, claim its delivery before acting, and acknowledge the claim with the actual outcome when work finishes." },
+      { capabilities: { tools: {}, experimental: { "claude/channel": {} } }, instructions: LANE_ROUTER_INSTRUCTIONS },
     );
-    this.channelSink = { notification: (value) => this.protocol.notification(value as never) };
-    this.protocol.oninitialized = () => {
-      this.options.channel?.attach(this.channelSink);
-      void this.options.channel?.beginReadinessProbe();
+    this.channelSink = { notification: (value: ClaudeChannelNotification) => this.protocol.notification(value as never) };
+    this.protocol.oninitialized = () => this.options.channel?.attach(this.channelSink);
+    this.protocol.onclose = () => {
+      this.options.channel?.detach(this.channelSink);
+      this.connected = false;
+      void Promise.resolve(this.options.onClose?.()).catch(() => undefined);
     };
-    this.protocol.onclose = () => { this.options.channel?.detach(this.channelSink); this.connected = false; void Promise.resolve(this.options.onClose?.()).catch(() => undefined); };
-    this.protocol.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...CLAUDE_CHANNEL_MCP_TOOLS] }));
+    this.protocol.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...LANE_MCP_TOOLS] }));
     this.protocol.setRequestHandler(CallToolRequestSchema, async (request) => this.callTool(request.params.name, request.params.arguments));
   }
 
   async connect(transport: Transport): Promise<void> {
-    const identity = await this.options.broker.call("whoami", {});
-    if (identity.bindingId !== this.options.identity.bindingId || identity.generation !== this.options.identity.generation)
-      throw new Error(`Lane MCP fixed identity is stale: expected ${this.options.identity.bindingId}@${this.options.identity.generation}`);
     await this.protocol.connect(transport);
     this.connected = true;
   }
@@ -48,12 +61,14 @@ export class LaneMcpServer {
 
   private async callTool(name: string, input: unknown) {
     if (!LANE_TOOL_NAMES.includes(name as LaneToolName)) return toolError("Unknown Lane Router tool");
-    const tool = name as LaneToolName;
     try {
-      const { args, readinessNonce } = parseClaudeChannelToolArguments(tool, input ?? {});
-      if (tool === "lane_whoami" && readinessNonce !== undefined && !this.options.channel?.matchesReadiness(readinessNonce, this.channelSink)) return toolError("readiness_nonce is not active for this Channel connection");
-      const result = await dispatch(this.options.broker, tool, args);
-      if (tool === "lane_whoami") this.options.channel?.confirmReadiness(readinessNonce, this.channelSink);
+      const tool = name as LaneToolName;
+      const args = parseLaneToolArguments(tool, input ?? {});
+      const result = await this.options.router.call(tool, args, {
+        backend: "claude",
+        conversationId: this.options.conversationId,
+        requestKey: `claude:${(this.options.newRequestKey ?? randomUUID)()}`,
+      });
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
     } catch (error) {
       return toolError(error instanceof Error ? error.message : "Lane Router tool call failed");
@@ -61,52 +76,32 @@ export class LaneMcpServer {
   }
 }
 
-export function createLaneMcpServer(options: { broker: LaneBrokerClient; identity: LaneMcpIdentity; channel?: ChannelBridge; onClose?: () => void | Promise<void> }): LaneMcpServer { return new LaneMcpServer(options); }
-
-export interface LaneMcpStdioEnvironment {
-  readonly url: string;
-  readonly discoveryToken: string;
-  readonly credential: string;
-  readonly connectionEpoch: string;
-  readonly identity: LaneMcpIdentity;
+export function createLaneMcpServer(options: ConstructorParameters<typeof LaneMcpServer>[0]): LaneMcpServer {
+  return new LaneMcpServer(options);
 }
 
-export function parseLaneMcpStdioEnvironment(env: NodeJS.ProcessEnv): LaneMcpStdioEnvironment {
-  const url = requiredEnvironment(env, "LANE_ROUTER_URL");
-  const credential = requiredEnvironment(env, "LANE_ROUTER_BINDING_CREDENTIAL");
-  const bindingId = requiredEnvironment(env, "LANE_ROUTER_BINDING_ID");
-  const generationText = requiredEnvironment(env, "LANE_ROUTER_BINDING_GENERATION");
-  const connectionEpoch = requiredEnvironment(env, "LANE_ROUTER_CLAUDE_CONNECTION_EPOCH");
-  const generation = Number(generationText);
-  if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("LANE_ROUTER_BINDING_GENERATION must be a positive integer");
-  return { url, discoveryToken: env.LANE_ROUTER_DISCOVERY_TOKEN ?? "", credential, connectionEpoch, identity: { bindingId, generation } };
-}
-
-export async function runLaneMcpStdio(env: NodeJS.ProcessEnv = process.env): Promise<{ close(): Promise<void> }> {
-  const config = parseLaneMcpStdioEnvironment(env);
-  const broker = new BrokerClient(config.url, config.discoveryToken, config.credential);
-  const channel = new ChannelBridge({ requireReadinessProbe: true });
-  const bridge = new ClaudeChannelBridgeClient({ url: config.url, credential: config.credential, connectionEpoch: config.connectionEpoch, channel });
+export async function runLaneMcpStdio(): Promise<{ close(): Promise<void> }> {
+  const [{ ensureRouter }, { LocalRouterClient, connectClaudeChannel }] = await Promise.all([
+    import("../process/ensure-router.js"),
+    import("../process/local-client.js"),
+  ]);
+  const discovery = await ensureRouter();
+  const conversationId = process.env.CLAUDE_CODE_SESSION_ID ?? randomUUID();
+  const router = new LocalRouterClient(discovery.url);
+  const channel = await connectClaudeChannel(discovery.url, conversationId);
   let closing: Promise<void> | undefined;
-  const server = createLaneMcpServer({ broker, identity: config.identity, channel, onClose: () => close() });
+  const server = createLaneMcpServer({ router, conversationId, channel, onClose: () => close() });
   const close = (): Promise<void> => closing ??= (async () => {
-    await bridge.stop();
+    await channel.close();
     await server.close();
   })();
-  try {
-    await bridge.start();
-    await server.connect(new StdioServerTransport());
-  } catch (error) {
-    await close();
-    throw error;
-  }
+  try { await server.connect(new StdioServerTransport()); }
+  catch (error) { await close(); throw error; }
   return { close };
 }
 
-function requiredEnvironment(env: NodeJS.ProcessEnv, name: string): string {
-  const value = env[name];
-  if (!value) throw new Error(`${name} is required`);
-  return value;
+function toolError(message: string) {
+  return { isError: true, content: [{ type: "text" as const, text: message }] };
 }
 
 function isDirectExecution(): boolean {
@@ -119,18 +114,3 @@ if (isDirectExecution()) {
     process.exitCode = 1;
   });
 }
-
-async function dispatch(broker: LaneBrokerClient, name: LaneToolName, args: Record<string, unknown>): Promise<unknown> {
-  switch (name) {
-    case "lane_whoami": return broker.call("whoami", {});
-    case "lane_status": return broker.status();
-    case "lane_send": return broker.call("send", { operationId: args.operation_id as string, target: args.target as string, kind: args.kind as "normal" | "correction", body: args.body as string, metadata: args.metadata as never, ...(args.reply_to === undefined ? {} : { replyTo: args.reply_to as string | null }) });
-    case "lane_inbox_list": return broker.call("inbox", {});
-    case "lane_message_get": return broker.call("message", { messageId: args.message_id as string });
-    case "lane_message_claim": return broker.call("claim", { operationId: args.operation_id as string, deliveryId: args.delivery_id as string, ...(args.claim_id === undefined ? {} : { claimId: args.claim_id as string }) });
-    case "lane_message_ack": return broker.call("ack", { operationId: args.operation_id as string, deliveryId: args.delivery_id as string, claimId: args.claim_id as string, outcome: args.outcome as never });
-    case "lane_message_park": return broker.call("park", { operationId: args.operation_id as string, deliveryId: args.delivery_id as string, reason: args.reason as string });
-  }
-}
-
-function toolError(message: string) { return { isError: true, content: [{ type: "text" as const, text: message }] }; }

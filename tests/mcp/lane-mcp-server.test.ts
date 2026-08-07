@@ -1,113 +1,53 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { z } from "zod";
-import { createLaneMcpServer, type LaneBrokerClient } from "../../src/mcp/lane-mcp-server.js";
-import { ChannelBridge } from "../../src/adapters/claude/channel-bridge.js";
+
+import { createLaneMcpServer, type LaneRouterClient } from "../../src/mcp/lane-mcp-server.js";
 import { LANE_TOOL_NAMES } from "../../src/tools/tool-contract.js";
 import { LANE_MCP_TOOLS } from "../../src/mcp/tool-schemas.js";
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => { await Promise.all(closers.splice(0).map((close) => close())); });
 
-function broker(identity = { bindingId: "binding-a", generation: 4, laneAddress: "p/a", adapter: "claude" as const }) {
-  const call = vi.fn(async (method: string, params: Record<string, unknown>) => {
-    if (method === "whoami") return identity;
-    if (method === "inbox") return [];
-    if (method === "message") return { id: params.messageId, kind: "normal", body: "body", metadata: {}, replyTo: null, createdAt: 1 };
-    if (method === "send") return { messageId: "m", deliveryId: "d", sequence: 1 };
-    if (method === "claim") return { claimId: "claim", deadline: 10 };
-    if (method === "ack") return { id: params.deliveryId, status: "acknowledged" };
-    if (method === "park") return { id: params.deliveryId, status: "parked" };
-    throw new Error(`unexpected method ${method}`);
-  });
-  const status = vi.fn(async () => ({ projects: { count: 1 }, lanes: { count: 2 }, pending: { count: 0 }, dispatchFences: { activeCount: 0, affectedLanes: [] } }));
-  return { client: { call, status } as unknown as LaneBrokerClient, call, status };
-}
-
-async function connected(input = broker()) {
+async function connected() {
+  const call = vi.fn(async (name: string) => name === "lane_directory" ? [] : { ok: true });
+  const router = { call } as unknown as LaneRouterClient;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createLaneMcpServer({ broker: input.client, identity: { bindingId: "binding-a", generation: 4 } });
+  const server = createLaneMcpServer({ router, conversationId: "claude-session-1", newRequestKey: () => "call-1" });
   const client = new Client({ name: "lane-test", version: "1" }, { capabilities: {} });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   closers.push(async () => { await client.close(); await server.close(); });
-  return { ...input, client, server };
+  return { client, call };
 }
 
-test("lane MCP advertises exactly eight logical tools with no caller-controlled identity", async () => {
-  expect(LANE_MCP_TOOLS.find((tool) => tool.name === "lane_whoami")?.inputSchema.properties).not.toHaveProperty("readiness_nonce");
+test("advertises exactly four strict tools with the shared attach confirmation", async () => {
   const x = await connected();
   const listed = await x.client.listTools();
   expect(listed.tools.map((tool) => tool.name)).toEqual(LANE_TOOL_NAMES);
+  expect(listed.tools).toHaveLength(4);
+  expect(listed.tools.find((tool) => tool.name === "lane_attach_current")?.description).toMatch(/explicit confirmation/i);
   for (const tool of listed.tools) {
-    expect(tool.inputSchema.properties).not.toHaveProperty("binding_id");
-    expect(tool.inputSchema.properties).not.toHaveProperty("generation");
     expect(tool.inputSchema.additionalProperties).toBe(false);
+    for (const forbidden of ["conversation_id", "binding_id", "generation", "credential", "operation_id", "admin", "confirmed"])
+      expect(tool.inputSchema.properties).not.toHaveProperty(forbidden);
   }
-
-  const spoofed = await x.client.callTool({ name: "lane_send", arguments: { operation_id: "spoof", target: "p/b", kind: "normal", body: "x", metadata: {}, binding_id: "binding-b", generation: 99 } });
-  expect(spoofed.isError).toBe(true);
-  expect(x.call).not.toHaveBeenCalledWith("send", expect.anything());
+  expect(LANE_MCP_TOOLS.map((tool) => tool.description)).toEqual(listed.tools.map((tool) => tool.description));
 });
 
-test("lane MCP derives identity from its credential and propagates operation IDs", async () => {
+test("injects the current Claude connection identity and an internal request key", async () => {
   const x = await connected();
-  const calls = [
-    ["lane_whoami", {}],
-    ["lane_status", {}],
-    ["lane_send", { operation_id: "op-send", target: "p/b", kind: "normal", body: "hello", metadata: {}, reply_to: "m0" }],
-    ["lane_inbox_list", {}],
-    ["lane_message_get", { message_id: "m1" }],
-    ["lane_message_claim", { operation_id: "op-claim", delivery_id: "d1", claim_id: "c1" }],
-    ["lane_message_ack", { operation_id: "op-ack", delivery_id: "d1", claim_id: "c1", outcome: { kind: "rejected", reason: "done elsewhere" } }],
-    ["lane_message_park", { operation_id: "op-park", delivery_id: "d2", reason: "poison" }],
-  ] as const;
-  for (const [name, args] of calls) expect((await x.client.callTool({ name, arguments: args })).isError).not.toBe(true);
-
-  expect(x.call).toHaveBeenCalledWith("send", expect.objectContaining({ operationId: "op-send", replyTo: "m0" }));
-  expect(x.call).toHaveBeenCalledWith("claim", { operationId: "op-claim", deliveryId: "d1", claimId: "c1" });
-  expect(x.call).toHaveBeenCalledWith("ack", expect.objectContaining({ operationId: "op-ack", deliveryId: "d1", claimId: "c1" }));
-  expect(x.call).toHaveBeenCalledWith("park", { operationId: "op-park", deliveryId: "d2", reason: "poison" });
-  expect(x.status).toHaveBeenCalledOnce();
+  const result = await x.client.callTool({ name: "lane_send", arguments: { target: "alpha/test", body: "hello", kind: "normal" } });
+  expect(result.isError).not.toBe(true);
+  expect(x.call).toHaveBeenCalledWith("lane_send", { target: "alpha/test", body: "hello", kind: "normal" }, {
+    backend: "claude", conversationId: "claude-session-1", requestKey: "claude:call-1",
+  });
 });
 
-test("lane MCP refuses a stale fixed generation before exposing tools", async () => {
-  const stale = broker({ bindingId: "binding-a", generation: 5, laneAddress: "p/a", adapter: "claude" });
-  const [, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createLaneMcpServer({ broker: stale.client, identity: { bindingId: "binding-a", generation: 4 } });
-  await expect(server.connect(serverTransport)).rejects.toThrow(/generation|identity|stale/i);
-  await server.close();
-});
-
-test("lane MCP advertises Channel capability without treating ack as platform turn completion", async () => {
-  const x = broker();
-  const channel = new ChannelBridge();
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createLaneMcpServer({ broker: x.client, identity: { bindingId: "binding-a", generation: 4 }, channel });
-  const client = new Client({ name: "channel-test", version: "1" }, { capabilities: {} });
-  const notifications: unknown[] = [];
-  client.setNotificationHandler(z.object({ method: z.literal("notifications/claude/channel"), params: z.object({ content: z.string(), meta: z.record(z.string(), z.unknown()) }) }), async (notification) => { notifications.push(notification); });
-  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-  expect(client.getServerCapabilities()?.experimental).toEqual({ "claude/channel": {} });
-  await vi.waitFor(() => expect(notifications).toHaveLength(1));
-  const readiness = JSON.parse((notifications[0] as { params: { content: string } }).params.content) as { readiness_nonce: string };
-  const listed = await client.listTools();
-  expect(listed.tools).toHaveLength(8);
-  expect(listed.tools.find((tool) => tool.name === "lane_whoami")?.inputSchema.properties).toHaveProperty("readiness_nonce");
-  expect(channel.getRuntimeState()).toEqual({ availability: "degraded", turn: "unknown" });
-  await client.callTool({ name: "lane_whoami", arguments: {} });
-  expect(channel.getRuntimeState()).toEqual({ availability: "degraded", turn: "unknown" });
-  const callsBeforeWrongNonce = x.call.mock.calls.length;
-  expect((await client.callTool({ name: "lane_whoami", arguments: { readiness_nonce: "wrong" } })).isError).toBe(true);
-  expect(x.call).toHaveBeenCalledTimes(callsBeforeWrongNonce);
-  expect(channel.getRuntimeState()).toEqual({ availability: "degraded", turn: "unknown" });
-  await client.callTool({ name: "lane_whoami", arguments: { readiness_nonce: readiness.readiness_nonce } });
-  await vi.waitFor(() => expect(channel.getRuntimeState()).toEqual({ availability: "online", turn: "busy" }));
-  expect(await channel.wake({ deliveryId: "d", messageId: "m", targetLaneId: "p/a", sequence: 1, kind: "normal", bindingGeneration: 4 })).toBe("queued_next_turn");
-  await vi.waitFor(() => expect(notifications).toHaveLength(2));
-  await client.callTool({ name: "lane_message_ack", arguments: { operation_id: "ack", delivery_id: "d", claim_id: "c", outcome: { kind: "rejected", reason: "fixture" } } });
-  expect(channel.getRuntimeState()).toEqual({ availability: "online", turn: "busy" });
-  await client.close();
-  await vi.waitFor(() => expect(channel.getRuntimeState()).toEqual({ availability: "offline", turn: "unknown" }));
-  await server.close();
+test("rejects caller-controlled identity and confirmation fields", async () => {
+  const x = await connected();
+  for (const [name, args] of [
+    ["lane_directory", { project: "alpha", conversation_id: "spoof" }],
+    ["lane_attach_current", { address: "alpha/design", confirmed: true }],
+  ] as const) expect((await x.client.callTool({ name, arguments: args })).isError).toBe(true);
+  expect(x.call).not.toHaveBeenCalled();
 });

@@ -1,32 +1,25 @@
 export const LANE_TOOL_NAMES = [
-  "lane_whoami",
-  "lane_status",
+  "lane_directory",
+  "lane_attach_current",
   "lane_send",
-  "lane_inbox_list",
-  "lane_message_get",
-  "lane_message_claim",
-  "lane_message_ack",
-  "lane_message_park",
+  "lane_ack",
 ] as const;
+
 export type LaneToolName = (typeof LANE_TOOL_NAMES)[number];
-export interface ToolBindingContext {
-  readonly bindingId: string;
-  readonly generation: number;
-}
+
 export interface LogicalToolDefinition {
   readonly name: LaneToolName;
   readonly description: string;
   readonly mutating: boolean;
 }
-export const LANE_TOOLS: readonly LogicalToolDefinition[] = LANE_TOOL_NAMES.map(
-  (name) => ({
-    name,
-    description: `Lane Router logical operation ${name}`,
-    mutating: [
-      "lane_send",
-      "lane_message_claim",
-      "lane_message_ack",
-      "lane_message_park",
-    ].includes(name),
-  }),
-);
+
+const ATTACH_CONFIRMATION = "Before creating, replacing, rotating, or changing the role description of a lane, explain the proposed topology change and obtain the user's explicit confirmation in the conversation. Do not add a confirmation argument.";
+
+export const LANE_TOOLS: readonly LogicalToolDefinition[] = [
+  { name: "lane_directory", description: "List the lanes and role descriptions in one project. This query does not require user confirmation.", mutating: false },
+  { name: "lane_attach_current", description: `Attach the current conversation to a lane. ${ATTACH_CONFIRMATION}`, mutating: true },
+  { name: "lane_send", description: "Write an immutable message to another lane's pending mailbox. Use correction with reply_to to amend an earlier message.", mutating: true },
+  { name: "lane_ack", description: "Resolve one or more pending mailbox messages after the current lane has processed them.", mutating: true },
+];
+
+export const LANE_ROUTER_INSTRUCTIONS = `Use lane_directory to inspect roles before proposing a topology change. ${ATTACH_CONFIRMATION} When notified, read the pending mailbox files directly, process related messages together when useful, then call lane_ack with every processed message ID.`;

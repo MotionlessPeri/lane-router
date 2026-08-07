@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { LANE_TOOL_NAMES, LANE_TOOLS, type LaneToolName, type ToolBindingContext } from "../../tools/tool-contract.js";
+import type { CallerContext } from "../../router/types.js";
+import { LANE_TOOL_NAMES, LANE_TOOLS, type LaneToolName } from "../../tools/tool-contract.js";
 import { toolArgsSchemas } from "../../tools/tool-schema.js";
 import type { DynamicToolCallParams } from "./protocol.js";
 
@@ -7,14 +8,14 @@ export interface CodexDynamicTool { readonly type: "function"; readonly name: La
 export function codexDynamicTools(): readonly CodexDynamicTool[] {
   return LANE_TOOLS.map((tool) => ({ type: "function", name: tool.name, description: tool.description, inputSchema: z.toJSONSchema(toolArgsSchemas[tool.name], { target: "draft-7" }) as Record<string, unknown> }));
 }
-export class StaleCodexThreadError extends Error { readonly code = "CODEX_THREAD_STALE_OR_UNBOUND"; constructor(readonly threadId: string) { super(`Codex thread is stale or unbound: ${threadId}`); this.name = new.target.name; } }
+export class UnknownCodexThreadError extends Error { readonly code = "CODEX_THREAD_NOT_OWNED"; constructor(readonly threadId: string) { super(`Codex thread is not owned by Lane Router: ${threadId}`); this.name = new.target.name; } }
 
 type DynamicToolResult = { success: true; contentItems: readonly [{ type: "inputText"; text: string }] };
 interface CompletedCall { readonly promise: Promise<DynamicToolResult>; readonly expiresAt: number }
 export class CodexDynamicToolDispatcher {
   private readonly inflight = new Map<string, Promise<DynamicToolResult>>();
   private readonly completed = new Map<string, CompletedCall>();
-  constructor(private readonly deps: { resolveThread: (threadId: string) => ToolBindingContext | undefined; call: (name: LaneToolName, args: unknown, context: ToolBindingContext) => unknown | Promise<unknown>; now?: () => number; completedTtlMs?: number; maxCompletedEntries?: number }) {}
+  constructor(private readonly deps: { ownsThread: (threadId: string) => boolean; call: (name: LaneToolName, args: Record<string, unknown>, context: CallerContext) => unknown | Promise<unknown>; now?: () => number; completedTtlMs?: number; maxCompletedEntries?: number }) {}
   dispatch(request: DynamicToolCallParams): Promise<DynamicToolResult> {
     const key = callKey(request);
     const now = this.now();
@@ -36,14 +37,14 @@ export class CodexDynamicToolDispatcher {
     while (this.completed.size > maximum) this.completed.delete(this.completed.keys().next().value as string);
   }
   private now(): number { return (this.deps.now ?? Date.now)(); }
-  private async execute(request: DynamicToolCallParams, operationId: string) {
-    const context = this.deps.resolveThread(request.threadId);
-    if (!context) throw new StaleCodexThreadError(request.threadId);
+  private async execute(request: DynamicToolCallParams, requestKey: string) {
+    if (!this.deps.ownsThread(request.threadId)) throw new UnknownCodexThreadError(request.threadId);
     if (!(LANE_TOOL_NAMES as readonly string[]).includes(request.tool)) throw new Error(`Unknown Lane Router tool: ${request.tool}`);
     const raw = typeof request.arguments === "object" && request.arguments !== null && !Array.isArray(request.arguments) ? request.arguments as Record<string, unknown> : request.arguments;
-    const sanitized = raw && typeof raw === "object" ? Object.fromEntries(Object.entries(raw).filter(([name]) => !["actor", "bindingId", "generation", "threadId"].includes(name))) : raw;
-    const args = sanitized && typeof sanitized === "object" && ["lane_send", "lane_message_claim", "lane_message_ack", "lane_message_park"].includes(request.tool) ? { ...sanitized, operation_id: operationId } : sanitized;
-    const result = await this.deps.call(request.tool as LaneToolName, args, context);
+    if (typeof raw !== "object" || raw === null) throw new Error("Lane tool arguments must be an object");
+    const result = await this.deps.call(request.tool as LaneToolName, raw as Record<string, unknown>, {
+      backend: "codex", conversationId: request.threadId, requestKey,
+    });
     return { success: true as const, contentItems: [{ type: "inputText" as const, text: JSON.stringify(result) }] as const };
   }
 }
