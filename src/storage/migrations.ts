@@ -322,7 +322,35 @@ BEGIN
 END;
 `;
 
-export const LATEST_MIGRATION_VERSION = 4;
+export const MIGRATION_V5_SQL = `
+CREATE TRIGGER IF NOT EXISTS workspace_project_change_must_preserve_declaration_ownership
+BEFORE UPDATE OF project_id ON workspace
+WHEN EXISTS (
+  SELECT 1 FROM project_declaration pd
+  WHERE pd.owner_workspace_id=OLD.id AND pd.project_id IS NOT NEW.project_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'workspace project change would invalidate declaration ownership');
+END;
+
+CREATE INDEX IF NOT EXISTS project_declaration_owner_workspace_idx ON project_declaration(owner_workspace_id);
+CREATE INDEX IF NOT EXISTS workspace_project_idx ON workspace(project_id);
+CREATE INDEX IF NOT EXISTS binding_workspace_idx ON binding(workspace_id);
+CREATE INDEX IF NOT EXISTS message_target_lane_idx ON message(target_lane_id);
+CREATE INDEX IF NOT EXISTS message_sender_binding_idx ON message(sender_binding_id);
+CREATE INDEX IF NOT EXISTS message_reply_to_idx ON message(reply_to);
+CREATE INDEX IF NOT EXISTS message_kind_idx ON message(kind,id);
+CREATE INDEX IF NOT EXISTS delivery_scheduler_order_idx ON delivery(target_lane_id,state,sequence,next_attempt_at);
+CREATE INDEX IF NOT EXISTS delivery_message_idx ON delivery(message_id);
+CREATE INDEX IF NOT EXISTS delivery_recovery_deadline_idx ON delivery(state,deadline_at);
+CREATE INDEX IF NOT EXISTS claim_delivery_idx ON claim(delivery_id);
+CREATE INDEX IF NOT EXISTS claim_recovery_deadline_idx ON claim(closed_at,lease_deadline_at,delivery_id);
+CREATE INDEX IF NOT EXISTS ack_claim_idx ON ack(claim_id);
+CREATE INDEX IF NOT EXISTS event_delivery_idx ON event(delivery_id);
+CREATE INDEX IF NOT EXISTS event_lane_idx ON event(lane_id);
+`;
+
+export const LATEST_MIGRATION_VERSION = 5;
 
 export class DatabaseIntegrityError extends Error {
   constructor(message: string) {
@@ -368,7 +396,43 @@ export function migrateDatabase(database: Database.Database): void {
         database.pragma("user_version = 4");
       })();
     }
+    const versionAfterV4 = database.pragma("user_version", { simple: true }) as number;
+    if (versionAfterV4 === 4) {
+      assertV4Integrity(database);
+      database.transaction(() => {
+        if (!columnExists(database, "event", "lane_id"))
+          database.exec(
+            "ALTER TABLE event ADD COLUMN lane_id TEXT REFERENCES lane(id) ON DELETE RESTRICT",
+          );
+        database.exec(MIGRATION_V5_SQL);
+        backfillEventLaneIds(database);
+        database.pragma("user_version = 5");
+      })();
+    }
   })();
+}
+
+function assertV4Integrity(database: Database.Database): void {
+  assertV3Integrity(database);
+  const invalid = database.prepare(`
+    SELECT pd.project_id FROM project_declaration pd
+    LEFT JOIN workspace w ON w.id=pd.owner_workspace_id
+    WHERE w.id IS NULL OR w.project_id IS NOT pd.project_id
+    LIMIT 1
+  `).get() as { project_id: string } | undefined;
+  if (invalid)
+    throw new DatabaseIntegrityError(
+      `Project ${invalid.project_id} declaration owner crosses workspace ownership`,
+    );
+}
+
+function backfillEventLaneIds(database: Database.Database): void {
+  database.exec(`
+    UPDATE event SET lane_id=COALESCE(
+      (SELECT d.target_lane_id FROM delivery d WHERE d.id=event.delivery_id),
+      (SELECT b.lane_id FROM binding b WHERE b.id=event.binding_id)
+    )
+  `);
 }
 
 function assertV3Integrity(database: Database.Database): void {
@@ -521,6 +585,16 @@ function assertSafeIntegerIntegrity(database: Database.Database): void {
 
 function tableExists(database: Database.Database, table: string): boolean {
   return database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table) !== undefined;
+}
+
+function columnExists(
+  database: Database.Database,
+  table: string,
+  column: string,
+): boolean {
+  return (database.pragma(`table_info(${table})`) as Array<{ name: string }>).some(
+    (candidate) => candidate.name === column,
+  );
 }
 
 function assertV1BindingLifecycleIntegrity(database: Database.Database): void {

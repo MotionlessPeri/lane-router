@@ -10,6 +10,8 @@ import {
   LATEST_MIGRATION_VERSION,
   MIGRATION_V1_SQL,
   MIGRATION_V2_SQL,
+  MIGRATION_V3_SQL,
+  MIGRATION_V4_SQL,
 } from "../../src/storage/migrations.js";
 import { StorageRepositories } from "../../src/storage/repositories.js";
 import { seedStorage } from "../fixtures/storage/seed.js";
@@ -201,7 +203,9 @@ describe("SQLite schema", () => {
 
     const upgraded = openDatabase(path);
     try {
-      expect(upgraded.pragma("user_version", { simple: true })).toBe(4);
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(
+        LATEST_MIGRATION_VERSION,
+      );
       expect(
         upgraded
           .prepare(
@@ -484,7 +488,9 @@ describe("SQLite schema", () => {
 
     const upgraded = openDatabase(path);
     try {
-      expect(upgraded.pragma("user_version", { simple: true })).toBe(4);
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(
+        LATEST_MIGRATION_VERSION,
+      );
       expect(
         upgraded
           .prepare(
@@ -498,6 +504,153 @@ describe("SQLite schema", () => {
       });
     } finally {
       upgraded.close();
+    }
+  });
+
+  it("upgrades a clean v4 database to v5 manifest ownership and index support", () => {
+    const path = temporaryDatabasePath();
+    const v4 = new Database(path);
+    v4.exec(MIGRATION_V1_SQL);
+    v4.exec(MIGRATION_V2_SQL);
+    v4.exec(MIGRATION_V3_SQL);
+    v4.exec(MIGRATION_V4_SQL);
+    v4.pragma("user_version = 4");
+    seedStorage(v4);
+    v4.prepare(
+      "INSERT INTO workspace_manifest(workspace_id,manifest_identity,declaration_digest) VALUES('workspace-1','manifest-1','digest')",
+    ).run();
+    v4.prepare(
+      "INSERT INTO project_declaration(project_id,owner_workspace_id,declaration_digest) VALUES('project-1','workspace-1','digest')",
+    ).run();
+    v4.close();
+
+    const upgraded = openDatabase(path);
+    try {
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(5);
+      expect(
+        (upgraded.pragma("table_info(event)") as Array<{ name: string }>).map(
+          (column) => column.name,
+        ),
+      ).toContain("lane_id");
+      expect(
+        upgraded
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name='workspace_project_change_must_preserve_declaration_ownership'",
+          )
+          .get(),
+      ).toBeDefined();
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("rejects dirty v4 declaration ownership and leaves it repairable", () => {
+    const path = temporaryDatabasePath();
+    const dirty = new Database(path);
+    dirty.exec(MIGRATION_V1_SQL);
+    dirty.exec(MIGRATION_V2_SQL);
+    dirty.exec(MIGRATION_V3_SQL);
+    dirty.exec(MIGRATION_V4_SQL);
+    dirty.pragma("user_version = 4");
+    seedStorage(dirty);
+    dirty.exec(`
+      INSERT INTO project VALUES ('other-project','other','Other','other',1,1);
+      INSERT INTO workspace_manifest VALUES ('workspace-1','manifest-1','digest');
+      INSERT INTO project_declaration VALUES ('project-1','workspace-1','digest');
+      DELETE FROM binding;
+      UPDATE workspace SET project_id='other-project' WHERE id='workspace-1';
+      PRAGMA user_version = 4;
+    `);
+    dirty.close();
+
+    expect(() => {
+      const unexpectedlyOpened = openDatabase(path);
+      unexpectedlyOpened.close();
+    }).toThrow(/declaration.*owner|ownership|integrity/i);
+    const repair = new Database(path);
+    try {
+      expect(repair.pragma("user_version", { simple: true })).toBe(4);
+      expect(
+        repair
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='delivery_scheduler_order_idx'",
+          )
+          .get(),
+      ).toBeUndefined();
+      expect(() =>
+        repair
+          .prepare("UPDATE workspace SET project_id='project-1' WHERE id='workspace-1'")
+          .run(),
+      ).not.toThrow();
+    } finally {
+      repair.close();
+    }
+  });
+
+  it("prevents moving a workspace that owns project declarations", () => {
+    const db = openDatabase(temporaryDatabasePath());
+    try {
+      seedStorage(db);
+      db.exec(`
+        INSERT INTO project VALUES ('other-project','other','Other','other',1,1);
+        INSERT INTO workspace_manifest VALUES ('workspace-1','manifest-1','digest');
+        INSERT INTO project_declaration VALUES ('project-1','workspace-1','digest');
+        DELETE FROM binding;
+      `);
+      expect(() =>
+        db
+          .prepare("UPDATE workspace SET project_id='other-project' WHERE id='workspace-1'")
+          .run(),
+      ).toThrow(/declaration|ownership/i);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("uses v5 indexes for scheduler, recovery, and foreign-key hot paths", () => {
+    const db = openDatabase(temporaryDatabasePath());
+    try {
+      const cases = [
+        [
+          "delivery_scheduler_order_idx",
+          "SELECT id FROM delivery WHERE target_lane_id=? AND state=? ORDER BY sequence",
+          ["lane-1", "pending"],
+        ],
+        [
+          "delivery_recovery_deadline_idx",
+          "SELECT id FROM delivery WHERE state=? AND deadline_at<=?",
+          ["notified", 100],
+        ],
+        [
+          "claim_recovery_deadline_idx",
+          "SELECT id FROM claim WHERE closed_at IS NULL AND lease_deadline_at<=?",
+          [100],
+        ],
+        ["binding_workspace_idx", "SELECT id FROM binding WHERE workspace_id=?", ["workspace-1"]],
+        ["message_target_lane_idx", "SELECT id FROM message WHERE target_lane_id=?", ["lane-1"]],
+        ["message_sender_binding_idx", "SELECT id FROM message WHERE sender_binding_id=?", ["binding-1"]],
+        ["delivery_message_idx", "SELECT id FROM delivery WHERE message_id=?", ["message-1"]],
+        ["claim_delivery_idx", "SELECT id FROM claim WHERE delivery_id=?", ["delivery-1"]],
+        ["ack_claim_idx", "SELECT delivery_id FROM ack WHERE claim_id=?", ["claim-1"]],
+        ["event_delivery_idx", "SELECT id FROM event WHERE delivery_id=?", ["delivery-1"]],
+        ["event_lane_idx", "SELECT id FROM event WHERE lane_id=?", ["lane-1"]],
+      ] as const;
+      for (const [index, sql, parameters] of cases) {
+        const plan = db
+          .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+          .all(...parameters)
+          .map((row) => (row as { detail: string }).detail)
+          .join("\n");
+        expect(plan, sql).toContain(index);
+      }
+      const indexes = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='index'")
+        .all()
+        .map((row) => (row as { name: string }).name);
+      expect(indexes).not.toContain("ack_delivery_idx");
+      expect(indexes).not.toContain("delivery_target_lane_idx");
+    } finally {
+      db.close();
     }
   });
 

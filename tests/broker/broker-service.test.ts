@@ -964,6 +964,166 @@ test("a reopened database preserves which workspace may author declaration chang
   ).toMatchObject({ workspaceId: "owner" });
 });
 
+test("owner sync transactionally removes safe lanes and adds their replacements", () => {
+  const service = createService();
+  const manifest = {
+    projectId: "p",
+    projectKey: "project",
+    displayName: "Project",
+    manifestHash: "v1",
+    manifestVersion: 1,
+    lanes: [
+      { name: "a", roleFile: "a.md", communicationEntry: true },
+      { name: "obsolete", roleFile: "obsolete.md", communicationEntry: false },
+    ],
+  };
+  service.syncProject({
+    operationId: "reconcile-v1",
+    adminId: "admin",
+    workspaceId: "owner",
+    rootPath: "C:/owner",
+    manifest,
+  });
+  service.syncProject({
+    operationId: "reconcile-v2",
+    adminId: "admin",
+    workspaceId: "owner",
+    rootPath: "C:/owner",
+    manifest: {
+      ...manifest,
+      manifestHash: "v2",
+      manifestVersion: 2,
+      lanes: [
+        { name: "a", roleFile: "a-v2.md", communicationEntry: true },
+        { name: "replacement", roleFile: "new.md", communicationEntry: false },
+      ],
+    },
+  });
+  expect(
+    service.database
+      .prepare("SELECT name,role_document FROM lane WHERE project_id='p' ORDER BY name")
+      .all(),
+  ).toEqual([
+    { name: "a", role_document: "a-v2.md" },
+    { name: "replacement", role_document: "new.md" },
+  ]);
+});
+
+test("owner sync rejects removal with binding history without partial digest updates", () => {
+  const service = createTwoLaneService();
+  const before = service.database
+    .prepare(
+      "SELECT manifest_identity,manifest_version FROM project WHERE id='p'",
+    )
+    .get();
+  const declarationBefore = service.database
+    .prepare(
+      "SELECT declaration_digest FROM project_declaration WHERE project_id='p'",
+    )
+    .get();
+  expect(() =>
+    service.syncProject({
+      operationId: "unsafe-remove",
+      adminId: "admin",
+      workspaceId: "w",
+      rootPath: "C:/repo",
+      manifest: {
+        projectId: "p",
+        projectKey: "project",
+        displayName: "Project",
+        manifestHash: "unsafe-v2",
+        manifestVersion: 2,
+        lanes: [
+          { name: "a", roleFile: "a-v2.md", communicationEntry: true },
+        ],
+      },
+    }),
+  ).toThrow(/lane.*dependency|remove.*lane|declaration.*conflict/i);
+  expect(
+    service.database
+      .prepare("SELECT name,role_document FROM lane WHERE project_id='p' ORDER BY name")
+      .all(),
+  ).toEqual([
+    { name: "a", role_document: "a.md" },
+    { name: "b", role_document: "b.md" },
+  ]);
+  expect(
+    service.database
+      .prepare(
+        "SELECT manifest_identity,manifest_version FROM project WHERE id='p'",
+      )
+      .get(),
+  ).toEqual(before);
+  expect(
+    service.database
+      .prepare(
+        "SELECT declaration_digest FROM project_declaration WHERE project_id='p'",
+      )
+      .get(),
+  ).toEqual(declarationBefore);
+});
+
+test("safe lane reconciliation remains authoritative after database reopen", () => {
+  const directory = mkdtempSync(join(tmpdir(), "lane-router-lane-reconcile-"));
+  temporaryDirectories.push(directory);
+  const path = join(directory, "router.sqlite");
+  let database = openDatabase(path);
+  let service = new BrokerService(database, { now: () => 100 });
+  const base = {
+    projectId: "p",
+    projectKey: "project",
+    displayName: "Project",
+    manifestHash: "v1",
+    manifestVersion: 1,
+    lanes: [
+      { name: "keep", roleFile: "keep.md", communicationEntry: true },
+      { name: "remove", roleFile: "remove.md", communicationEntry: false },
+    ],
+  };
+  service.syncProject({
+    operationId: "disk-reconcile-v1",
+    adminId: "admin",
+    workspaceId: "owner",
+    rootPath: "C:/owner",
+    manifest: base,
+  });
+  service.syncProject({
+    operationId: "disk-reconcile-v2",
+    adminId: "admin",
+    workspaceId: "owner",
+    rootPath: "C:/owner",
+    manifest: {
+      ...base,
+      manifestHash: "v2",
+      manifestVersion: 2,
+      lanes: [
+        { name: "keep", roleFile: "keep.md", communicationEntry: true },
+      ],
+    },
+  });
+  database.close();
+  database = openDatabase(path);
+  databases.push(database);
+  service = new BrokerService(database, { now: () => 200 });
+  expect(
+    service.database
+      .prepare("SELECT name FROM lane WHERE project_id='p' ORDER BY name")
+      .all(),
+  ).toEqual([{ name: "keep" }]);
+  expect(
+    service.syncProject({
+      operationId: "disk-identical-clone",
+      adminId: "admin",
+      workspaceId: "clone",
+      rootPath: "C:/clone",
+      manifest: { ...base, manifestHash: "clone", manifestVersion: 2, lanes: base.lanes.slice(0, 1) },
+    }),
+  ).toMatchObject({ workspaceId: "clone" });
+  expect(
+    service.database.prepare("SELECT name FROM lane WHERE project_id='p'").all(),
+  ).toEqual([{ name: "keep" }]);
+});
+
 test("relink requires acknowledgement of an exact preflight digest", () => {
   const service = createTwoLaneService();
   const preview = service.previewRelink({

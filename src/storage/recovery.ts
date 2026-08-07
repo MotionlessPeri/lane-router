@@ -85,12 +85,13 @@ export function recoverDatabase(
         recovered.id,
       );
       database.prepare(`
-        INSERT INTO event (event_type, binding_id, delivery_id, claim_id, occurred_at, details_json)
-        VALUES (?, NULL, ?, ?, ?, ?)
+        INSERT INTO event (event_type, binding_id, delivery_id, claim_id, lane_id, occurred_at, details_json)
+        VALUES (?, NULL, ?, ?, ?, ?, ?)
       `).run(
         recovered.status === "parked" ? "recovery_parked" : "recovery_requeued",
         recovered.id,
         current.status === "claimed" ? current.claimId : null,
+        row.target_lane_id,
         config.now,
         canonicalJson({
           priorState: current.status,

@@ -391,9 +391,9 @@ export class StorageRepositories {
     details: unknown,
   ): void {
     this.database.prepare(`
-      INSERT INTO event (event_type, binding_id, delivery_id, claim_id, occurred_at, details_json)
-      VALUES (?, NULL, ?, ?, ?, ?)
-    `).run(eventType, deliveryId, claimId, occurredAt, canonicalJson(details));
+      INSERT INTO event (event_type, binding_id, delivery_id, claim_id, lane_id, occurred_at, details_json)
+      VALUES (?, NULL, ?, ?, (SELECT target_lane_id FROM delivery WHERE id=?), ?, ?)
+    `).run(eventType, deliveryId, claimId, deliveryId, occurredAt, canonicalJson(details));
   }
 
   private requireCurrentBoundBindingForDelivery(
@@ -486,9 +486,9 @@ export class StorageRepositories {
     details: unknown,
   ): void {
     this.database.prepare(`
-      INSERT INTO event (event_type, binding_id, delivery_id, claim_id, occurred_at, details_json)
-      VALUES (?, ?, NULL, NULL, ?, ?)
-    `).run(eventType, bindingId, occurredAt, canonicalJson(details));
+      INSERT INTO event (event_type, binding_id, delivery_id, claim_id, lane_id, occurred_at, details_json)
+      VALUES (?, ?, NULL, NULL, (SELECT lane_id FROM binding WHERE id=?), ?, ?)
+    `).run(eventType, bindingId, bindingId, occurredAt, canonicalJson(details));
   }
 }
 

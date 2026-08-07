@@ -230,6 +230,8 @@ export class BrokerService {
                 1,
                 this.now(),
               );
+          if (authorsDeclaration)
+            this.reconcileLaneSet(m.projectId, m.lanes);
           this.database
             .prepare(
               "INSERT INTO workspace_manifest(workspace_id,manifest_identity,declaration_digest) VALUES(?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET manifest_identity=excluded.manifest_identity,declaration_digest=excluded.declaration_digest",
@@ -247,19 +249,6 @@ export class BrokerService {
                 "UPDATE project_declaration SET declaration_digest=? WHERE project_id=?",
               )
               .run(incomingDigest, m.projectId);
-          if (authorsDeclaration)
-            for (const lane of m.lanes)
-              this.database
-                .prepare(
-                  "INSERT INTO lane(id,project_id,name,role_document,communication_entry) VALUES(?,?,?,?,?) ON CONFLICT(project_id,name) DO UPDATE SET role_document=excluded.role_document,communication_entry=excluded.communication_entry",
-                )
-                .run(
-                  `${m.projectId}/${lane.name}`,
-                  m.projectId,
-                  lane.name,
-                  lane.roleFile,
-                  Number(lane.communicationEntry),
-                );
           return {
             projectId: m.projectId,
             workspaceId: input.workspaceId,
@@ -883,6 +872,46 @@ export class BrokerService {
       .get(address) as { id: string } | undefined;
     if (!row) throw new Error(`Unknown lane ${address}`);
     return row.id;
+  }
+  private reconcileLaneSet(
+    projectId: string,
+    lanes: ProjectManifest["lanes"],
+  ): void {
+    const incomingNames = new Set(lanes.map((lane) => lane.name));
+    const removed = (
+      this.database
+        .prepare("SELECT id,name FROM lane WHERE project_id=? ORDER BY name")
+        .all(projectId) as Array<{ id: string; name: string }>
+    ).filter((lane) => !incomingNames.has(lane.name));
+    for (const lane of removed) {
+      const dependency = this.database
+        .prepare(`
+          SELECT
+            EXISTS(SELECT 1 FROM binding WHERE lane_id=?)
+            OR EXISTS(SELECT 1 FROM message WHERE target_lane_id=?)
+            OR EXISTS(SELECT 1 FROM delivery WHERE target_lane_id=?)
+            OR EXISTS(SELECT 1 FROM event WHERE lane_id=?) AS blocked
+        `)
+        .get(lane.id, lane.id, lane.id, lane.id) as { blocked: number };
+      if (dependency.blocked)
+        throw new BrokerContractError(
+          `Cannot remove lane ${lane.name}; durable dependencies exist`,
+        );
+    }
+    for (const lane of removed)
+      this.database.prepare("DELETE FROM lane WHERE id=?").run(lane.id);
+    for (const lane of lanes)
+      this.database
+        .prepare(
+          "INSERT INTO lane(id,project_id,name,role_document,communication_entry) VALUES(?,?,?,?,?) ON CONFLICT(project_id,name) DO UPDATE SET role_document=excluded.role_document,communication_entry=excluded.communication_entry",
+        )
+        .run(
+          `${projectId}/${lane.name}`,
+          projectId,
+          lane.name,
+          lane.roleFile,
+          Number(lane.communicationEntry),
+        );
   }
   private addressFor(laneId: string): string {
     const row = this.database

@@ -259,6 +259,7 @@ export const brokerEventSchema = z
     bindingId: text.nullable(),
     deliveryId: text.nullable(),
     claimId: text.nullable(),
+    laneId: text.nullable(),
     occurredAt: safeInteger,
     details: z.json(),
   })

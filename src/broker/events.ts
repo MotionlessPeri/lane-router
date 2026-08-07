@@ -8,6 +8,7 @@ export interface BrokerEvent {
   readonly bindingId: string | null;
   readonly deliveryId: string | null;
   readonly claimId: string | null;
+  readonly laneId: string | null;
   readonly occurredAt: number;
   readonly details: JsonValue;
 }
@@ -21,17 +22,31 @@ export function appendEvent(
     bindingId?: string;
     deliveryId?: string;
     claimId?: string;
+    laneId?: string;
   } = {},
 ): void {
+  const laneId = references.laneId
+    ?? (references.deliveryId === undefined
+      ? undefined
+      : (database.prepare("SELECT target_lane_id FROM delivery WHERE id=?").get(
+          references.deliveryId,
+        ) as { target_lane_id: string } | undefined)?.target_lane_id)
+    ?? (references.bindingId === undefined
+      ? undefined
+      : (database.prepare("SELECT lane_id FROM binding WHERE id=?").get(
+          references.bindingId,
+        ) as { lane_id: string } | undefined)?.lane_id)
+    ?? null;
   database
     .prepare(
-      "INSERT INTO event (event_type,binding_id,delivery_id,claim_id,occurred_at,details_json) VALUES (?,?,?,?,?,?)",
+      "INSERT INTO event (event_type,binding_id,delivery_id,claim_id,lane_id,occurred_at,details_json) VALUES (?,?,?,?,?,?,?)",
     )
     .run(
       type,
       references.bindingId ?? null,
       references.deliveryId ?? null,
       references.claimId ?? null,
+      laneId,
       occurredAt,
       canonicalJson(details),
     );
@@ -44,7 +59,7 @@ export function listEvents(
 ): BrokerEvent[] {
   const rows = database
     .prepare(
-      "SELECT id,event_type,binding_id,delivery_id,claim_id,occurred_at,details_json FROM event WHERE id>? ORDER BY id LIMIT ?",
+      "SELECT id,event_type,binding_id,delivery_id,claim_id,lane_id,occurred_at,details_json FROM event WHERE id>? ORDER BY id LIMIT ?",
     )
     .all(afterId, Math.max(1, Math.min(limit, 1000))) as Array<
     Record<string, unknown>
@@ -55,6 +70,7 @@ export function listEvents(
     bindingId: row.binding_id as string | null,
     deliveryId: row.delivery_id as string | null,
     claimId: row.claim_id as string | null,
+    laneId: row.lane_id as string | null,
     occurredAt: row.occurred_at as number,
     details: JSON.parse(row.details_json as string) as JsonValue,
   }));
