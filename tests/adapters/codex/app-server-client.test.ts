@@ -291,10 +291,16 @@ test("capability gate resolves a PATH executable before fingerprinting", async (
   expect(viaPath.cached).toBe(true);
 });
 
+test("capability gate accepts the current 349-file Codex schema corpus", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lane-router-capability-current-corpus-")); dirs.push(root);
+  const report = await new CodexCapabilityGate({ cacheDir: join(root, "cache") }).verify(fakeCommand({ FAKE_CODEX_SCHEMA_FILE_COUNT: "349" }));
+  expect(report.version).toBe("codex-cli 0.146.1-fake");
+});
+
 test("capability gate rejects excessive schema files and a symlink cache entry", async () => {
   const root = await mkdtemp(join(tmpdir(), "lane-router-capability-bounds-")); dirs.push(root);
   const gate = new CodexCapabilityGate({ cacheDir: join(root, "cache") });
-  await expect(gate.verify(fakeCommand({ FAKE_CODEX_SCHEMA_MANY_FILES: "1" }))).rejects.toBeInstanceOf(CodexCapabilityError);
+  await expect(gate.verify(fakeCommand({ FAKE_CODEX_SCHEMA_FILE_COUNT: "513" }))).rejects.toBeInstanceOf(CodexCapabilityError);
   const cacheDir = join(root, "symlink-cache");
   await import("node:fs/promises").then(({ mkdir }) => mkdir(cacheDir));
   const target = join(root, "target-dir");

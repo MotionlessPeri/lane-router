@@ -16,7 +16,8 @@ if (args[0] === "app-server" && args[1] === "generate-json-schema") {
   const methods = compatible ? ["initialize", "thread/start", "thread/resume", "thread/read", "turn/start", "turn/steer"] : ["initialize"];
   const decoy = process.env.FAKE_CODEX_SCHEMA === "decoy";
   const format = process.env.FAKE_CODEX_FORMAT === "pretty" ? 2 : undefined;
-  const emit = (path, value) => writeFile(path, JSON.stringify(value, null, format));
+  let emittedFiles = 0;
+  const emit = async (path, value) => { await writeFile(path, JSON.stringify(value, null, format)); emittedFiles += 1; };
   const requestBranch = (method) => ({ type: "object", required: ["id", "method", "params"], properties: { id: { type: ["string", "number"] }, method: { enum: [method] }, params: { type: "object" } } });
   await emit(`${out}/ClientRequest.json`, decoy ? { description: methods.join(" "), oneOf: [{ type: "string" }] } : { oneOf: methods.map(requestBranch) });
   await emit(`${out}/ServerRequest.json`, decoy ? { description: "item/tool/call", oneOf: [] } : { oneOf: compatible ? [requestBranch("item/tool/call")] : [] });
@@ -47,7 +48,8 @@ if (args[0] === "app-server" && args[1] === "generate-json-schema") {
     ? { type: "object", required: ["contentItems", "success"], properties: { contentItems: { type: "array", items: { type: "string" } }, success: { type: "string" } } }
     : { type: "object", required: ["contentItems", "success"], properties: { contentItems: { type: "array", items: toolContentItem }, success: { type: "boolean" } } });
   for (const [name, required] of Object.entries({ ThreadStatusChangedNotification: ["threadId", "status"], TurnStartedNotification: ["threadId", "turn"], TurnCompletedNotification: ["threadId", "turn"], ItemStartedNotification: ["threadId", "turnId", "item"], ItemCompletedNotification: ["threadId", "turnId", "item"] })) await emit(`${out}/v2/${name}.json`, { type: "object", required, properties: Object.fromEntries(required.map((field) => [field, ["threadId", "turnId"].includes(field) ? { type: "string" } : { type: "object" }])) });
-  if (process.env.FAKE_CODEX_SCHEMA_MANY_FILES === "1") for (let index = 0; index < 300; index += 1) await emit(`${out}/extra-${index}.json`, {});
+  const desiredFileCount = Number(process.env.FAKE_CODEX_SCHEMA_FILE_COUNT ?? (process.env.FAKE_CODEX_SCHEMA_MANY_FILES === "1" ? "513" : emittedFiles));
+  for (let index = emittedFiles; index < desiredFileCount; index += 1) await emit(`${out}/extra-${index}.json`, {});
   process.exit(0);
 }
 if (args[0] === "app-server") {

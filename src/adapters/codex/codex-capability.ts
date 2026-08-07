@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const MAX_SCHEMA_FILES = 256;
+const MAX_SCHEMA_FILES = 512;
 const MAX_SCHEMA_BYTES = 16 * 1024 * 1024;
 const MAX_SCHEMA_DEPTH = 16;
 const REQUIRED_METHODS = ["initialize", "thread/start", "thread/resume", "thread/read", "turn/start", "turn/steer", "item/tool/call"] as const;
