@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
 
 import { ensureRouter } from "./ensure-router.js";
 import { LocalRouterClient } from "./local-client.js";
@@ -35,7 +35,7 @@ const defaults: LauncherDependencies = {
   }),
 };
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   launchCodex(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (error) => {
     process.stderr.write(`${error instanceof Error ? error.message : "lane-router-codex failed"}\n`);
     process.exitCode = 1;

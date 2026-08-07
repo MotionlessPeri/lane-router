@@ -1,6 +1,29 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { expect, test, vi } from "vitest";
 
 import { launchCodex } from "../../src/process/codex-launcher.js";
+
+test("runs the CLI entrypoint when the package is reached through a symlink", () => {
+  const root = mkdtempSync(join(tmpdir(), "lane-router-codex-link-"));
+  try {
+    const linkedPackage = join(root, "lane-router");
+    symlinkSync(process.cwd(), linkedPackage, process.platform === "win32" ? "junction" : "dir");
+
+    const result = spawnSync(process.execPath, [
+      resolve("node_modules/tsx/dist/cli.mjs"),
+      join(linkedPackage, "src/process/codex-launcher.ts"),
+      "status",
+    ], { encoding: "utf8" });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/usage/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("creates an unbound Router-owned thread and opens the stock remote TUI", async () => {
   const client = { createCodexThread: vi.fn(async () => "thread-new"), resumeCodexThread: vi.fn() };
