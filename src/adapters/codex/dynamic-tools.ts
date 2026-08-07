@@ -9,16 +9,33 @@ export function codexDynamicTools(): readonly CodexDynamicTool[] {
 }
 export class StaleCodexThreadError extends Error { readonly code = "CODEX_THREAD_STALE_OR_UNBOUND"; constructor(readonly threadId: string) { super(`Codex thread is stale or unbound: ${threadId}`); this.name = new.target.name; } }
 
+type DynamicToolResult = { success: true; contentItems: readonly [{ type: "inputText"; text: string }] };
+interface CompletedCall { readonly promise: Promise<DynamicToolResult>; readonly expiresAt: number }
 export class CodexDynamicToolDispatcher {
-  private readonly completed = new Map<string, Promise<{ success: true; contentItems: readonly [{ type: "inputText"; text: string }] }>>();
-  constructor(private readonly deps: { resolveThread: (threadId: string) => ToolBindingContext | undefined; call: (name: LaneToolName, args: unknown, context: ToolBindingContext) => unknown | Promise<unknown> }) {}
-  dispatch(request: DynamicToolCallParams): Promise<{ success: true; contentItems: readonly [{ type: "inputText"; text: string }] }> {
-    const key = `codex:${request.threadId}:${request.turnId}:${request.callId}`;
-    const replay = this.completed.get(key); if (replay) return replay;
+  private readonly inflight = new Map<string, Promise<DynamicToolResult>>();
+  private readonly completed = new Map<string, CompletedCall>();
+  constructor(private readonly deps: { resolveThread: (threadId: string) => ToolBindingContext | undefined; call: (name: LaneToolName, args: unknown, context: ToolBindingContext) => unknown | Promise<unknown>; now?: () => number; completedTtlMs?: number; maxCompletedEntries?: number }) {}
+  dispatch(request: DynamicToolCallParams): Promise<DynamicToolResult> {
+    const key = callKey(request);
+    const now = this.now();
+    const replay = this.completed.get(key);
+    if (replay && replay.expiresAt > now) { this.completed.delete(key); this.completed.set(key, replay); return replay.promise; }
+    if (replay) this.completed.delete(key);
+    const active = this.inflight.get(key); if (active) return active;
     const operation = this.execute(request, key);
-    this.completed.set(key, operation);
+    this.inflight.set(key, operation);
+    void operation.then(() => this.complete(key, operation), () => this.complete(key, operation));
     return operation;
   }
+  clear(): void { this.inflight.clear(); this.completed.clear(); }
+  private complete(key: string, operation: Promise<DynamicToolResult>): void {
+    if (this.inflight.get(key) !== operation) return;
+    this.inflight.delete(key);
+    this.completed.set(key, { promise: operation, expiresAt: this.now() + (this.deps.completedTtlMs ?? 5 * 60_000) });
+    const maximum = this.deps.maxCompletedEntries ?? 1_024;
+    while (this.completed.size > maximum) this.completed.delete(this.completed.keys().next().value as string);
+  }
+  private now(): number { return (this.deps.now ?? Date.now)(); }
   private async execute(request: DynamicToolCallParams, operationId: string) {
     const context = this.deps.resolveThread(request.threadId);
     if (!context) throw new StaleCodexThreadError(request.threadId);
@@ -30,3 +47,5 @@ export class CodexDynamicToolDispatcher {
     return { success: true as const, contentItems: [{ type: "inputText" as const, text: JSON.stringify(result) }] as const };
   }
 }
+
+function callKey(request: DynamicToolCallParams): string { return `codex:${JSON.stringify([request.threadId, request.turnId, request.callId])}`; }

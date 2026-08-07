@@ -72,6 +72,119 @@ test("client initializes, correlates responses, emits notifications, and answers
   await client.close();
 });
 
+test("concurrent connect coalesces until initialize is ready", async () => {
+  let initializeId: string | number | undefined;
+  let initializeSocket: import("ws").WebSocket | undefined;
+  let initializeCount = 0;
+  const url = await server((message, socket) => {
+    if (message.method === "initialize") { initializeCount += 1; initializeId = message.id as string | number; initializeSocket = socket; }
+  });
+  const client = new AppServerClient({ url, requestTimeoutMs: 1_000 });
+  const first = client.connect();
+  await vi.waitFor(() => expect(initializeCount).toBe(1));
+  const second = client.connect();
+  let secondResolved = false;
+  void second.then(() => { secondResolved = true; });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(client.isConnected()).toBe(false);
+  expect(secondResolved).toBe(false);
+  initializeSocket?.send(JSON.stringify({ id: initializeId, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
+  await Promise.all([first, second]);
+  expect(initializeCount).toBe(1);
+  expect(client.isConnected()).toBe(true);
+  await client.close();
+});
+
+test("failed initialize closes its socket and a later connect initializes a new one", async () => {
+  let connectionCount = 0;
+  let initializeCount = 0;
+  const instance = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  servers.push(instance);
+  await new Promise<void>((resolve) => instance.once("listening", resolve));
+  instance.on("connection", (socket) => {
+    connectionCount += 1;
+    socket.on("message", (data) => {
+      const message = JSON.parse(data.toString()) as Record<string, unknown>;
+      if (message.method !== "initialize") return;
+      initializeCount += 1;
+      socket.send(JSON.stringify(initializeCount === 1
+        ? { id: message.id, error: { code: -32000, message: "init rejected" } }
+        : { id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
+    });
+  });
+  const address = instance.address();
+  if (typeof address === "string" || address === null) throw new Error("missing port");
+  const client = new AppServerClient({ url: `ws://127.0.0.1:${address.port}`, requestTimeoutMs: 1_000 });
+  await expect(client.connect()).rejects.toThrow("init rejected");
+  expect(client.isConnected()).toBe(false);
+  await client.connect();
+  expect(connectionCount).toBe(2);
+  expect(initializeCount).toBe(2);
+  await client.close();
+});
+
+test("an old server request cannot answer a reconnected socket with the same id", async () => {
+  let connection = 0;
+  const received: Array<{ connection: number; message: Record<string, unknown> }> = [];
+  const instance = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  servers.push(instance);
+  await new Promise<void>((resolve) => instance.once("listening", resolve));
+  instance.on("connection", (socket) => {
+    const current = ++connection;
+    socket.on("message", (data) => {
+      const message = JSON.parse(data.toString()) as Record<string, unknown>;
+      received.push({ connection: current, message });
+      if (message.method === "initialize") {
+        socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
+        socket.send(JSON.stringify({ id: "same", method: "item/tool/call", params: { threadId: "th", turnId: "tu", callId: `call-${current}`, tool: "lane_status", arguments: {} } }));
+      }
+    });
+  });
+  const address = instance.address();
+  if (typeof address === "string" || address === null) throw new Error("missing port");
+  const client = new AppServerClient({ url: `ws://127.0.0.1:${address.port}`, requestTimeoutMs: 1_000 });
+  let releaseFirst: (() => void) | undefined;
+  let firstStarted = false;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  client.onServerRequest(async (request) => {
+    if (request.params.callId === "call-1") { firstStarted = true; await firstBlocked; return { owner: 1 }; }
+    return { owner: 2 };
+  });
+  await client.connect();
+  await vi.waitFor(() => expect(firstStarted).toBe(true));
+  for (const socket of instance.clients) socket.close();
+  await vi.waitFor(() => expect(client.isConnected()).toBe(false));
+  await client.connect();
+  await vi.waitFor(() => expect(received.filter(({ connection: owner, message }) => owner === 2 && message.id === "same")).toHaveLength(1));
+  releaseFirst?.();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(received.filter(({ connection: owner, message }) => owner === 2 && message.id === "same")).toEqual([
+    expect.objectContaining({ message: expect.objectContaining({ result: { owner: 2 } }) }),
+  ]);
+  await client.close();
+});
+
+test("transport loss is observable once and intentional close is silent", async () => {
+  let activeSocket: import("ws").WebSocket | undefined;
+  const url = await server((message, socket) => {
+    activeSocket = socket;
+    if (message.method === "initialize") socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
+  });
+  const client = new AppServerClient({ url, requestTimeoutMs: 1_000 });
+  const losses: string[] = [];
+  const unsubscribe = client.onTransportLoss((event) => losses.push(event.reason));
+  await client.connect();
+  activeSocket?.close();
+  await vi.waitFor(() => expect(losses).toHaveLength(1));
+  await client.connect();
+  activeSocket?.close();
+  await vi.waitFor(() => expect(losses).toHaveLength(2));
+  await client.connect();
+  await client.close();
+  expect(losses).toHaveLength(2);
+  unsubscribe();
+});
+
 test("timeouts, disconnects, and shutdown reject pending requests", async () => {
   let socket: import("ws").WebSocket | undefined;
   const url = await server((message, current) => {
