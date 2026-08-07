@@ -5,7 +5,7 @@ interface Client { request(method: string, params: unknown): Promise<unknown>; i
 interface Binding { readonly threadId: string }
 
 export class CodexAdapter implements DeliveryAdapter {
-  constructor(private readonly deps: { client: Client; resolveBinding: (laneId: string, generation: number) => Binding | undefined; loadMessage: (messageId: string) => string | Promise<string>; beforeClaim?: (request: AdapterDeliveryRequest, turnId: string) => void | Promise<void> }) {}
+  constructor(private readonly deps: { client: Client; resolveBinding: (laneId: string, generation: number) => Binding | undefined; beforeClaim?: (request: AdapterDeliveryRequest, turnId: string) => void | Promise<void> }) {}
 
   async startThread(options: { cwd: string }): Promise<string> {
     const response = record(await this.deps.client.request("thread/start", { cwd: options.cwd, dynamicTools: codexDynamicTools() }));
@@ -31,15 +31,15 @@ export class CodexAdapter implements DeliveryAdapter {
     catch (error) { return isMissingThread(error) ? "binding_not_found" : "stored_pending"; }
     if (state.availability !== "online") return "stored_pending";
     if (state.turn === "busy" && request.kind === "normal") return "queued_next_turn";
-    const body = await this.deps.loadMessage(request.messageId);
+    const wake = wakeEnvelope(request);
     try {
       if (state.turn === "busy") {
         const read = record(await this.deps.client.request("thread/read", { threadId: binding.threadId, includeTurns: true }));
         const expectedTurnId = activeTurnId(read);
-        await this.deps.client.request("turn/steer", { threadId: binding.threadId, expectedTurnId, input: [{ type: "text", text: body }] });
+        await this.deps.client.request("turn/steer", { threadId: binding.threadId, expectedTurnId, input: [{ type: "text", text: wake }] });
         return "applied_current_turn";
       }
-      const response = record(await this.deps.client.request("turn/start", { threadId: binding.threadId, input: [{ type: "text", text: body }] }));
+      const response = record(await this.deps.client.request("turn/start", { threadId: binding.threadId, input: [{ type: "text", text: wake }] }));
       const turn = record(response.turn); if (typeof turn.id !== "string") throw new Error("turn/start response lacks turn.id");
       await this.deps.beforeClaim?.(request, turn.id);
       return "started_new_turn";
@@ -65,3 +65,9 @@ function activeTurnId(response: Record<string, unknown>): string {
   throw new Error("Codex thread is busy but has no authoritative in-progress turn");
 }
 function isMissingThread(error: unknown): boolean { return error instanceof Error && /not found|unknown thread/i.test(error.message); }
+function wakeEnvelope(request: AdapterDeliveryRequest): string {
+  const deliveryIds = [...(request.deliveryIds ?? [request.deliveryId])];
+  const messageIds = [...(request.messageIds ?? [request.messageId])];
+  if (!deliveryIds.length || deliveryIds.length !== messageIds.length || deliveryIds[0] !== request.deliveryId || messageIds[0] !== request.messageId) throw new Error("Codex wake batch IDs are inconsistent");
+  return JSON.stringify({ deliveryIds, messageIds });
+}

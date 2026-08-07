@@ -170,11 +170,13 @@ export class CodexAppServerProcess {
   private restartAbort?: AbortController;
   private restartTask?: Promise<void>;
   private endpoint?: string;
+  private readonly reconnectHandlers = new Set<() => void>();
   private readonly _client: AppServerClient;
   get client(): AppServerClient { return this._client; }
   constructor(private readonly options: { command: CodexCommand; gate: CodexCapabilityGate; readinessTimeoutMs?: number; restartLimit?: number; restartBackoffMs?: number; spawnProcess?: typeof spawn; onReconnect?: () => void }) {
     this._client = new AppServerClient({ url: "ws://127.0.0.1:0", requestTimeoutMs: options.readinessTimeoutMs ?? 5_000 });
   }
+  onReconnect(handler: () => void): () => void { this.reconnectHandlers.add(handler); return () => this.reconnectHandlers.delete(handler); }
   async start(): Promise<string> {
     const epoch = ++this.lifecycleEpoch;
     this.started = true;
@@ -254,6 +256,7 @@ export class CodexAppServerProcess {
         await this.spawnManaged(epoch);
         if (!this.isActive(epoch) || signal.aborted) return;
         this.options.onReconnect?.();
+        for (const handler of this.reconnectHandlers) handler();
         return;
       } catch (error) {
         if (!this.isActive(epoch) || signal.aborted) return;
