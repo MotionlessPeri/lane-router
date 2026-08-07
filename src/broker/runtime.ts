@@ -72,6 +72,13 @@ export interface BrokerRuntimeLock {
   readonly instanceId: string;
   release(): void;
 }
+export interface BrokerLockOwner {
+  readonly pid: number;
+  readonly instanceId: string;
+  readonly processStart: string;
+  readonly createdAt: number;
+  readonly heartbeatAt: number;
+}
 
 export async function acquireRuntimeLock(
   dataDir: string,
@@ -79,60 +86,194 @@ export async function acquireRuntimeLock(
     pid?: number;
     instanceId?: string;
     isPidAlive?: (pid: number) => boolean;
+    processStart?: string;
+    now?: () => number;
+    verifyOwner?: (owner: BrokerLockOwner) => boolean;
+    staleAfterMs?: number;
+    malformedStaleAfterMs?: number;
+    heartbeatIntervalMs?: number;
   } = {},
 ): Promise<BrokerRuntimeLock> {
   await mkdir(dataDir, { recursive: true });
   const path = join(dataDir, "broker.lock");
+  const markerPath = join(dataDir, "broker.lock.reclaim");
   const pid = options.pid ?? process.pid;
   const instanceId = options.instanceId ?? randomBytes(16).toString("hex");
   const isPidAlive = options.isPidAlive ?? defaultPidLiveness;
+  const now = options.now ?? Date.now;
+  const staleAfterMs = options.staleAfterMs ?? 15_000;
+  const malformedStaleAfterMs = options.malformedStaleAfterMs ?? 5_000;
+  const processStart =
+    options.processStart ??
+    `${pid}:${Math.floor(Date.now() - process.uptime() * 1000)}`;
   for (;;) {
+    if (existsSync(markerPath)) {
+      await yieldTurn();
+      continue;
+    }
     try {
-      const descriptor = openSync(
+      const owned = createOwnedLock(
         path,
-        constants.O_CREAT | constants.O_EXCL | constants.O_RDWR,
-        0o600,
+        markerPath,
+        { pid, instanceId, processStart, createdAt: now(), heartbeatAt: now() },
+        options.heartbeatIntervalMs ??
+          Math.max(250, Math.floor(staleAfterMs / 3)),
+        now,
       );
-      writeFileSync(
-        descriptor,
-        JSON.stringify({ pid, instanceId, createdAt: Date.now() }),
-        "utf8",
-      );
-      let released = false;
-      return {
-        path,
-        instanceId,
-        release() {
-          if (released) return;
-          released = true;
-          closeSync(descriptor);
-          try {
-            const current = JSON.parse(readFileSync(path, "utf8")) as {
-              instanceId?: string;
-            };
-            if (current.instanceId === instanceId) unlinkSync(path);
-          } catch {
-            /* already removed */
-          }
-        },
-      };
+      if (owned) return owned;
+      await yieldTurn();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      let owner: { pid: number; instanceId: string };
+      let observed: string;
+      let owner: BrokerLockOwner | null = null;
       try {
-        owner = JSON.parse(readFileSync(path, "utf8")) as typeof owner;
+        observed = readFileSync(path, "utf8");
+        owner = parseOwner(observed);
       } catch {
+        await yieldTurn();
         continue;
       }
-      if (Number.isInteger(owner.pid) && isPidAlive(owner.pid))
-        throw new BrokerAlreadyRunningError(owner);
+      if (owner) {
+        const alive = options.verifyOwner
+          ? options.verifyOwner(owner)
+          : isPidAlive(owner.pid) && now() - owner.heartbeatAt <= staleAfterMs;
+        if (alive) throw new BrokerAlreadyRunningError(owner);
+      } else if (now() - statSync(path).mtimeMs < malformedStaleAfterMs) {
+        throw new BrokerAlreadyRunningError({ pid: -1, instanceId: "unknown" });
+      }
+      let marker: number;
       try {
-        unlinkSync(path);
-      } catch {
+        marker = openSync(
+          markerPath,
+          constants.O_CREAT | constants.O_EXCL | constants.O_RDWR,
+          0o600,
+        );
+        writeFileSync(marker, instanceId, "utf8");
+      } catch (markerError) {
+        if ((markerError as NodeJS.ErrnoException).code !== "EEXIST")
+          throw markerError;
+        await yieldTurn();
         continue;
+      }
+      const tombstone = join(
+        dataDir,
+        `broker.lock.stale-${instanceId}-${randomBytes(6).toString("hex")}`,
+      );
+      try {
+        if (readFileSync(path, "utf8") !== observed) continue;
+        renameSync(path, tombstone);
+        for (;;) {
+          try {
+            const owned = createOwnedLock(
+              path,
+              markerPath,
+              {
+                pid,
+                instanceId,
+                processStart,
+                createdAt: now(),
+                heartbeatAt: now(),
+              },
+              options.heartbeatIntervalMs ??
+                Math.max(250, Math.floor(staleAfterMs / 3)),
+              now,
+              true,
+            );
+            if (owned) return owned;
+          } catch (createError) {
+            if ((createError as NodeJS.ErrnoException).code !== "EEXIST")
+              throw createError;
+          }
+          await yieldTurn();
+        }
+      } finally {
+        closeSync(marker!);
+        try {
+          unlinkSync(markerPath);
+        } catch {
+          /* already removed */
+        }
+        try {
+          unlinkSync(tombstone);
+        } catch {
+          /* never moved */
+        }
       }
     }
   }
+}
+
+function createOwnedLock(
+  path: string,
+  markerPath: string,
+  initial: BrokerLockOwner,
+  heartbeatIntervalMs: number,
+  now: () => number,
+  ignoreMarker = false,
+): BrokerRuntimeLock | null {
+  const descriptor = openSync(
+    path,
+    constants.O_CREAT | constants.O_EXCL | constants.O_RDWR,
+    0o600,
+  );
+  let metadata = initial;
+  writeMetadata(descriptor, metadata);
+  if (!ignoreMarker && existsSync(markerPath)) {
+    closeSync(descriptor);
+    removeIfOwned(path, initial.instanceId);
+    return null;
+  }
+  const timer = setInterval(() => {
+    metadata = { ...metadata, heartbeatAt: now() };
+    try {
+      writeMetadata(descriptor, metadata);
+    } catch {
+      /* releasing */
+    }
+  }, heartbeatIntervalMs);
+  timer.unref();
+  let released = false;
+  return {
+    path,
+    instanceId: initial.instanceId,
+    release() {
+      if (released) return;
+      released = true;
+      clearInterval(timer);
+      closeSync(descriptor);
+      removeIfOwned(path, initial.instanceId);
+    },
+  };
+}
+function writeMetadata(descriptor: number, owner: BrokerLockOwner): void {
+  const value = JSON.stringify(owner);
+  ftruncateSync(descriptor, 0);
+  writeSync(descriptor, value, 0, "utf8");
+}
+function removeIfOwned(path: string, instanceId: string): void {
+  try {
+    const owner = parseOwner(readFileSync(path, "utf8"));
+    if (owner?.instanceId === instanceId) unlinkSync(path);
+  } catch {
+    /* path changed */
+  }
+}
+function parseOwner(value: string): BrokerLockOwner | null {
+  try {
+    const owner = JSON.parse(value) as Partial<BrokerLockOwner>;
+    return Number.isSafeInteger(owner.pid) &&
+      typeof owner.instanceId === "string" &&
+      typeof owner.processStart === "string" &&
+      Number.isSafeInteger(owner.createdAt) &&
+      Number.isSafeInteger(owner.heartbeatAt)
+      ? (owner as BrokerLockOwner)
+      : null;
+  } catch {
+    return null;
+  }
+}
+function yieldTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function defaultPidLiveness(pid: number): boolean {
@@ -147,10 +288,15 @@ import { randomBytes } from "node:crypto";
 import {
   closeSync,
   constants,
+  existsSync,
+  ftruncateSync,
   openSync,
   readFileSync,
+  renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
