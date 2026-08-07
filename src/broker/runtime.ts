@@ -67,6 +67,13 @@ export class BrokerAlreadyRunningError extends Error {
     this.name = new.target.name;
   }
 }
+export class BrokerLockAcquisitionTimeoutError extends Error {
+  readonly code = "BROKER_LOCK_ACQUISITION_TIMEOUT";
+  constructor(readonly attempts: number) {
+    super(`Broker lock election did not settle after ${attempts} attempts`);
+    this.name = new.target.name;
+  }
+}
 export interface BrokerRuntimeLock {
   readonly path: string;
   readonly instanceId: string;
@@ -92,6 +99,7 @@ export async function acquireRuntimeLock(
     staleAfterMs?: number;
     malformedStaleAfterMs?: number;
     heartbeatIntervalMs?: number;
+    maxAttempts?: number;
   } = {},
 ): Promise<BrokerRuntimeLock> {
   await mkdir(dataDir, { recursive: true });
@@ -106,8 +114,32 @@ export async function acquireRuntimeLock(
   const processStart =
     options.processStart ??
     `${pid}:${Math.floor(Date.now() - process.uptime() * 1000)}`;
+  const maxAttempts = options.maxAttempts ?? 10_000;
+  let attempts = 0;
   for (;;) {
+    attempts += 1;
+    if (attempts > maxAttempts)
+      throw new BrokerLockAcquisitionTimeoutError(maxAttempts);
     if (existsSync(markerPath)) {
+      const marker = observeFile(markerPath);
+      if (!marker) {
+        await yieldTurn();
+        continue;
+      }
+      const markerOwner = parseOwner(marker.contents);
+      if (markerOwner) {
+        const alive = options.verifyOwner
+          ? options.verifyOwner(markerOwner)
+          : isPidAlive(markerOwner.pid) &&
+            now() - markerOwner.heartbeatAt <= staleAfterMs;
+        if (alive) throw new BrokerAlreadyRunningError(markerOwner);
+      } else if (now() - marker.mtimeMs < malformedStaleAfterMs) {
+        throw new BrokerAlreadyRunningError({
+          pid: -1,
+          instanceId: "unknown-reclaim-owner",
+        });
+      }
+      removeObservedFile(markerPath, marker.contents, instanceId);
       await yieldTurn();
       continue;
     }
@@ -142,13 +174,20 @@ export async function acquireRuntimeLock(
         throw new BrokerAlreadyRunningError({ pid: -1, instanceId: "unknown" });
       }
       let marker: number;
+      const markerOwner: BrokerLockOwner = {
+        pid,
+        instanceId,
+        processStart,
+        createdAt: now(),
+        heartbeatAt: now(),
+      };
       try {
         marker = openSync(
           markerPath,
           constants.O_CREAT | constants.O_EXCL | constants.O_RDWR,
           0o600,
         );
-        writeFileSync(marker, instanceId, "utf8");
+        writeMetadata(marker, markerOwner);
       } catch (markerError) {
         if ((markerError as NodeJS.ErrnoException).code !== "EEXIST")
           throw markerError;
@@ -163,6 +202,9 @@ export async function acquireRuntimeLock(
         if (readFileSync(path, "utf8") !== observed) continue;
         renameSync(path, tombstone);
         for (;;) {
+          attempts += 1;
+          if (attempts > maxAttempts)
+            throw new BrokerLockAcquisitionTimeoutError(maxAttempts);
           try {
             const owned = createOwnedLock(
               path,
@@ -188,11 +230,7 @@ export async function acquireRuntimeLock(
         }
       } finally {
         closeSync(marker!);
-        try {
-          unlinkSync(markerPath);
-        } catch {
-          /* already removed */
-        }
+        removeMarkerIfOwned(markerPath, instanceId);
         try {
           unlinkSync(tombstone);
         } catch {
@@ -200,6 +238,42 @@ export async function acquireRuntimeLock(
         }
       }
     }
+  }
+}
+
+function observeFile(
+  path: string,
+): { contents: string; mtimeMs: number } | null {
+  try {
+    return { contents: readFileSync(path, "utf8"), mtimeMs: statSync(path).mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+function removeObservedFile(
+  path: string,
+  observed: string,
+  contenderId: string,
+): boolean {
+  const tombstone = `${path}.orphan-${contenderId}-${randomBytes(6).toString("hex")}`;
+  try {
+    if (readFileSync(path, "utf8") !== observed) return false;
+    renameSync(path, tombstone);
+    if (readFileSync(tombstone, "utf8") !== observed) return false;
+    unlinkSync(tombstone);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removeMarkerIfOwned(path: string, instanceId: string): void {
+  try {
+    const owner = parseOwner(readFileSync(path, "utf8"));
+    if (owner?.instanceId === instanceId) unlinkSync(path);
+  } catch {
+    /* marker changed ownership or was already reclaimed */
   }
 }
 
@@ -295,7 +369,6 @@ import {
   renameSync,
   statSync,
   unlinkSync,
-  writeFileSync,
   writeSync,
 } from "node:fs";
 import { mkdir } from "node:fs/promises";

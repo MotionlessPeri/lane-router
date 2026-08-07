@@ -1,4 +1,11 @@
-import { mkdtemp, rm, writeFile, utimes, readFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -41,6 +48,29 @@ test("a live broker exclusively owns a data directory until release", async () =
     isPidAlive: () => true,
   });
   second.release();
+});
+
+test("release removes only the lock identity it acquired", async () => {
+  const dir = await temp();
+  const path = join(dir, "broker.lock");
+  const lock = await acquireRuntimeLock(dir, {
+    instanceId: "original-owner",
+  });
+  await rename(path, join(dir, "displaced-original.lock"));
+  await writeFile(
+    path,
+    JSON.stringify({
+      pid: process.pid,
+      instanceId: "replacement-owner",
+      processStart: "replacement",
+      createdAt: Date.now(),
+      heartbeatAt: Date.now(),
+    }),
+  );
+  lock.release();
+  expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
+    instanceId: "replacement-owner",
+  });
 });
 
 test("a verified dead owner is reclaimed and concurrent contenders elect one winner", async () => {
@@ -115,6 +145,135 @@ test("an aged malformed crash lock is reclaimable without spinning", async () =>
   lock.release();
 });
 
+test("a crashed child reclaim marker is recovered without infinite spin", async () => {
+  const dir = await temp();
+  const fixture = runtimeFixture();
+  const crashed = fork(fixture, {
+    execArgv: ["--import", "tsx"],
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+  });
+  expect(
+    await childRequest(crashed, {
+      id: "crash-marker",
+      command: "crash_marker",
+      dataDir: dir,
+      instanceId: "crashed-owner",
+    }),
+  ).toBe("marker_written");
+  await new Promise<void>((resolve) => crashed.once("exit", () => resolve()));
+
+  const contender = fork(fixture, {
+    execArgv: ["--import", "tsx"],
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+  });
+  try {
+    await expect(
+      childRequestWithTimeout(
+        contender,
+        {
+          id: "recover-crash",
+          command: "acquire",
+          dataDir: dir,
+          instanceId: "recovered",
+        },
+        500,
+      ),
+    ).resolves.toBe("won");
+  } finally {
+    contender.kill();
+  }
+});
+
+test("a fresh live reclaim marker is never deleted by another contender", async () => {
+  const dir = await temp();
+  const owner = {
+    pid: process.pid,
+    instanceId: "live-marker",
+    processStart: "live-start",
+    createdAt: Date.now(),
+    heartbeatAt: Date.now(),
+  };
+  await writeFile(join(dir, "broker.lock.reclaim"), JSON.stringify(owner));
+  await writeFile(
+    join(dir, "broker.lock"),
+    JSON.stringify({ ...owner, instanceId: "stale-lock", heartbeatAt: 1 }),
+  );
+  await expect(
+    acquireRuntimeLock(dir, {
+      instanceId: "contender",
+      isPidAlive: () => true,
+    }),
+  ).rejects.toMatchObject({ owner: { instanceId: "live-marker" } });
+  expect(JSON.parse(await readFile(join(dir, "broker.lock.reclaim"), "utf8")))
+    .toMatchObject({ instanceId: "live-marker" });
+});
+
+test("PID reuse does not keep an old reclaim marker live", async () => {
+  const dir = await temp();
+  const oldOwner = {
+    pid: 10,
+    instanceId: "old-marker",
+    processStart: "old-start",
+    createdAt: 1,
+    heartbeatAt: 1,
+  };
+  await writeFile(
+    join(dir, "broker.lock"),
+    JSON.stringify({ ...oldOwner, instanceId: "old-lock" }),
+  );
+  await writeFile(
+    join(dir, "broker.lock.reclaim"),
+    JSON.stringify(oldOwner),
+  );
+  const lock = await acquireRuntimeLock(dir, {
+    pid: 10,
+    instanceId: "new-owner",
+    processStart: "new-start",
+    now: () => 10_000,
+    isPidAlive: () => true,
+    verifyOwner: (owner) => owner.processStart === "new-start",
+  });
+  expect(lock.instanceId).toBe("new-owner");
+  lock.release();
+});
+
+test("a fresh malformed reclaim marker produces a typed conflict", async () => {
+  const dir = await temp();
+  await writeFile(join(dir, "broker.lock.reclaim"), "");
+  await expect(
+    acquireRuntimeLock(dir, { instanceId: "other" }),
+  ).rejects.toBeInstanceOf(BrokerAlreadyRunningError);
+  expect(await readFile(join(dir, "broker.lock.reclaim"), "utf8")).toBe("");
+});
+
+test.each(["", "not-json"])(
+  "an aged malformed reclaim marker %j is atomically recoverable",
+  async (contents) => {
+    const dir = await temp();
+    const lockPath = join(dir, "broker.lock");
+    const markerPath = join(dir, "broker.lock.reclaim");
+    await writeFile(
+      lockPath,
+      JSON.stringify({
+        pid: 999_999,
+        instanceId: "dead",
+        processStart: "dead",
+        createdAt: 1,
+        heartbeatAt: 1,
+      }),
+    );
+    await writeFile(markerPath, contents);
+    await utimes(markerPath, new Date(0), new Date(0));
+    const lock = await acquireRuntimeLock(dir, {
+      instanceId: "malformed-winner",
+      now: () => 10_000,
+      malformedStaleAfterMs: 100,
+    });
+    expect(lock.instanceId).toBe("malformed-winner");
+    lock.release();
+  },
+);
+
 test("one hundred stale elections never produce dual winners", async () => {
   for (let round = 0; round < 100; round += 1) {
     const dir = await temp();
@@ -151,13 +310,7 @@ test("one hundred stale elections never produce dual winners", async () => {
 });
 
 test("two real processes elect one owner across one hundred Windows rounds", async () => {
-  const fixture = join(
-    process.cwd(),
-    "tests",
-    "fixtures",
-    "runtime",
-    "lock-contender.ts",
-  );
+  const fixture = runtimeFixture();
   const children = [
     fork(fixture, {
       execArgv: ["--import", "tsx"],
@@ -176,6 +329,16 @@ test("two real processes elect one owner across one hundred Windows rounds", asy
         JSON.stringify({
           pid: 999_999,
           instanceId: `dead-${round}`,
+          processStart: "dead",
+          createdAt: 1,
+          heartbeatAt: 1,
+        }),
+      );
+      await writeFile(
+        join(dir, "broker.lock.reclaim"),
+        JSON.stringify({
+          pid: 999_999,
+          instanceId: `orphan-marker-${round}`,
           processStart: "dead",
           createdAt: 1,
           heartbeatAt: 1,
@@ -213,7 +376,7 @@ function childRequest(
   child: ChildProcess,
   message: {
     id: string;
-    command: "acquire" | "release";
+    command: "acquire" | "release" | "crash_marker";
     dataDir: string;
     instanceId: string;
   },
@@ -233,4 +396,27 @@ function childRequest(
     child.on("message", onMessage);
     child.send(message);
   });
+}
+
+function childRequestWithTimeout(
+  child: ChildProcess,
+  message: Parameters<typeof childRequest>[1],
+  timeoutMs: number,
+): Promise<string> {
+  return Promise.race([
+    childRequest(child, message),
+    new Promise<string>((resolve) =>
+      setTimeout(() => resolve("timeout"), timeoutMs),
+    ),
+  ]);
+}
+
+function runtimeFixture(): string {
+  return join(
+    process.cwd(),
+    "tests",
+    "fixtures",
+    "runtime",
+    "lock-contender.ts",
+  );
 }
