@@ -305,28 +305,30 @@ export function migrateDatabase(database: Database.Database): void {
   if (currentVersion > LATEST_MIGRATION_VERSION) {
     throw new Error(`Database version ${currentVersion} is newer than supported version ${LATEST_MIGRATION_VERSION}`);
   }
-  if (currentVersion === 0) {
-    database.transaction(() => {
-      database.exec(MIGRATION_V1_SQL);
-      database.pragma("user_version = 1");
-    })();
-  }
-  const versionAfterV1 = database.pragma("user_version", { simple: true }) as number;
-  if (versionAfterV1 === 1) {
-    assertV1BindingLifecycleIntegrity(database);
-    database.transaction(() => {
-      database.exec(MIGRATION_V2_SQL);
-      database.pragma("user_version = 2");
-    })();
-  }
-  const versionAfterV2 = database.pragma("user_version", { simple: true }) as number;
-  if (versionAfterV2 === 2) {
-    assertV2Integrity(database);
-    database.transaction(() => {
-      database.exec(MIGRATION_V3);
-      database.pragma("user_version = 3");
-    })();
-  }
+  database.transaction(() => {
+    if (currentVersion === 0) {
+      database.transaction(() => {
+        database.exec(MIGRATION_V1_SQL);
+        database.pragma("user_version = 1");
+      })();
+    }
+    const versionAfterV1 = database.pragma("user_version", { simple: true }) as number;
+    if (versionAfterV1 === 1) {
+      assertV1BindingLifecycleIntegrity(database);
+      database.transaction(() => {
+        database.exec(MIGRATION_V2_SQL);
+        database.pragma("user_version = 2");
+      })();
+    }
+    const versionAfterV2 = database.pragma("user_version", { simple: true }) as number;
+    if (versionAfterV2 === 2) {
+      assertV2Integrity(database);
+      database.transaction(() => {
+        database.exec(MIGRATION_V3);
+        database.pragma("user_version = 3");
+      })();
+    }
+  })();
 }
 
 function safeIntegerTriggerSql(): string {
@@ -377,13 +379,17 @@ function assertV2Integrity(database: Database.Database): void {
     const badClaim = database.prepare(`
       SELECT d.id FROM delivery d WHERE d.state='claimed' AND NOT EXISTS (
         SELECT 1 FROM claim c JOIN binding b
-          ON b.lane_id=d.target_lane_id AND b.is_current=1
+          ON b.lane_id=d.target_lane_id AND b.generation=c.generation
         WHERE c.delivery_id=d.id AND c.closed_at IS NULL
           AND c.lease_deadline_at=d.deadline_at
-          AND c.generation=b.generation AND b.state='bound'
       ) UNION ALL
       SELECT c.delivery_id FROM claim c JOIN delivery d ON d.id=c.delivery_id
-      WHERE c.closed_at IS NULL AND (d.state!='claimed' OR c.lease_deadline_at!=d.deadline_at)
+      WHERE c.closed_at IS NULL AND (
+        d.state!='claimed' OR c.lease_deadline_at!=d.deadline_at OR NOT EXISTS (
+          SELECT 1 FROM binding b
+          WHERE b.lane_id=d.target_lane_id AND b.generation=c.generation
+        )
+      )
       LIMIT 1
     `).get() as { id: string } | undefined;
     if (badClaim !== undefined) throw new DatabaseIntegrityError(`Claim integrity failed for delivery ${badClaim.id}`);

@@ -83,6 +83,38 @@ describe("SQLite schema", () => {
     }
   });
 
+  it("rolls back the entire v1 migration chain when v3 safe-integer preflight fails", () => {
+    const path = temporaryDatabasePath();
+    const legacy = new Database(path);
+    legacy.exec(MIGRATION_V1_SQL);
+    legacy.transaction(() => {
+      legacy.prepare("INSERT INTO project VALUES (?, ?, ?, ?, ?, ?)").run("project-1", "project", "Project", "manifest", 1, 1);
+      legacy.prepare("INSERT INTO workspace VALUES (?, ?, ?, ?, ?)").run("workspace-1", "project-1", "C:/repo", 1, 1);
+      legacy.prepare("INSERT INTO lane VALUES (?, ?, ?, ?, ?)").run("lane-1", "project-1", "lane", "role.md", 0);
+      legacy.prepare("INSERT INTO binding VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+        "binding-unsafe", "lane-1", "workspace-1", "codex", "thread-1", 1,
+        Number.MAX_SAFE_INTEGER + 1, null, null, 1,
+      );
+      legacy.pragma("user_version = 1");
+    })();
+    legacy.close();
+
+    expect(() => openDatabase(path)).toThrow(/unsafe integer/iu);
+    const repair = new Database(path);
+    try {
+      expect(repair.pragma("user_version", { simple: true })).toBe(1);
+      expect((repair.pragma("table_info(binding)") as Array<{ name: string }>).map((column) => column.name)).not.toContain("state");
+      expect(repair.prepare(`
+        SELECT name FROM sqlite_master WHERE type='trigger' AND name IN (
+          'binding_identity_is_immutable', 'binding_workspace_must_match_lane_project'
+        )
+      `).all()).toEqual([]);
+      expect(() => repair.prepare("UPDATE binding SET active_at=1 WHERE id='binding-unsafe'").run()).not.toThrow();
+    } finally {
+      repair.close();
+    }
+  });
+
   it("leaves dirty migration-v2 claim and ack rows repairable when v3 preflight fails", () => {
     const path = temporaryDatabasePath();
     const setup = openDatabase(path);
@@ -147,6 +179,57 @@ describe("SQLite schema", () => {
       upgraded.close();
     }
   });
+
+  it.each(["unbound", "rebuilt"] as const)(
+    "upgrades a v2 database with an internally valid historical claim after binding is %s",
+    (bindingState) => {
+      const path = temporaryDatabasePath();
+      const legacy = new Database(path);
+      legacy.exec(MIGRATION_V1_SQL);
+      legacy.exec(MIGRATION_V2_SQL);
+      legacy.exec(`
+        INSERT INTO project VALUES ('project-1', 'project', 'Project', 'manifest', 1, 1);
+        INSERT INTO workspace VALUES ('workspace-1', 'project-1', 'C:/repo', 1, 1);
+        INSERT INTO lane VALUES ('lane-1', 'project-1', 'lane', 'role.md', 0);
+      `);
+      if (bindingState === "unbound") {
+        legacy.exec(`
+          INSERT INTO binding (
+            id, lane_id, workspace_id, adapter, conversation_id, generation,
+            active_at, inactive_at, inactive_reason, is_current, state, state_changed_at, state_reason
+          ) VALUES ('binding-1', 'lane-1', 'workspace-1', 'codex', 'thread-1', 1, 1, NULL, NULL, 1, 'unbound', 20, 'missing');
+        `);
+      } else {
+        legacy.exec(`
+          INSERT INTO binding (
+            id, lane_id, workspace_id, adapter, conversation_id, generation,
+            active_at, inactive_at, inactive_reason, is_current, state, state_changed_at, state_reason
+          ) VALUES ('binding-1', 'lane-1', 'workspace-1', 'codex', 'thread-1', 1, 1, 20, 'rebuilt', 0, 'bound', NULL, NULL);
+          INSERT INTO binding (
+            id, lane_id, workspace_id, adapter, conversation_id, generation,
+            active_at, inactive_at, inactive_reason, is_current, state, state_changed_at, state_reason
+          ) VALUES ('binding-2', 'lane-1', 'workspace-1', 'codex', 'thread-2', 2, 20, NULL, NULL, 1, 'bound', NULL, NULL);
+        `);
+      }
+      legacy.exec(`
+        INSERT INTO message VALUES ('message-1', 'binding-1', 'lane-1', 'normal', 'body', '{}', NULL, 2);
+        INSERT INTO delivery VALUES ('delivery-1', 'message-1', 'lane-1', 1, 'claimed', 0, 'lease', 100, NULL, NULL, NULL, NULL, 3);
+        INSERT INTO claim VALUES ('claim-1', 'delivery-1', 1, 100, 3, NULL, NULL);
+        PRAGMA user_version=2;
+      `);
+      legacy.close();
+
+      const upgraded = openDatabase(path);
+      try {
+        expect(upgraded.pragma("user_version", { simple: true })).toBe(3);
+        expect(upgraded.prepare("SELECT generation, lease_deadline_at FROM claim WHERE id='claim-1'").get()).toEqual({
+          generation: 1, lease_deadline_at: 100,
+        });
+      } finally {
+        upgraded.close();
+      }
+    },
+  );
 
   it("creates the durable broker model at migration v3 with foreign keys and WAL", () => {
     const path = temporaryDatabasePath();
