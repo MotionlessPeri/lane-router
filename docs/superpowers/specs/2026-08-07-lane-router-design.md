@@ -280,9 +280,9 @@ broker 不把旧对话全文注入新对话，也不声称能够恢复所有隐�
 
 第一版处于同机可信环境，不增加独立 lane takeover credential。bind、rotate、unbind 和 rebuild 仍是显式管理操作。所有 claim、ack 和连接握手都校验 generation，因此旧 conversation 即使重新出现也不能操作新消息。
 
-## 对话工具与管理 CLI
+## 对话逻辑工具与管理 CLI
 
-对话通过 MCP 使用以下工具：
+以下八项对话操作构成一份 logical tools（逻辑工具）契约。Claude 通过 MCP transport 承载这份契约；Codex 通过 App Server dynamic-tool transport 承载，因为 dynamic tool 调用携带权威的 `threadId`：
 
 | 工具 | 用途 |
 |---|---|
@@ -295,7 +295,7 @@ broker 不把旧对话全文注入新对话，也不声称能够恢复所有隐�
 | `lane_message_ack` | 使用 operation ID 和当前 claim ID，原子记录 outcome 并确认消息。 |
 | `lane_message_park` | 暂停自动处理并记录原因。 |
 
-任意对话不能通过 MCP 自行注册或接管 lane。低频管理操作放在本机 CLI，包括：
+任意对话不能通过 logical tools 自行注册或接管 lane。低频管理操作放在本机 CLI，包括：
 
 - 启动和检查 broker。
 - 同步或校验 project manifest。
@@ -306,7 +306,7 @@ broker 不把旧对话全文注入新对话，也不声称能够恢复所有隐�
 
 CLI 的精确命令与参数名在实施计划中确定，但不得改变上述权限边界。
 
-除纯读取操作外，MCP 和 CLI 的每个变更请求都必须遵守 operation ID 幂等契约。wake envelope 明确声明“消息分类不是执行授权”；lane 是否执行代码修改或其他副作用，继续受原对话指令和用户授权约束。
+除纯读取操作外，logical tools 和 CLI 的每个变更请求都必须遵守 operation ID 幂等契约。wake envelope 明确声明“消息分类不是执行授权”；lane 是否执行代码修改或其他副作用，继续受原对话指令和用户授权约束。
 
 ## 运行、安全与故障恢复
 
@@ -331,7 +331,7 @@ CLI 的精确命令与参数名在实施计划中确定，但不得改变上述�
 - `broker`：单实例生命周期、本机接口、调度循环和事件记录。
 - `adapters/claude`：Channel MCP 连接和 Claude wake 结果映射。
 - `adapters/codex`：App Server 子进程、JSON-RPC client 和 thread 状态映射。
-- `mcp`：对话工具面和连接身份解析。
+- `mcp`：logical tools 契约和连接身份解析；Claude 使用 MCP transport，Codex 使用 App Server dynamic-tool transport。
 - `cli`：管理与只读诊断命令。
 
 core 不依赖具体 adapter；storage 不执行调度；CLI 不绕过 broker 写库。第一阶段从仓库直接运行，核心语义稳定后再决定 npm 发布或独立程序打包。
@@ -346,7 +346,7 @@ core 不依赖具体 adapter；storage 不执行调度；CLI 不绕过 broker �
 - 存储测试覆盖 message + delivery 原子创建、claim/queue 两类 deadline、broker 重启恢复，以及对话与管理操作的全局 operation ID 幂等和冲突检测。
 - adapter contract 测试使用 fake Claude/Codex transport，验证所有标准结果映射。
 - Codex 集成测试启动临时 App Server，验证创建 turn、在线订阅、TUI 断开后的继续处理和按 thread ID 恢复。
-- MCP 工具测试证明发送方不能伪造 lane 身份，旧 generation 请求被拒绝。
+- logical tools 测试通过 Claude MCP 和 Codex App Server dynamic-tool 两种 transport，证明发送方不能伪造 lane 身份，旧 generation 请求被拒绝。
 - FIFO 测试证明后序普通消息不能越过未完成前序消息，correction 可以越序且完成后恢复原普通顺序。
 
 ### 手工与环境验收
