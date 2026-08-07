@@ -50,3 +50,9 @@ export interface NewMessageRecord {
   readonly contentSha256: string;
   readonly createdAt: number;
 }
+
+export interface CallerContext {
+  readonly backend: BackendName;
+  readonly conversationId: string;
+  readonly requestKey: string;
+}

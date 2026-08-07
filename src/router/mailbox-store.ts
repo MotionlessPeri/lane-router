@@ -46,6 +46,10 @@ export class MailboxStore {
     this.root = resolve(dataRoot);
   }
 
+  pendingPath(address: string): string {
+    return join(mailboxLanePath(this.root, parseLaneAddress(address)), "pending");
+  }
+
   writePending(input: MailboxMessageInput): MailboxFile {
     validateToken("message ID", input.id);
     validateHeaderValue("request key", input.requestKey);

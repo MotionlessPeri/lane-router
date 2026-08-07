@@ -81,6 +81,14 @@ export class RouterStateStore {
     `).all(project) as LaneRow[]).map(mapLane);
   }
 
+  updateLaneRole(address: string, roleDescription: string, now: number): LaneRecord {
+    if (!roleDescription.trim()) throw new Error("Role description is required");
+    if (this.database.prepare(`
+      UPDATE lane SET role_description=?,updated_at=? WHERE address=?
+    `).run(roleDescription, now, address).changes !== 1) throw new Error(`Lane not found: ${address}`);
+    return this.requireLane(address);
+  }
+
   createBinding(input: {
     id: string;
     laneAddress: string;
@@ -127,6 +135,53 @@ export class RouterStateStore {
     return binding;
   }
 
+  activeBindingForLane(laneAddress: string): BindingRecord | undefined {
+    const row = this.database.prepare(`
+      SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at
+      FROM binding WHERE lane_address=? AND inactive_at IS NULL
+    `).get(laneAddress) as BindingRow | undefined;
+    return row ? mapBinding(row) : undefined;
+  }
+
+  activeBindingForConversation(backend: BackendName, conversationId: string): BindingRecord | undefined {
+    const row = this.database.prepare(`
+      SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at
+      FROM binding WHERE backend=? AND conversation_id=? AND inactive_at IS NULL
+    `).get(backend, conversationId) as BindingRow | undefined;
+    return row ? mapBinding(row) : undefined;
+  }
+
+  deactivateBinding(id: string, generation: number, now: number): boolean {
+    return this.database.prepare(`
+      UPDATE binding SET inactive_at=? WHERE id=? AND generation=? AND inactive_at IS NULL
+    `).run(now, id, generation).changes === 1;
+  }
+
+  replaceBinding(input: {
+    expected: Pick<BindingRecord, "id" | "generation"> | null;
+    id: string;
+    laneAddress: string;
+    backend: BackendName;
+    conversationId: string;
+    generation: number;
+    startup: Readonly<Record<string, unknown>>;
+    roleDescription?: string;
+    now: number;
+  }): BindingRecord | undefined {
+    return this.database.transaction(() => {
+      const current = this.activeBindingForLane(input.laneAddress);
+      if (input.expected === null) {
+        if (current) return undefined;
+      } else if (current?.id !== input.expected.id || current.generation !== input.expected.generation) {
+        return undefined;
+      } else if (!this.deactivateBinding(input.expected.id, input.expected.generation, input.now)) {
+        return undefined;
+      }
+      if (input.roleDescription !== undefined) this.updateLaneRole(input.laneAddress, input.roleDescription, input.now);
+      return this.createBinding(input);
+    })();
+  }
+
   insertMessage(input: NewMessageRecord): MessageRecord {
     this.database.prepare(`
       INSERT INTO message(
@@ -165,6 +220,27 @@ export class RouterStateStore {
 
   allMessages(): MessageRecord[] {
     return (this.database.prepare(`${MESSAGE_SELECT} ORDER BY created_at,id`).all() as MessageRow[]).map(mapMessage);
+  }
+
+  pendingMessages(laneAddress: string): MessageRecord[] {
+    return (this.database.prepare(`${MESSAGE_SELECT}
+      WHERE target_lane=? AND state='pending' ORDER BY created_at,id
+    `).all(laneAddress) as MessageRow[]).map(mapMessage);
+  }
+
+  pendingLaneAddresses(): string[] {
+    return (this.database.prepare(`
+      SELECT DISTINCT target_lane FROM message WHERE state='pending' ORDER BY target_lane
+    `).all() as Array<{ target_lane: string }>).map((row) => row.target_lane);
+  }
+
+  markMessagesNotified(messageIds: readonly string[]): void {
+    const statement = this.database.prepare(`
+      UPDATE message SET notification_state='notified' WHERE id=? AND state='pending'
+    `);
+    this.database.transaction(() => {
+      for (const id of messageIds) statement.run(id);
+    })();
   }
 
   markMessagesResolved(
