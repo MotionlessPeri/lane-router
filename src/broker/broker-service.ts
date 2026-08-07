@@ -1,0 +1,767 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { parse } from "smol-toml";
+
+import type { AckOutcome, Delivery } from "../core/model.js";
+import {
+  parkDelivery,
+  renewClaim,
+  unparkDelivery,
+} from "../core/delivery-state.js";
+import {
+  InvalidDeliveryOperationError,
+  StaleBindingGenerationError,
+} from "../core/errors.js";
+import type { RouterDatabase } from "../storage/database.js";
+import { inTransaction } from "../storage/database.js";
+import {
+  canonicalJson,
+  OperationStore,
+  type OperationActor,
+} from "../storage/operation-store.js";
+import {
+  StorageRepositories,
+  type CurrentBinding,
+} from "../storage/repositories.js";
+import { appendEvent, listEvents } from "./events.js";
+import { validateRuntimeConfig, type RuntimeConfig } from "./runtime.js";
+
+export { validateRuntimeConfig } from "./runtime.js";
+export type BindingActor = Readonly<{ bindingId: string; generation: number }>;
+export interface ProjectManifest {
+  readonly projectId: string;
+  readonly projectKey: string;
+  readonly displayName: string;
+  readonly manifestHash: string;
+  readonly manifestVersion: number;
+  readonly lanes: readonly {
+    name: string;
+    roleFile: string;
+    communicationEntry: boolean;
+  }[];
+}
+export interface BootstrapEnvelope {
+  readonly laneAddress: string;
+  readonly generation: number;
+  readonly roleFile: string;
+  readonly projectDocuments: readonly string[];
+  readonly pending: readonly {
+    messageId: string;
+    sequence: number;
+    kind: "normal" | "correction";
+  }[];
+  readonly previousBindingId: string | null;
+  readonly reason: string;
+}
+export interface BrokerDependencies {
+  readonly now?: () => number;
+  readonly randomId?: (prefix: string) => string;
+  readonly config?: Partial<RuntimeConfig>;
+  readonly waitUntilIdle?: (
+    binding: CurrentBinding,
+    timeoutMs: number,
+  ) => Promise<boolean>;
+  readonly pathAvailable?: (rootPath: string) => boolean;
+  readonly projectIdAtRoot?: (rootPath: string) => string | null;
+}
+
+export class BrokerService {
+  readonly config: RuntimeConfig;
+  private readonly repositories: StorageRepositories;
+  private readonly operations: OperationStore;
+  private readonly now: () => number;
+  private readonly randomId: (prefix: string) => string;
+  private readonly waitUntilIdle?: (
+    binding: CurrentBinding,
+    timeoutMs: number,
+  ) => Promise<boolean>;
+  private readonly pathAvailable: (rootPath: string) => boolean;
+  private readonly projectIdAtRoot: (rootPath: string) => string | null;
+  private idSequence = 0;
+
+  constructor(
+    readonly database: RouterDatabase,
+    dependencies: BrokerDependencies = {},
+  ) {
+    this.config = validateRuntimeConfig(dependencies.config);
+    this.repositories = new StorageRepositories(database);
+    this.operations = new OperationStore(database);
+    this.now = dependencies.now ?? Date.now;
+    this.randomId =
+      dependencies.randomId ?? ((prefix) => `${prefix}-${crypto.randomUUID()}`);
+    this.waitUntilIdle = dependencies.waitUntilIdle;
+    this.pathAvailable = dependencies.pathAvailable ?? existsSync;
+    this.projectIdAtRoot = dependencies.projectIdAtRoot ?? readProjectIdAtRoot;
+  }
+
+  syncProject(input: {
+    operationId: string;
+    adminId: string;
+    workspaceId: string;
+    rootPath: string;
+    manifest: ProjectManifest;
+  }): { projectId: string; workspaceId: string; laneAddresses: string[] } {
+    return this.mutate(
+      input.operationId,
+      { kind: "admin", id: input.adminId },
+      "sync_project",
+      input,
+      () =>
+        inTransaction(this.database, () => {
+          const m = input.manifest;
+          const existing = this.database
+            .prepare("SELECT project_key FROM project WHERE id=?")
+            .get(m.projectId) as { project_key: string } | undefined;
+          if (existing && existing.project_key !== m.projectKey)
+            throw new Error(
+              "Project key conflicts with existing project identity",
+            );
+          this.database
+            .prepare(
+              "INSERT INTO project(id,project_key,display_name,manifest_identity,manifest_version,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,manifest_identity=excluded.manifest_identity,manifest_version=excluded.manifest_version",
+            )
+            .run(
+              m.projectId,
+              m.projectKey,
+              m.displayName,
+              m.manifestHash,
+              m.manifestVersion,
+              this.now(),
+            );
+          const knownWorkspace = this.database
+            .prepare("SELECT project_id,local_root FROM workspace WHERE id=?")
+            .get(input.workspaceId) as
+            | { project_id: string; local_root: string }
+            | undefined;
+          if (
+            knownWorkspace &&
+            (knownWorkspace.project_id !== m.projectId ||
+              knownWorkspace.local_root !== input.rootPath)
+          )
+            throw new Error(
+              "Existing workspace identity or root differs; use explicit relink for moves",
+            );
+          if (!knownWorkspace)
+            this.database
+              .prepare(
+                "INSERT INTO workspace(id,project_id,local_root,is_current,created_at) VALUES(?,?,?,?,?)",
+              )
+              .run(
+                input.workspaceId,
+                m.projectId,
+                input.rootPath,
+                1,
+                this.now(),
+              );
+          for (const lane of m.lanes)
+            this.database
+              .prepare(
+                "INSERT INTO lane(id,project_id,name,role_document,communication_entry) VALUES(?,?,?,?,?) ON CONFLICT(project_id,name) DO UPDATE SET role_document=excluded.role_document,communication_entry=excluded.communication_entry",
+              )
+              .run(
+                `${m.projectId}/${lane.name}`,
+                m.projectId,
+                lane.name,
+                lane.roleFile,
+                Number(lane.communicationEntry),
+              );
+          return {
+            projectId: m.projectId,
+            workspaceId: input.workspaceId,
+            laneAddresses: m.lanes.map(
+              (lane) => `${m.projectKey}/${lane.name}`,
+            ),
+          };
+        }),
+    );
+  }
+
+  relinkWorkspace(input: {
+    operationId: string;
+    adminId: string;
+    workspaceId: string;
+    newRootPath: string;
+    projectId: string;
+  }): { workspaceId: string; rootPath: string; affectedBindings: string[] } {
+    return this.mutate(
+      input.operationId,
+      { kind: "admin", id: input.adminId },
+      "relink_workspace",
+      input,
+      () =>
+        inTransaction(this.database, () => {
+          const workspace = this.database
+            .prepare("SELECT project_id FROM workspace WHERE id=?")
+            .get(input.workspaceId) as { project_id: string } | undefined;
+          if (!workspace || workspace.project_id !== input.projectId)
+            throw new Error("Workspace project does not match relink target");
+          const oldRoot = (
+            this.database
+              .prepare("SELECT local_root FROM workspace WHERE id=?")
+              .get(input.workspaceId) as { local_root: string }
+          ).local_root;
+          if (this.pathAvailable(oldRoot))
+            throw new Error(
+              "Workspace old root is still available; relink is only for moves",
+            );
+          if (this.projectIdAtRoot(input.newRootPath) !== input.projectId)
+            throw new Error(
+              "Relink target project manifest does not match the workspace project",
+            );
+          const affectedBindings = (
+            this.database
+              .prepare(
+                "SELECT id FROM binding WHERE workspace_id=? AND is_current=1",
+              )
+              .all(input.workspaceId) as { id: string }[]
+          ).map((row) => row.id);
+          this.database
+            .prepare(
+              "INSERT INTO workspace_relink(workspace_id,old_root,new_root,relinked_at) VALUES(?,?,?,?)",
+            )
+            .run(input.workspaceId, oldRoot, input.newRootPath, this.now());
+          this.database
+            .prepare("UPDATE workspace SET local_root=? WHERE id=?")
+            .run(input.newRootPath, input.workspaceId);
+          return {
+            workspaceId: input.workspaceId,
+            rootPath: input.newRootPath,
+            affectedBindings,
+          };
+        }),
+    );
+  }
+
+  bind(input: {
+    operationId: string;
+    adminId: string;
+    bindingId: string;
+    laneAddress: string;
+    workspaceId: string;
+    adapter: "claude" | "codex";
+    conversationId: string;
+  }): { binding: CurrentBinding; bootstrap: BootstrapEnvelope } {
+    return this.mutate(
+      input.operationId,
+      { kind: "admin", id: input.adminId },
+      "bind",
+      input,
+      () =>
+        inTransaction(this.database, () => {
+          const laneId = this.resolveLane(input.laneAddress);
+          if (this.repositories.getCurrentBinding(laneId))
+            throw new Error("Lane already has a current binding");
+          this.database
+            .prepare(
+              "INSERT INTO binding(id,lane_id,workspace_id,adapter,conversation_id,generation,active_at,inactive_at,inactive_reason,is_current,state,state_changed_at,state_reason) VALUES(?,?,?,?,?,1,?,NULL,NULL,1,'bound',NULL,NULL)",
+            )
+            .run(
+              input.bindingId,
+              laneId,
+              input.workspaceId,
+              input.adapter,
+              input.conversationId,
+              this.now(),
+            );
+          const binding = this.repositories.getCurrentBinding(laneId)!;
+          appendEvent(
+            this.database,
+            "binding_created",
+            this.now(),
+            { generation: 1 },
+            { bindingId: binding.id },
+          );
+          return {
+            binding,
+            bootstrap: this.bootstrapFor(laneId, binding, null, "initial bind"),
+          };
+        }),
+    );
+  }
+
+  unbind(input: {
+    operationId: string;
+    adminId: string;
+    laneAddress: string;
+    reason: string;
+  }): CurrentBinding {
+    return this.mutate(
+      input.operationId,
+      { kind: "admin", id: input.adminId },
+      "unbind",
+      input,
+      () => {
+        const laneId = this.resolveLane(input.laneAddress);
+        const current = this.requireCurrentBinding(laneId);
+        return this.repositories.markCurrentBindingUnbound({
+          laneId,
+          generation: current.generation,
+          occurredAt: this.now(),
+          reason: input.reason,
+        });
+      },
+    );
+  }
+
+  rebuild(input: {
+    operationId: string;
+    adminId: string;
+    bindingId: string;
+    laneAddress: string;
+    workspaceId: string;
+    adapter: "claude" | "codex";
+    conversationId: string;
+    reason: string;
+  }): { binding: CurrentBinding; bootstrap: BootstrapEnvelope } {
+    return this.mutate(
+      input.operationId,
+      { kind: "admin", id: input.adminId },
+      "rebuild",
+      input,
+      () => {
+        const laneId = this.resolveLane(input.laneAddress);
+        const previous = this.requireCurrentBinding(laneId);
+        const binding = this.repositories.rebuildBinding({
+          bindingId: input.bindingId,
+          laneId,
+          workspaceId: input.workspaceId,
+          adapter: input.adapter,
+          conversationId: input.conversationId,
+          activatedAt: this.now(),
+          reason: input.reason,
+        });
+        return {
+          binding,
+          bootstrap: this.bootstrapFor(
+            laneId,
+            binding,
+            previous.id,
+            input.reason,
+          ),
+        };
+      },
+    );
+  }
+
+  async rotate(
+    input: {
+      operationId: string;
+      adminId: string;
+      bindingId: string;
+      laneAddress: string;
+      workspaceId: string;
+      adapter: "claude" | "codex";
+      conversationId: string;
+      reason: string;
+      timeoutMs: number;
+    },
+    waitUntilIdle = this.waitUntilIdle,
+  ): Promise<{ binding: CurrentBinding; bootstrap: BootstrapEnvelope }> {
+    const laneId = this.resolveLane(input.laneAddress);
+    const previous = this.requireCurrentBinding(laneId);
+    if (!waitUntilIdle)
+      throw new Error("Rotate requires an orchestration idle-wait provider");
+    if (!(await waitUntilIdle(previous, input.timeoutMs)))
+      throw new Error("Rotate timed out while old turn was busy");
+    return this.mutate(
+      input.operationId,
+      { kind: "admin", id: input.adminId },
+      "rotate",
+      input,
+      () =>
+        inTransaction(this.database, () => {
+          this.repositories.markCurrentBindingUnbound({
+            laneId,
+            generation: previous.generation,
+            occurredAt: this.now(),
+            reason: input.reason,
+          });
+          return this.rebuild({
+            ...input,
+            operationId: `${input.operationId}:rebuild`,
+          });
+        }),
+    );
+  }
+
+  send(input: {
+    operationId: string;
+    actor: BindingActor;
+    target: string;
+    kind: "normal" | "correction";
+    body: string;
+    metadata: unknown;
+    replyTo?: string | null;
+  }): { messageId: string; deliveryId: string; sequence: number } {
+    const actor = this.authenticate(input.actor);
+    return this.mutate(
+      input.operationId,
+      { kind: "binding", id: actor.id },
+      "send",
+      input,
+      () => {
+        const targetLaneId = this.resolveLane(input.target);
+        const messageId = this.nextId("message");
+        const deliveryId = this.nextId("delivery");
+        const delivery = this.repositories.createMessageWithInitialDelivery({
+          messageId,
+          deliveryId,
+          senderBindingId: actor.id,
+          targetLaneId,
+          kind: input.kind,
+          body: input.body,
+          metadata: input.metadata,
+          replyTo: input.replyTo ?? null,
+          createdAt: this.now(),
+        });
+        appendEvent(
+          this.database,
+          "message_enqueued",
+          this.now(),
+          { messageId, sequence: delivery.sequence, kind: input.kind },
+          { deliveryId },
+        );
+        return { messageId, deliveryId, sequence: delivery.sequence };
+      },
+    );
+  }
+
+  claim(input: {
+    operationId: string;
+    actor: BindingActor;
+    deliveryId: string;
+    claimId?: string;
+  }): { claimId: string; deadline: number } {
+    const actor = this.authenticate(input.actor);
+    return this.mutate(
+      input.operationId,
+      { kind: "binding", id: actor.id },
+      input.claimId ? "renew_claim" : "claim",
+      input,
+      () => {
+        this.assertTargetsActor(input.deliveryId, actor);
+        if (!input.claimId) this.assertClaimEligibility(input.deliveryId);
+        const deadline = this.now() + this.config.claimLeaseMs;
+        if (!input.claimId) {
+          const claimId = this.nextId("claim");
+          this.repositories.createClaim({
+            claimId,
+            deliveryId: input.deliveryId,
+            generation: actor.generation,
+            leaseDeadlineAt: deadline,
+            createdAt: this.now(),
+          });
+          return { claimId, deadline };
+        }
+        const current = this.repositories.readDelivery(input.deliveryId);
+        const renewed = renewClaim(current, {
+          claimId: input.claimId,
+          bindingGeneration: actor.generation,
+          currentGeneration: actor.generation,
+          now: this.now(),
+          leaseDeadlineAt: deadline,
+        });
+        this.database
+          .prepare(
+            "UPDATE claim SET lease_deadline_at=? WHERE id=? AND closed_at IS NULL",
+          )
+          .run(deadline, input.claimId);
+        this.persistDelivery(renewed);
+        appendEvent(
+          this.database,
+          "claim_renewed",
+          this.now(),
+          { deadline },
+          { deliveryId: input.deliveryId, claimId: input.claimId },
+        );
+        return { claimId: input.claimId, deadline };
+      },
+    );
+  }
+
+  ack(input: {
+    operationId: string;
+    actor: BindingActor;
+    deliveryId: string;
+    claimId: string;
+    outcome: AckOutcome;
+  }): Delivery {
+    const actor = this.authenticate(input.actor);
+    return this.mutate(
+      input.operationId,
+      { kind: "binding", id: actor.id },
+      "ack",
+      input,
+      () => {
+        this.assertTargetsActor(input.deliveryId, actor);
+        return this.repositories.acknowledge({
+          deliveryId: input.deliveryId,
+          claimId: input.claimId,
+          generation: actor.generation,
+          outcome: input.outcome,
+          acknowledgedAt: this.now(),
+        });
+      },
+    );
+  }
+  park(input: {
+    operationId: string;
+    actor: BindingActor;
+    deliveryId: string;
+    reason: string;
+  }): Delivery {
+    const actor = this.authenticate(input.actor);
+    return this.mutate(
+      input.operationId,
+      { kind: "binding", id: actor.id },
+      "park",
+      input,
+      () => {
+        this.assertTargetsActor(input.deliveryId, actor);
+        const current = this.repositories.readDelivery(input.deliveryId);
+        const parked = parkDelivery(current, input.reason);
+        if (current.status === "claimed")
+          this.database
+            .prepare(
+              "UPDATE claim SET closed_at=?,close_reason='parked' WHERE id=? AND closed_at IS NULL",
+            )
+            .run(this.now(), current.claimId);
+        this.persistDelivery(parked);
+        return parked;
+      },
+    );
+  }
+  unpark(input: {
+    operationId: string;
+    adminId: string;
+    deliveryId: string;
+  }): Delivery {
+    return this.mutate(
+      input.operationId,
+      { kind: "admin", id: input.adminId },
+      "unpark",
+      input,
+      () => {
+        const pending = unparkDelivery(
+          this.repositories.readDelivery(input.deliveryId),
+        );
+        this.persistDelivery(pending);
+        return pending;
+      },
+    );
+  }
+
+  whoami(actor: BindingActor): {
+    bindingId: string;
+    generation: number;
+    laneAddress: string;
+  } {
+    const binding = this.authenticate(actor);
+    return {
+      bindingId: binding.id,
+      generation: binding.generation,
+      laneAddress: this.addressFor(binding.laneId),
+    };
+  }
+  status(): unknown {
+    return {
+      projects: this.database
+        .prepare("SELECT COUNT(*) AS count FROM project")
+        .get(),
+      lanes: this.database.prepare("SELECT COUNT(*) AS count FROM lane").get(),
+      pending: this.database
+        .prepare("SELECT COUNT(*) AS count FROM delivery WHERE state='pending'")
+        .get(),
+    };
+  }
+  events(afterId = 0, limit = 100): unknown {
+    return listEvents(this.database, afterId, limit);
+  }
+  inbox(actor: BindingActor): unknown[] {
+    const binding = this.authenticate(actor);
+    return this.database
+      .prepare(
+        "SELECT d.id AS deliveryId,m.id AS messageId,d.sequence,m.kind,m.created_at AS createdAt,d.state AS status FROM delivery d JOIN message m ON m.id=d.message_id WHERE d.target_lane_id=? AND d.state NOT IN ('acknowledged','parked') ORDER BY CASE m.kind WHEN 'correction' THEN 0 ELSE 1 END,d.sequence",
+      )
+      .all(binding.laneId) as unknown[];
+  }
+  message(actor: BindingActor, messageId: string): unknown {
+    const binding = this.authenticate(actor);
+    const row = this.database
+      .prepare(
+        "SELECT m.id,m.kind,m.body,m.metadata_json AS metadata,m.reply_to AS replyTo,m.created_at AS createdAt FROM message m WHERE m.id=? AND m.target_lane_id=?",
+      )
+      .get(messageId, binding.laneId) as Record<string, unknown> | undefined;
+    if (!row) throw new Error("Message not found or not authorized");
+    return { ...row, metadata: JSON.parse(row.metadata as string) };
+  }
+
+  private authenticate(actor: BindingActor): CurrentBinding {
+    const row = this.database
+      .prepare(
+        "SELECT id,lane_id,workspace_id,adapter,conversation_id,generation,state,is_current FROM binding WHERE id=?",
+      )
+      .get(actor.bindingId) as
+      | (CurrentBinding & {
+          lane_id: string;
+          workspace_id: string;
+          conversation_id: string;
+          is_current: number;
+        })
+      | undefined;
+    if (!row) throw new Error("Unknown binding actor");
+    if (!row.is_current || row.generation !== actor.generation)
+      throw new StaleBindingGenerationError(
+        "establish_binding_connection",
+        actor.generation,
+        row.generation,
+      );
+    if (row.state !== "bound")
+      throw new InvalidDeliveryOperationError(
+        "establish_binding_connection",
+        "Binding is unbound",
+      );
+    return {
+      id: row.id,
+      laneId: row.lane_id,
+      workspaceId: row.workspace_id,
+      adapter: row.adapter,
+      conversationId: row.conversation_id,
+      generation: row.generation,
+      state: row.state,
+    };
+  }
+  private assertTargetsActor(deliveryId: string, actor: CurrentBinding): void {
+    const row = this.database
+      .prepare("SELECT target_lane_id FROM delivery WHERE id=?")
+      .get(deliveryId) as { target_lane_id: string } | undefined;
+    if (!row || row.target_lane_id !== actor.laneId)
+      throw new Error("Delivery is not authorized for this binding");
+  }
+  private assertClaimEligibility(deliveryId: string): void {
+    const row = this.database
+      .prepare(
+        "SELECT d.target_lane_id,d.sequence,m.kind FROM delivery d JOIN message m ON m.id=d.message_id WHERE d.id=?",
+      )
+      .get(deliveryId) as
+      | {
+          target_lane_id: string;
+          sequence: number;
+          kind: "normal" | "correction";
+        }
+      | undefined;
+    if (!row) throw new Error("Delivery does not exist");
+    const earlier = this.database
+      .prepare(
+        "SELECT 1 FROM delivery d JOIN message m ON m.id=d.message_id WHERE d.target_lane_id=? AND m.kind=? AND d.sequence<? AND d.state NOT IN ('acknowledged','parked') LIMIT 1",
+      )
+      .get(row.target_lane_id, row.kind, row.sequence);
+    if (earlier)
+      throw new InvalidDeliveryOperationError(
+        "claim_delivery",
+        `An earlier ${row.kind} delivery must be completed first`,
+      );
+  }
+  private resolveLane(address: string): string {
+    const row = this.database
+      .prepare(
+        "SELECT l.id FROM lane l JOIN project p ON p.id=l.project_id WHERE p.project_key || '/' || l.name=?",
+      )
+      .get(address) as { id: string } | undefined;
+    if (!row) throw new Error(`Unknown lane ${address}`);
+    return row.id;
+  }
+  private addressFor(laneId: string): string {
+    const row = this.database
+      .prepare(
+        "SELECT p.project_key || '/' || l.name AS address FROM lane l JOIN project p ON p.id=l.project_id WHERE l.id=?",
+      )
+      .get(laneId) as { address: string };
+    return row.address;
+  }
+  private requireCurrentBinding(laneId: string): CurrentBinding {
+    const value = this.repositories.getCurrentBinding(laneId);
+    if (!value) throw new Error("Lane has no binding");
+    return value;
+  }
+  private bootstrapFor(
+    laneId: string,
+    binding: CurrentBinding,
+    previousBindingId: string | null,
+    reason: string,
+  ): BootstrapEnvelope {
+    const lane = this.database
+      .prepare("SELECT role_document FROM lane WHERE id=?")
+      .get(laneId) as { role_document: string };
+    const pending = this.database
+      .prepare(
+        "SELECT m.id AS messageId,d.sequence,m.kind FROM delivery d JOIN message m ON m.id=d.message_id WHERE d.target_lane_id=? AND d.state='pending' ORDER BY d.sequence",
+      )
+      .all(laneId) as BootstrapEnvelope["pending"];
+    return {
+      laneAddress: this.addressFor(laneId),
+      generation: binding.generation,
+      roleFile: lane.role_document,
+      projectDocuments: [],
+      pending,
+      previousBindingId,
+      reason,
+    };
+  }
+  private mutate<T>(
+    operationId: string,
+    actor: OperationActor,
+    method: string,
+    request: unknown,
+    perform: () => T,
+  ): T {
+    return this.operations.execute(
+      { operationId, actor, method, request, createdAt: this.now() },
+      perform,
+    );
+  }
+  private nextId(prefix: string): string {
+    this.idSequence += 1;
+    return `${this.randomId(prefix)}-${this.idSequence}`;
+  }
+  private persistDelivery(delivery: Delivery): void {
+    const deadlineKind =
+      delivery.status === "notified"
+        ? delivery.notificationKind
+        : delivery.status === "claimed"
+          ? "lease"
+          : null;
+    const deadlineAt =
+      delivery.status === "notified"
+        ? delivery.deadlineAt
+        : delivery.status === "claimed"
+          ? delivery.leaseDeadlineAt
+          : null;
+    this.database
+      .prepare(
+        "UPDATE delivery SET state=?,failure_count=?,deadline_kind=?,deadline_at=?,next_attempt_at=?,adapter_result=?,park_reason=?,updated_at=? WHERE id=?",
+      )
+      .run(
+        delivery.status,
+        delivery.failureCount,
+        deadlineKind,
+        deadlineAt,
+        delivery.status === "pending" ? delivery.nextAttemptAt : null,
+        delivery.status === "notified" ? delivery.adapterResult : null,
+        delivery.status === "parked" ? delivery.reason : null,
+        this.now(),
+        delivery.id,
+      );
+  }
+}
+
+function readProjectIdAtRoot(rootPath: string): string | null {
+  try {
+    const manifest = parse(
+      readFileSync(join(rootPath, ".lane-router", "project.toml"), "utf8"),
+    ) as Record<string, unknown>;
+    return typeof manifest.project_id === "string" ? manifest.project_id : null;
+  } catch {
+    return null;
+  }
+}

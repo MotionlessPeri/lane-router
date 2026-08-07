@@ -10,7 +10,11 @@ export type AdapterResult =
 
 export interface AdapterDeliveryRequest {
   readonly deliveryId: string;
+  /** Ordered batch represented by this wake; the first ID equals deliveryId. */
+  readonly deliveryIds?: readonly string[];
   readonly messageId: string;
+  /** Ordered message IDs in the same batch; the first ID equals messageId. */
+  readonly messageIds?: readonly string[];
   readonly targetLaneId: string;
   readonly sequence: number;
   readonly kind: MessageKind;
