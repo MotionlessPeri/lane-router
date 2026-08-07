@@ -149,6 +149,52 @@ test("unexpected service errors return a stable non-leaking 500", async () => {
   expect(response.status).toBe(500);
   expect(await response.json()).toEqual({ ok: false, error: { code: "INTERNAL_ERROR", message: "Internal broker error" } });
 });
+
+test("heartbeat persistence failure fences and closes the server before stale reclaim", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "lane-router-fenced-server-"));
+  dataDirs.push(dataDir);
+  let now = 0;
+  let lockFsyncs = 0;
+  let fatal: Error | undefined;
+  const first = await acquireRuntimeLock(dataDir, {
+    instanceId: "first-owner",
+    now: () => now,
+    heartbeatIntervalMs: 10,
+    staleAfterMs: 50,
+    onOwnershipLost: (error) => { fatal = error; },
+    metadataFault: (stage, target) => {
+      if (stage === "fsync" && target === "lock" && ++lockFsyncs === 2)
+        throw new Error("heartbeat fsync failed");
+    },
+  });
+  const db = openDatabase(":memory:");
+  databases.push(db);
+  const server = await startBrokerHttpServer({
+    service: new BrokerService(db),
+    token: "secret",
+    port: 0,
+    runtimeLock: first,
+  });
+  servers.push(server);
+  const lost = await first.ownershipLost;
+  expect(lost.message).toContain("heartbeat fsync failed");
+  expect(fatal).toBe(lost);
+  expect(() => server.assertAvailable()).toThrow(/ownership|heartbeat|fenced/i);
+  await expect(fetch(`${server.url}/v1/health`, {
+    headers: { authorization: "Bearer secret" },
+  })).rejects.toThrow();
+
+  now = 100;
+  const second = await acquireRuntimeLock(dataDir, {
+    instanceId: "second-owner",
+    now: () => now,
+    staleAfterMs: 50,
+    isPidAlive: () => false,
+  });
+  expect(() => first.assertHealthy()).toThrow(/ownership|heartbeat|fenced/i);
+  second.release();
+  first.release();
+});
 test("WebSocket authenticates before upgrade and streams body-free events", async () => {
   const x = await setup();
   await x.client.call("syncProject", {

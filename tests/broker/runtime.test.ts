@@ -4,6 +4,7 @@ import {
   readFile,
   rename,
   rm,
+  stat,
   utimes,
   writeFile,
 } from "node:fs/promises";
@@ -124,6 +125,50 @@ test("a partial heartbeat record preserves the prior live owner record", async (
   })).rejects.toMatchObject({ owner: { instanceId: "journal-owner" } });
   owner.release();
   expect(existsSync(path)).toBe(false);
+});
+
+test("heartbeat journal stays bounded while retaining the current owner", async () => {
+  const dir = await temp();
+  let clock = 0;
+  const owner = await acquireRuntimeLock(dir, {
+    instanceId: "bounded-owner",
+    heartbeatIntervalMs: 1,
+    heartbeatJournalMaxRecords: 4,
+    heartbeatJournalMaxBytes: 1024,
+    now: () => ++clock,
+    onOwnershipLost: () => undefined,
+  });
+  const deadline = Date.now() + 15_000;
+  while (clock < 1_002 && Date.now() < deadline)
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(clock).toBeGreaterThanOrEqual(1_002);
+  expect((await stat(join(dir, "broker.lock"))).size).toBeLessThanOrEqual(1024);
+  await expect(acquireRuntimeLock(dir, {
+    instanceId: "bounded-contender",
+    verifyOwner: (candidate) => candidate.instanceId === "bounded-owner",
+  })).rejects.toMatchObject({ owner: { instanceId: "bounded-owner" } });
+  owner.release();
+}, 20_000);
+
+test("heartbeat compaction persistence failure fences the owner", async () => {
+  const dir = await temp();
+  let fsyncs = 0;
+  let fatal: Error | undefined;
+  const owner = await acquireRuntimeLock(dir, {
+    instanceId: "compaction-failure",
+    heartbeatIntervalMs: 1,
+    heartbeatJournalMaxRecords: 2,
+    onOwnershipLost: (error) => { fatal = error; },
+    metadataFault: (stage, target) => {
+      if (stage === "fsync" && target === "lock" && ++fsyncs === 3)
+        throw new Error("compaction fsync failed");
+    },
+  });
+  const lost = await owner.ownershipLost;
+  expect(lost.message).toContain("compaction fsync failed");
+  expect(fatal).toBe(lost);
+  expect(() => owner.assertHealthy()).toThrow(lost);
+  owner.release();
 });
 
 test("release removes only the lock identity it acquired", async () => {

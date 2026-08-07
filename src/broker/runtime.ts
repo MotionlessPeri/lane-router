@@ -74,9 +74,18 @@ export class BrokerLockAcquisitionTimeoutError extends Error {
     this.name = new.target.name;
   }
 }
+export class BrokerLockOwnershipLostError extends Error {
+  readonly code = "BROKER_LOCK_OWNERSHIP_LOST";
+  constructor(readonly cause: unknown) {
+    super(`Broker lock ownership was fenced after heartbeat persistence failed: ${errorMessage(cause)}`);
+    this.name = new.target.name;
+  }
+}
 export interface BrokerRuntimeLock {
   readonly path: string;
   readonly instanceId: string;
+  readonly ownershipLost: Promise<BrokerLockOwnershipLostError>;
+  assertHealthy(): void;
   release(): void;
 }
 export interface BrokerLockOwner {
@@ -102,6 +111,9 @@ export async function acquireRuntimeLock(
     staleAfterMs?: number;
     malformedStaleAfterMs?: number;
     heartbeatIntervalMs?: number;
+    heartbeatJournalMaxRecords?: number;
+    heartbeatJournalMaxBytes?: number;
+    onOwnershipLost?: (error: BrokerLockOwnershipLostError) => void;
     maxAttempts?: number;
     metadataFault?: MetadataFault;
   } = {},
@@ -157,6 +169,9 @@ export async function acquireRuntimeLock(
         now,
         false,
         options.metadataFault,
+        options.heartbeatJournalMaxRecords ?? 16,
+        options.heartbeatJournalMaxBytes ?? 4_096,
+        options.onOwnershipLost,
       );
       if (owned) return owned;
       await yieldTurn();
@@ -233,6 +248,9 @@ export async function acquireRuntimeLock(
               now,
               true,
               options.metadataFault,
+              options.heartbeatJournalMaxRecords ?? 16,
+              options.heartbeatJournalMaxBytes ?? 4_096,
+              options.onOwnershipLost,
             );
             if (owned) return owned;
           } catch (createError) {
@@ -298,6 +316,9 @@ function createOwnedLock(
   now: () => number,
   ignoreMarker = false,
   metadataFault?: MetadataFault,
+  journalMaxRecords = 16,
+  journalMaxBytes = 4_096,
+  onOwnershipLost: (error: BrokerLockOwnershipLostError) => void = () => undefined,
 ): BrokerRuntimeLock | null {
   const descriptor = openSync(
     path,
@@ -318,25 +339,52 @@ function createOwnedLock(
     removeIfOwned(path, initial.instanceId);
     return null;
   }
+  let resolveOwnershipLost!: (error: BrokerLockOwnershipLostError) => void;
+  const ownershipLost = new Promise<BrokerLockOwnershipLostError>((resolve) => {
+    resolveOwnershipLost = resolve;
+  });
+  let heartbeatRecords = 1;
+  let fenced: BrokerLockOwnershipLostError | null = null;
+  let released = false;
   const timer = setInterval(() => {
+    if (released || fenced) return;
     metadata = { ...metadata, heartbeatAt: now() };
     try {
       appendMetadata(descriptor, metadata, "lock", metadataFault);
-    } catch {
-      /* releasing */
+      heartbeatRecords += 1;
+      if (
+        heartbeatRecords >= journalMaxRecords ||
+        fstatSync(descriptor).size >= journalMaxBytes
+      ) {
+        compactMetadata(descriptor, metadata, "lock", metadataFault);
+        heartbeatRecords = 1;
+      }
+    } catch (error) {
+      fenced = new BrokerLockOwnershipLostError(error);
+      clearInterval(timer);
+      resolveOwnershipLost(fenced);
+      try {
+        onOwnershipLost(fenced);
+      } catch {
+        /* ownershipLost remains the authoritative fatal signal */
+      }
     }
   }, heartbeatIntervalMs);
   timer.unref();
-  let released = false;
   return {
     path,
     instanceId: initial.instanceId,
+    ownershipLost,
+    assertHealthy() {
+      if (fenced) throw fenced;
+      if (released) throw new BrokerLockOwnershipLostError("lock was released");
+    },
     release() {
       if (released) return;
       released = true;
       clearInterval(timer);
       closeSync(descriptor);
-      removeIfOwned(path, initial.instanceId);
+      removeIfSameFile(path, identity);
     },
   };
 }
@@ -362,12 +410,34 @@ function appendMetadata(
   fault?: MetadataFault,
 ): void {
   fault?.("serialize", target);
-  const value = `\n${JSON.stringify(owner)}`;
+  const value = `\n${serializeJournalRecord(owner)}`;
   const position = fstatSync(descriptor).size;
   fault?.("write", target);
   writeFully(descriptor, value, position);
   fault?.("fsync", target);
   fsyncSync(descriptor);
+}
+function compactMetadata(
+  descriptor: number,
+  owner: BrokerLockOwner,
+  target: MetadataTarget,
+  fault?: MetadataFault,
+): void {
+  fault?.("serialize", target);
+  const value = serializeJournalRecord(owner);
+  fault?.("truncate", target);
+  ftruncateSync(descriptor, 0);
+  fault?.("write", target);
+  writeFully(descriptor, value, 0);
+  fault?.("fsync", target);
+  fsyncSync(descriptor);
+}
+function serializeJournalRecord(owner: BrokerLockOwner): string {
+  const payload = JSON.stringify(owner);
+  return JSON.stringify({
+    owner,
+    checksum: createHash("sha256").update(payload).digest("hex"),
+  });
 }
 function writeFully(descriptor: number, value: string, position: number): void {
   const buffer = Buffer.from(value, "utf8");
@@ -392,7 +462,17 @@ function removeIfOwned(path: string, instanceId: string): void {
 }
 function parseOwner(value: string): BrokerLockOwner | null {
   for (const record of value.split("\n").reverse()) try {
-    const owner = JSON.parse(record) as Partial<BrokerLockOwner>;
+    const parsed = JSON.parse(record) as Partial<BrokerLockOwner> & {
+      owner?: Partial<BrokerLockOwner>;
+      checksum?: unknown;
+    };
+    const owner = parsed.owner ?? parsed;
+    if (parsed.owner) {
+      const expected = createHash("sha256")
+        .update(JSON.stringify(parsed.owner))
+        .digest("hex");
+      if (parsed.checksum !== expected) continue;
+    }
     return Number.isSafeInteger(owner.pid) &&
       typeof owner.instanceId === "string" &&
       typeof owner.processStart === "string" &&
@@ -404,6 +484,10 @@ function parseOwner(value: string): BrokerLockOwner | null {
     continue;
   }
   return null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 interface FileIdentity { readonly dev: number; readonly ino: number }
@@ -434,7 +518,7 @@ function defaultPidLiveness(pid: number): boolean {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   constants,

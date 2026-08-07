@@ -8,6 +8,7 @@ import type { Socket } from "node:net";
 import { createHash } from "node:crypto";
 import { ZodError } from "zod";
 import type { BrokerService } from "../broker/broker-service.js";
+import type { BrokerRuntimeLock } from "../broker/runtime.js";
 import {
   createAdminSession,
   isAuthorized,
@@ -26,6 +27,7 @@ import {
 
 export interface RunningBrokerServer {
   readonly url: string;
+  assertAvailable(): void;
   close(): Promise<void>;
 }
 export interface BrokerHttpOptions {
@@ -40,6 +42,7 @@ export interface BrokerHttpOptions {
   readonly keepAliveTimeoutMs?: number;
   readonly requestDeadlineMs?: number;
   readonly webSocket?: EventWebSocketOptions;
+  readonly runtimeLock?: BrokerRuntimeLock;
 }
 export interface ApiError {
   readonly code: string;
@@ -78,17 +81,22 @@ export async function startBrokerHttpServer(
   const address = server.address() as AddressInfo;
   const displayHost =
     address.family === "IPv6" ? `[${address.address}]` : address.address;
-  return {
+  let closePromise: Promise<void> | undefined;
+  const running: RunningBrokerServer = {
     url: `http://${displayHost}:${address.port}`,
-    close: async () => {
-      const closed = new Promise<void>((resolve) =>
-        server.close(() => resolve()),
-      );
+    assertAvailable() {
+      options.runtimeLock?.assertHealthy();
+      if (!server.listening) throw new Error("Broker HTTP server is unavailable");
+    },
+    close: () => closePromise ??= (async () => {
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()));
       for (const socket of sockets) socket.destroy();
       await events.close();
       await closed;
-    },
+    })(),
   };
+  void options.runtimeLock?.ownershipLost.then(() => running.close());
+  return running;
 }
 
 async function handle(
@@ -103,6 +111,7 @@ async function handle(
   }, options.requestDeadlineMs ?? 30_000);
   deadline.unref();
   try {
+    options.runtimeLock?.assertHealthy();
     const url = new URL(request.url ?? "/", "http://localhost");
     if (request.method === "GET" && url.pathname === "/v1/health") {
       requireDiscovery(request, options.token);
