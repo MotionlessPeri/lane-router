@@ -3,6 +3,7 @@ import {
   ClaimExpiredError,
   ClaimMismatchError,
   DeadlineNotExpiredError,
+  type DeliveryOperation,
   IllegalDeliveryTransitionError,
   InvalidDeliveryOperationError,
   StaleBindingGenerationError,
@@ -77,7 +78,7 @@ export function applyAdapterResult(
   result: AdapterResult,
   context: AdapterResultContext,
 ): Delivery {
-  requireStatus(delivery, "pending", "apply an adapter result");
+  requireStatus(delivery, "pending", "apply_adapter_result");
 
   switch (result) {
     case "started_new_turn":
@@ -97,7 +98,7 @@ export function deferDelivery(
   delivery: Delivery,
   _reason: "offline" | "unbound",
 ): PendingDelivery {
-  requireStatus(delivery, "pending", "defer a delivery");
+  requireStatus(delivery, "pending", "defer_delivery");
   return toPending(delivery, delivery.failureCount, null);
 }
 
@@ -105,9 +106,13 @@ export function expireNotification(
   delivery: Delivery,
   context: ExpirationContext,
 ): PendingDelivery | ParkedDelivery {
-  requireStatus(delivery, "notified", "expire a notification");
+  requireStatus(delivery, "notified", "expire_notification");
   if (context.now < delivery.deadlineAt) {
-    throw new DeadlineNotExpiredError("Notification deadline has not expired");
+    throw new DeadlineNotExpiredError(
+      "expire_notification",
+      context.now,
+      delivery.deadlineAt,
+    );
   }
   if (delivery.notificationKind === "queue") {
     return toPending(delivery, delivery.failureCount, null);
@@ -119,9 +124,14 @@ export function recordStartedTurnEndedBeforeClaim(
   delivery: Delivery,
   context: FailureContext,
 ): PendingDelivery | ParkedDelivery {
-  requireStatus(delivery, "notified", "record a turn ending before claim");
+  requireStatus(
+    delivery,
+    "notified",
+    "record_started_turn_ended_before_claim",
+  );
   if (delivery.notificationKind !== "claim") {
     throw new InvalidDeliveryOperationError(
+      "record_started_turn_ended_before_claim",
       "A queued notification does not represent a started turn",
     );
   }
@@ -131,13 +141,22 @@ export function recordStartedTurnEndedBeforeClaim(
 export function claimDelivery(delivery: Delivery, input: ClaimInput): ClaimedDelivery {
   if (delivery.status !== "pending" && delivery.status !== "notified") {
     throw new InvalidDeliveryOperationError(
+      "claim_delivery",
       `Cannot claim a delivery in ${delivery.status} state`,
     );
   }
   if (delivery.status === "notified" && input.now >= delivery.deadlineAt) {
-    throw new InvalidDeliveryOperationError("Cannot claim after notification expiry");
+    throw new InvalidDeliveryOperationError(
+      "claim_delivery",
+      "Cannot claim after notification expiry",
+    );
   }
-  assertCurrentGeneration(input.bindingGeneration, input.currentGeneration);
+  assertCurrentGeneration(
+    "claim_delivery",
+    input.bindingGeneration,
+    input.currentGeneration,
+  );
+  assertValidLeaseDeadline("claim_delivery", input.leaseDeadlineAt, input.now);
   assertLegalDeliveryTransition(delivery.status, "claimed");
   return {
     ...identityOf(delivery),
@@ -152,8 +171,19 @@ export function renewClaim(
   delivery: Delivery,
   input: RenewClaimInput,
 ): ClaimedDelivery {
-  requireStatus(delivery, "claimed", "renew a claim");
-  assertUsableClaim(delivery, input);
+  requireStatus(delivery, "claimed", "renew_claim");
+  assertUsableClaim("renew_claim", delivery, input);
+  assertValidLeaseDeadline("renew_claim", input.leaseDeadlineAt, input.now);
+  if (input.leaseDeadlineAt < delivery.leaseDeadlineAt) {
+    throw new InvalidDeliveryOperationError(
+      "renew_claim",
+      "A claim renewal cannot shorten the current lease",
+      {
+        provided: input.leaseDeadlineAt,
+        current: delivery.leaseDeadlineAt,
+      },
+    );
+  }
   return {
     ...delivery,
     leaseDeadlineAt: input.leaseDeadlineAt,
@@ -164,15 +194,15 @@ export function acknowledgeDelivery(
   delivery: Delivery,
   input: AcknowledgeInput,
 ): AcknowledgedDelivery {
-  requireStatus(delivery, "claimed", "acknowledge a delivery");
-  assertUsableClaim(delivery, input);
+  requireStatus(delivery, "claimed", "acknowledge_delivery");
+  assertUsableClaim("acknowledge_delivery", delivery, input);
   assertLegalDeliveryTransition("claimed", "acknowledged");
   return {
     ...identityOf(delivery),
     status: "acknowledged",
     claimId: delivery.claimId,
     bindingGeneration: delivery.bindingGeneration,
-    outcome: input.outcome,
+    outcome: copyAckOutcome(input.outcome),
     acknowledgedAt: input.now,
   };
 }
@@ -181,9 +211,13 @@ export function expireClaim(
   delivery: Delivery,
   context: ExpirationContext,
 ): PendingDelivery | ParkedDelivery {
-  requireStatus(delivery, "claimed", "expire a claim");
+  requireStatus(delivery, "claimed", "expire_claim");
   if (context.now < delivery.leaseDeadlineAt) {
-    throw new DeadlineNotExpiredError("Claim lease has not expired");
+    throw new DeadlineNotExpiredError(
+      "expire_claim",
+      context.now,
+      delivery.leaseDeadlineAt,
+    );
   }
   return recordFailure(delivery, context);
 }
@@ -191,6 +225,7 @@ export function expireClaim(
 export function parkDelivery(delivery: Delivery, reason: string): ParkedDelivery {
   if (delivery.status === "acknowledged" || delivery.status === "parked") {
     throw new InvalidDeliveryOperationError(
+      "park_delivery",
       `Cannot park a delivery in ${delivery.status} state`,
     );
   }
@@ -203,7 +238,7 @@ export function parkDelivery(delivery: Delivery, reason: string): ParkedDelivery
 }
 
 export function unparkDelivery(delivery: Delivery): PendingDelivery {
-  requireStatus(delivery, "parked", "unpark a delivery");
+  requireStatus(delivery, "parked", "unpark_delivery");
   assertLegalDeliveryTransition("parked", "pending");
   return toPending(delivery, delivery.failureCount, null);
 }
@@ -211,6 +246,7 @@ export function unparkDelivery(delivery: Delivery): PendingDelivery {
 export function selectNextEligibleDelivery(
   deliveries: readonly Delivery[],
   targetLaneId: string,
+  now: number,
 ): PendingDelivery | NotifiedDelivery | null {
   const laneDeliveries = deliveries.filter(
     (delivery) => delivery.targetLaneId === targetLaneId,
@@ -220,13 +256,13 @@ export function selectNextEligibleDelivery(
     "correction",
   );
   if (unresolvedCorrections.length > 0) {
-    return claimableOrBlocked(unresolvedCorrections[0]);
+    return claimableOrBlocked(unresolvedCorrections[0], now);
   }
 
   const unresolvedNormals = unresolvedInSequence(laneDeliveries, "normal");
   return unresolvedNormals.length === 0
     ? null
-    : claimableOrBlocked(unresolvedNormals[0]);
+    : claimableOrBlocked(unresolvedNormals[0], now);
 }
 
 function notified(
@@ -287,16 +323,18 @@ function identityOf(delivery: Delivery): DeliveryIdentity {
 function requireStatus<S extends DeliveryStatus>(
   delivery: Delivery,
   status: S,
-  operation: string,
+  operation: DeliveryOperation,
 ): asserts delivery is Extract<Delivery, { status: S }> {
   if (delivery.status !== status) {
     throw new InvalidDeliveryOperationError(
+      operation,
       `Cannot ${operation} from ${delivery.status} state`,
     );
   }
 }
 
 function assertUsableClaim(
+  operation: "acknowledge_delivery" | "renew_claim",
   delivery: ClaimedDelivery,
   input: Readonly<{
     claimId: string;
@@ -305,19 +343,66 @@ function assertUsableClaim(
     now: number;
   }>,
 ): void {
-  assertCurrentGeneration(delivery.bindingGeneration, input.currentGeneration);
-  assertCurrentGeneration(input.bindingGeneration, input.currentGeneration);
+  assertCurrentGeneration(
+    operation,
+    delivery.bindingGeneration,
+    input.currentGeneration,
+  );
+  assertCurrentGeneration(
+    operation,
+    input.bindingGeneration,
+    input.currentGeneration,
+  );
   if (input.claimId !== delivery.claimId) {
-    throw new ClaimMismatchError(`Claim ${input.claimId} is not current`);
+    throw new ClaimMismatchError(operation, input.claimId, delivery.claimId);
   }
   if (input.now >= delivery.leaseDeadlineAt) {
-    throw new ClaimExpiredError(`Claim ${delivery.claimId} has expired`);
+    throw new ClaimExpiredError(
+      operation,
+      input.now,
+      delivery.leaseDeadlineAt,
+    );
   }
 }
 
-function assertCurrentGeneration(provided: number, current: number): void {
+function assertCurrentGeneration(
+  operation: DeliveryOperation,
+  provided: number,
+  current: number,
+): void {
   if (provided !== current) {
-    throw new StaleBindingGenerationError(provided, current);
+    throw new StaleBindingGenerationError(operation, provided, current);
+  }
+}
+
+function assertValidLeaseDeadline(
+  operation: "claim_delivery" | "renew_claim",
+  leaseDeadlineAt: number,
+  now: number,
+): void {
+  if (!Number.isFinite(leaseDeadlineAt) || leaseDeadlineAt <= now) {
+    throw new InvalidDeliveryOperationError(
+      operation,
+      "Claim lease deadline must be finite and later than now",
+      { provided: leaseDeadlineAt, current: now },
+    );
+  }
+}
+
+function copyAckOutcome(outcome: AckOutcome): AckOutcome {
+  switch (outcome.kind) {
+    case "replied":
+      return { kind: "replied", replyMessageId: outcome.replyMessageId };
+    case "recorded":
+      return outcome.reference === undefined
+        ? { kind: "recorded", summary: outcome.summary }
+        : {
+            kind: "recorded",
+            summary: outcome.summary,
+            reference: outcome.reference,
+          };
+    case "rejected":
+      return { kind: "rejected", reason: outcome.reason };
   }
 }
 
@@ -337,8 +422,16 @@ function unresolvedInSequence(
 
 function claimableOrBlocked(
   delivery: Delivery | undefined,
+  now: number,
 ): PendingDelivery | NotifiedDelivery | null {
-  return delivery?.status === "pending" || delivery?.status === "notified"
-    ? delivery
-    : null;
+  if (delivery?.status === "notified") {
+    return delivery;
+  }
+  if (
+    delivery?.status === "pending" &&
+    (delivery.nextAttemptAt === null || now >= delivery.nextAttemptAt)
+  ) {
+    return delivery;
+  }
+  return null;
 }

@@ -87,11 +87,13 @@ export function establishBindingConnection(
 ): BindingConnection {
   if (binding.status !== "bound") {
     throw new InvalidDeliveryOperationError(
+      "establish_binding_connection",
       `Cannot establish a connection for ${binding.status} binding`,
     );
   }
   if (input.bindingGeneration !== binding.generation) {
     throw new StaleBindingGenerationError(
+      "establish_binding_connection",
       input.bindingGeneration,
       binding.generation,
     );

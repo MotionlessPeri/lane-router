@@ -269,9 +269,9 @@ describe("claims and automatic parking", () => {
           bindingGeneration: 3,
           currentGeneration: 3,
           now: NOW,
-          leaseDeadlineAt: NOW,
+          leaseDeadlineAt: NOW + 1,
         }),
-        { now: NOW, failureLimit: FAILURE_LIMIT, nextAttemptAt: NOW + 50 },
+        { now: NOW + 1, failureLimit: FAILURE_LIMIT, nextAttemptAt: NOW + 50 },
       )],
   ] as const)("%s parks when it reaches the failure limit", (_name, fail) => {
     expect(fail(pending(1, "normal", FAILURE_LIMIT - 1))).toMatchObject({
@@ -292,7 +292,11 @@ describe("claims and automatic parking", () => {
 describe("FIFO eligibility and correction priority", () => {
   it("selects only the earliest unresolved normal delivery", () => {
     expect(
-      selectNextEligibleDelivery([pending(2), pending(1), pending(3)], "lane-1"),
+      selectNextEligibleDelivery(
+        [pending(2), pending(1), pending(3)],
+        "lane-1",
+        NOW,
+      ),
     ).toMatchObject({ sequence: 1, kind: "normal" });
   });
 
@@ -305,7 +309,9 @@ describe("FIFO eligibility and correction priority", () => {
       leaseDeadlineAt: NOW + 100,
     });
 
-    expect(selectNextEligibleDelivery([pending(2), first], "lane-1")).toBeNull();
+    expect(
+      selectNextEligibleDelivery([pending(2), first], "lane-1", NOW),
+    ).toBeNull();
   });
 
   it("lets corrections overtake normals but preserves correction sequence", () => {
@@ -315,7 +321,7 @@ describe("FIFO eligibility and correction priority", () => {
         pending(4, "correction"),
         pending(3, "correction"),
         pending(2, "normal"),
-      ], "lane-1"),
+      ], "lane-1", NOW),
     ).toMatchObject({ sequence: 3, kind: "correction" });
   });
 
@@ -336,7 +342,7 @@ describe("FIFO eligibility and correction priority", () => {
         acknowledgedCorrection,
         parkedCorrection,
         pending(1, "normal"),
-      ], "lane-1"),
+      ], "lane-1", NOW),
     ).toMatchObject({ sequence: 1, kind: "normal" });
   });
 
@@ -345,7 +351,7 @@ describe("FIFO eligibility and correction priority", () => {
       selectNextEligibleDelivery([
         parkDelivery(pending(1), "failure_limit"),
         pending(2),
-      ], "lane-1"),
+      ], "lane-1", NOW),
     ).toMatchObject({ sequence: 2 });
   });
 
@@ -360,6 +366,7 @@ describe("FIFO eligibility and correction priority", () => {
       selectNextEligibleDelivery(
         [otherLaneCorrection, pending(2, "normal")],
         "lane-1",
+        NOW,
       ),
     ).toMatchObject({ targetLaneId: "lane-1", sequence: 2 });
   });
