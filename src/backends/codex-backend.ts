@@ -27,7 +27,7 @@ export class CodexBackend implements PlatformBackend {
     readonly client: CodexClient;
     readonly resolveLane: (threadId: string) => string | undefined;
   }) {
-    dependencies.client.onNotification((message) => this.receiveNotification(message));
+    dependencies.client.onNotification((message) => this.observeNotification(message));
   }
 
   notifyNormal(binding: BindingRecord, notification: Notification): Promise<NotificationOutcome> {
@@ -72,6 +72,17 @@ export class CodexBackend implements PlatformBackend {
     for (const threadId of threadIds) this.signalOpportunity(threadId);
   }
 
+  observeNotification(message: CodexNotification): void {
+    if (message.method !== "turn/completed" && message.method !== "thread/status/changed") return;
+    const threadId = message.params.threadId;
+    if (typeof threadId !== "string") return;
+    if (message.method === "thread/status/changed") {
+      const status = message.params.status;
+      if (typeof status !== "object" || status === null || (status as { type?: unknown }).type !== "idle") return;
+    }
+    this.signalOpportunity(threadId);
+  }
+
   private async notify(binding: BindingRecord, notification: Notification, allowSteer: boolean): Promise<NotificationOutcome> {
     if (!this.dependencies.client.isConnected()) return "offline";
     try {
@@ -98,17 +109,6 @@ export class CodexBackend implements PlatformBackend {
     } catch (error) {
       return isMissingThread(error) || !this.dependencies.client.isConnected() ? "offline" : "deferred";
     }
-  }
-
-  private receiveNotification(message: CodexNotification): void {
-    if (message.method !== "turn/completed" && message.method !== "thread/status/changed") return;
-    const threadId = message.params.threadId;
-    if (typeof threadId !== "string") return;
-    if (message.method === "thread/status/changed") {
-      const status = message.params.status;
-      if (typeof status !== "object" || status === null || (status as { type?: unknown }).type !== "idle") return;
-    }
-    this.signalOpportunity(threadId);
   }
 
   private signalOpportunity(threadId: string): void {

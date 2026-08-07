@@ -25,29 +25,22 @@ test("runs the CLI entrypoint when the package is reached through a symlink", ()
   }
 });
 
-test("creates an unbound Router-owned thread and opens the stock remote TUI", async () => {
-  const client = { createCodexThread: vi.fn(async () => "thread-new"), resumeCodexThread: vi.fn() };
+test("lets the remote TUI start a new thread instead of resuming an unmaterialized thread", async () => {
   const spawnTui = vi.fn(async () => 0);
   await expect(launchCodex([], {
     ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
-    client: () => client as never,
-    cwd: () => "C:/project",
     spawnTui,
   })).resolves.toBe(0);
-  expect(client.createCodexThread).toHaveBeenCalledWith("C:/project");
-  expect(spawnTui).toHaveBeenCalledWith("codex", ["--remote", "ws://127.0.0.1:3", "resume", "thread-new"]);
+  expect(spawnTui).toHaveBeenCalledWith("codex", ["--remote", "ws://127.0.0.1:3"]);
 });
 
 test("resume only resumes a Router-owned thread and exposes no management subcommands", async () => {
-  const client = { createCodexThread: vi.fn(), resumeCodexThread: vi.fn(async () => "thread-old") };
   const spawnTui = vi.fn(async () => 0);
   const dependencies = {
     ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
-    client: () => client as never,
-    cwd: () => "C:/project",
     spawnTui,
   };
   await launchCodex(["resume", "thread-old"], dependencies);
-  expect(client.resumeCodexThread).toHaveBeenCalledWith("thread-old");
+  expect(spawnTui).toHaveBeenCalledWith("codex", ["--remote", "ws://127.0.0.1:3", "resume", "thread-old"]);
   await expect(launchCodex(["status"], dependencies)).rejects.toThrow(/usage/i);
 });

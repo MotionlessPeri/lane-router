@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import type { ClaudeChannelPort, ClaudeChannelOutcome } from "../backends/claude-backend.js";
+import { CodexTuiBridge, type CodexTuiBridgeHost } from "../adapters/codex/tui-bridge.js";
 import type { Notification } from "../router/backend.js";
 import type { CallerContext, BindingRecord } from "../router/types.js";
 import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
@@ -14,12 +15,6 @@ export interface RouterDiscovery {
   readonly url: string;
   readonly codexEndpoint: string;
   readonly instanceId: string;
-}
-
-interface CodexThreadControl {
-  readonly endpoint: string;
-  createThread(cwd: string): Promise<string>;
-  resumeThread(threadId: string): Promise<string>;
 }
 
 export class ClaudeChannelHub implements ClaudeChannelPort {
@@ -111,11 +106,12 @@ export class LocalRouterServer {
   private readonly host: string;
   private readonly http = createServer((request, response) => void this.handle(request, response));
   private readonly websocket = new WebSocketServer({ noServer: true });
+  private readonly codexBridge: CodexTuiBridge;
   readonly claude: ClaudeChannelHub;
 
   constructor(private readonly options: {
     readonly tools: ToolService;
-    readonly codex: CodexThreadControl;
+    readonly codex: CodexTuiBridgeHost;
     readonly instanceId: string;
     readonly host?: string;
     readonly port?: number;
@@ -123,12 +119,20 @@ export class LocalRouterServer {
   }) {
     this.host = options.host ?? "127.0.0.1";
     if (this.host !== "127.0.0.1" && this.host !== "::1") throw new Error("Router internal server must bind to loopback");
+    this.codexBridge = new CodexTuiBridge(options.codex);
     this.claude = options.claude ?? new ClaudeChannelHub();
     this.http.on("upgrade", (request, socket, head) => {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       const conversationId = url.searchParams.get("conversationId");
-      if (url.pathname !== "/claude" || !conversationId) { socket.destroy(); return; }
-      this.websocket.handleUpgrade(request, socket, head, (client) => this.claude.connect(conversationId, client));
+      if (url.pathname === "/claude" && conversationId) {
+        this.websocket.handleUpgrade(request, socket, head, (client) => this.claude.connect(conversationId, client));
+        return;
+      }
+      if (url.pathname === "/codex") {
+        this.websocket.handleUpgrade(request, socket, head, (client) => this.codexBridge.connect(client));
+        return;
+      }
+      socket.destroy();
     });
   }
 
@@ -138,11 +142,12 @@ export class LocalRouterServer {
       this.http.listen(this.options.port ?? 0, this.host, () => { this.http.off("error", reject); resolve(); });
     });
     const address = this.http.address() as AddressInfo;
-    return { pid: process.pid, port: address.port, url: `http://${this.host}:${address.port}`, codexEndpoint: this.options.codex.endpoint, instanceId: this.options.instanceId };
+    return this.discovery();
   }
 
   async close(): Promise<void> {
     this.claude.close();
+    this.codexBridge.close();
     await new Promise<void>((resolve) => this.websocket.close(() => resolve()));
     await new Promise<void>((resolve, reject) => this.http.close((error) => error ? reject(error) : resolve()));
   }
@@ -164,21 +169,13 @@ export class LocalRouterServer {
         const result = await this.options.tools.call(body.method as LaneToolName, body.params as Record<string, unknown>, context);
         return json(response, 200, { result });
       }
-      if (body.method === "codex.thread.create") {
-        const cwd = recordString(body.params, "cwd");
-        return json(response, 200, { result: await this.options.codex.createThread(cwd) });
-      }
-      if (body.method === "codex.thread.resume") {
-        const threadId = recordString(body.params, "threadId");
-        return json(response, 200, { result: await this.options.codex.resumeThread(threadId) });
-      }
       return json(response, 400, { error: "unknown method" });
     } catch (error) { return json(response, 400, { error: error instanceof Error ? error.message : "request failed" }); }
   }
 
   private discovery(): RouterDiscovery {
     const address = this.http.address() as AddressInfo;
-    return { pid: process.pid, port: address.port, url: `http://${this.host}:${address.port}`, codexEndpoint: this.options.codex.endpoint, instanceId: this.options.instanceId };
+    return { pid: process.pid, port: address.port, url: `http://${this.host}:${address.port}`, codexEndpoint: `ws://${this.host}:${address.port}/codex`, instanceId: this.options.instanceId };
   }
 }
 
@@ -201,11 +198,6 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value));
-}
-
-function recordString(value: unknown, key: string): string {
-  if (typeof value !== "object" || value === null || Array.isArray(value) || typeof (value as Record<string, unknown>)[key] !== "string") throw new Error(`${key} is required`);
-  return (value as Record<string, string>)[key]!;
 }
 
 function sendWebSocket(socket: WebSocket, value: string): Promise<void> {

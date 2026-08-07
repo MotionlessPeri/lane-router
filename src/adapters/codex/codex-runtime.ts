@@ -6,7 +6,7 @@ import type { LaneToolName } from "../../tools/tool-contract.js";
 import { AppServerClient } from "./app-server-client.js";
 import { CodexAppServerProcess, CodexCapabilityGate, type CodexCommand } from "./app-server-process.js";
 import { CodexDynamicToolDispatcher, codexDynamicTools } from "./dynamic-tools.js";
-import { decodeThreadResumeResult, decodeThreadStartResult } from "./protocol.js";
+import type { DynamicToolCallParams } from "./protocol.js";
 
 export interface CodexProcessControl {
   readonly client: AppServerClient;
@@ -66,25 +66,24 @@ export class CodexRuntime {
     await this.options.process.shutdown();
   }
 
-  async createThread(cwd: string): Promise<string> {
-    const response = decodeThreadStartResult(await this.client.request("thread/start", {
-      cwd,
-      dynamicTools: this.dynamicTools,
-      developerInstructions: LANE_ROUTER_INSTRUCTIONS,
-    }));
-    this.ownedThreads.add(response.thread.id);
-    return response.thread.id;
+  decorateThreadStart(params: Record<string, unknown>): Record<string, unknown> {
+    return { ...params, dynamicTools: this.dynamicTools, developerInstructions: LANE_ROUTER_INSTRUCTIONS };
   }
 
-  async resumeThread(threadId: string): Promise<string> {
-    if (!this.ownsThread(threadId)) throw new Error(`Codex thread is not owned by Lane Router: ${threadId}`);
-    const response = decodeThreadResumeResult(await this.client.request("thread/resume", { threadId }));
-    this.ownedThreads.add(response.thread.id);
-    return response.thread.id;
+  claimThread(threadId: string): void {
+    this.ownedThreads.add(threadId);
   }
 
-  private ownsThread(threadId: string): boolean {
+  ownsThread(threadId: string): boolean {
     return this.ownedThreads.has(threadId) || this.options.state.latestBindingForConversation("codex", threadId) !== undefined;
+  }
+
+  dispatchTool(request: DynamicToolCallParams): Promise<unknown> {
+    return this.dispatcher.dispatch(request);
+  }
+
+  observeNotification(method: string, params: Readonly<Record<string, unknown>>): void {
+    this.backend.observeNotification({ method, params });
   }
 
   private knownThreadIds(): string[] {

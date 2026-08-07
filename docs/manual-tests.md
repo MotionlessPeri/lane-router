@@ -19,7 +19,7 @@
 
 前提：已构建 `dist/`，`codex --version` 与实验性 App Server schema 检查通过。
 
-1. 运行 `lane-router-codex`，确认它按需启动 Router process、创建带四项 dynamic tools 的 thread，并打开 stock Codex remote TUI。
+1. 运行 `lane-router-codex`，确认它按需启动 Router process、打开 stock Codex remote TUI，并由本地 adapter 在 TUI 的 `thread/start` 中注入四项 dynamic tools；不得先创建空 thread 再 resume。
 2. 在对话中查询目录、取得用户确认并 attach 一条 lane。
 3. 从另一条 lane 发送 normal 消息。目标 idle 时应由 `turn/start` 唤醒；busy 时应保持 pending，直到 turn 完成事件提供下一次处理机会。
 4. 在目标 busy 时发送 correction，确认 App Server 使用 `turn/steer`，且通知只包含 mailbox 路径和 message ID。

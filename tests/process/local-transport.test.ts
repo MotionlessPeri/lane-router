@@ -1,36 +1,91 @@
 import { expect, test, vi } from "vitest";
+import WebSocket, { WebSocketServer } from "ws";
 
 import { connectClaudeChannel, LocalRouterClient } from "../../src/process/local-client.js";
 import { ClaudeChannelHub, LocalRouterServer } from "../../src/process/local-server.js";
 import type { BindingRecord } from "../../src/router/types.js";
 
-test("serves health, four lane calls, and the two launcher-only Codex operations on loopback", async () => {
+test("the Codex TUI bridge injects Router tools into TUI-created threads", async () => {
+  const upstreamServer = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise<void>((resolve) => upstreamServer.once("listening", resolve));
+  const address = upstreamServer.address();
+  if (typeof address === "string" || address === null) throw new Error("missing upstream address");
+  const upstreamEndpoint = `ws://127.0.0.1:${address.port}`;
+  const claimed: string[] = [];
+  const codex = {
+    endpoint: upstreamEndpoint,
+    decorateThreadStart: (params: Record<string, unknown>) => ({ ...params, dynamicTools: [{ name: "lane_directory" }], developerInstructions: "router instructions" }),
+    claimThread: (threadId: string) => { claimed.push(threadId); },
+    ownsThread: (threadId: string) => threadId === "thread-new",
+    dispatchTool: vi.fn(async () => ({ success: true, contentItems: [{ type: "inputText", text: "ok" }] })),
+    observeNotification: vi.fn(),
+  };
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex, instanceId: "instance-1" });
+  const discovery = await server.start();
+  let client: WebSocket | undefined;
+  let upstream: WebSocket | undefined;
+  try {
+    expect(discovery.codexEndpoint).not.toBe(upstreamEndpoint);
+    const upstreamConnected = new Promise<WebSocket>((resolve) => upstreamServer.once("connection", resolve));
+    client = new WebSocket(discovery.codexEndpoint);
+    await new Promise<void>((resolve, reject) => { client!.once("open", resolve); client!.once("error", reject); });
+    upstream = await upstreamConnected;
+
+    client.send(JSON.stringify({ id: 1, method: "initialize", params: { clientInfo: { name: "tui" } } }));
+    expect(await nextJson(upstream)).toMatchObject({ id: 1, method: "initialize" });
+    upstream.send(JSON.stringify({ id: 1, result: { codexHome: "tmp" } }));
+    expect(await nextJson(client)).toEqual({ id: 1, result: { codexHome: "tmp" } });
+
+    client.send(JSON.stringify({ id: 2, method: "thread/start", params: { cwd: "C:/project" } }));
+    expect(await nextJson(upstream)).toEqual({
+      id: 2,
+      method: "thread/start",
+      params: { cwd: "C:/project", dynamicTools: [{ name: "lane_directory" }], developerInstructions: "router instructions" },
+    });
+    upstream.send(JSON.stringify({ id: 2, result: { thread: { id: "thread-new", status: { type: "idle" }, turns: [] } } }));
+    await expect(nextJson(client)).resolves.toMatchObject({ id: 2, result: { thread: { id: "thread-new" } } });
+    expect(claimed).toEqual(["thread-new"]);
+
+    upstream.send(JSON.stringify({ id: 3, method: "item/tool/call", params: { threadId: "thread-new", turnId: "turn-1", callId: "call-1", tool: "lane_directory", arguments: { project: "alpha" } } }));
+    await expect(nextJson(upstream)).resolves.toEqual({ id: 3, result: { success: true, contentItems: [{ type: "inputText", text: "ok" }] } });
+    expect(codex.dispatchTool).toHaveBeenCalledOnce();
+
+    upstream.send(JSON.stringify({ method: "thread/status/changed", params: { threadId: "thread-new", status: { type: "idle" } } }));
+    await expect(nextJson(client)).resolves.toMatchObject({ method: "thread/status/changed" });
+    expect(codex.observeNotification).toHaveBeenCalledWith("thread/status/changed", { threadId: "thread-new", status: { type: "idle" } });
+
+    client.send(JSON.stringify({ id: 4, method: "thread/resume", params: { threadId: "foreign" } }));
+    await expect(nextJson(client)).resolves.toMatchObject({ id: 4, error: { message: expect.stringMatching(/not owned/i) } });
+  } finally {
+    client?.close(); upstream?.close();
+    await server.close();
+    await new Promise<void>((resolve) => upstreamServer.close(() => resolve()));
+  }
+});
+
+test("serves health and four lane calls on loopback", async () => {
   const tools = { call: vi.fn(async (name: string) => ({ name })) };
   const codex = {
-    createThread: vi.fn(async () => "thread-new"),
-    resumeThread: vi.fn(async (threadId: string) => threadId),
     endpoint: "ws://127.0.0.1:45000",
   };
-  const server = new LocalRouterServer({ tools: tools as never, codex, instanceId: "instance-1" });
+  const server = new LocalRouterServer({ tools: tools as never, codex: codex as never, instanceId: "instance-1" });
   const discovery = await server.start();
   try {
     expect(discovery.url).toMatch(/^http:\/\/127\.0\.0\.1:/u);
     const client = new LocalRouterClient(discovery.url);
-    await expect(client.health()).resolves.toMatchObject({ instanceId: "instance-1", codexEndpoint: codex.endpoint });
+    await expect(client.health()).resolves.toMatchObject({ instanceId: "instance-1", codexEndpoint: expect.stringMatching(/\/codex$/u) });
     await expect(client.call("lane_directory", { project: "alpha" }, {
       backend: "claude", conversationId: "session-1", requestKey: "request-1",
     })).resolves.toEqual({ name: "lane_directory" });
     expect(tools.call).toHaveBeenCalledWith("lane_directory", { project: "alpha" }, {
       backend: "claude", conversationId: "session-1", requestKey: "request-1",
     });
-    await expect(client.createCodexThread("C:/project")).resolves.toBe("thread-new");
-    await expect(client.resumeCodexThread("thread-old")).resolves.toBe("thread-old");
   } finally { await server.close(); }
 });
 
 test("rejects non-loopback binding configuration and unknown RPC methods", async () => {
   expect(() => new LocalRouterServer({ tools: {} as never, codex: {} as never, instanceId: "x", host: "0.0.0.0" })).toThrow(/loopback/i);
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1", createThread: vi.fn(), resumeThread: vi.fn() }, instanceId: "x" });
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x" });
   const discovery = await server.start();
   try {
     const response = await fetch(`${discovery.url}/rpc`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ method: "unknown_tool", params: {}, context: {} }) });
@@ -39,7 +94,7 @@ test("rejects non-loopback binding configuration and unknown RPC methods", async
 });
 
 test("bridges body-free Claude notifications and waits for lifecycle Stop before replacement", async () => {
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1", createThread: vi.fn(), resumeThread: vi.fn() }, instanceId: "x" });
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x" });
   const discovery = await server.start();
   const channel = await connectClaudeChannel(discovery.url, "session-1");
   const notifications: unknown[] = [];
@@ -66,9 +121,19 @@ test("a Claude reconnect after Router restart resolves its durable binding and e
   const hub = new ClaudeChannelHub((conversationId) => conversationId === "session-1" ? binding : undefined);
   const attention: string[] = [];
   hub.onAttentionOpportunity((current) => { attention.push(current.laneAddress); });
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1", createThread: vi.fn(), resumeThread: vi.fn() }, instanceId: "x", claude: hub });
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x", claude: hub });
   const discovery = await server.start();
   const channel = await connectClaudeChannel(discovery.url, "session-1");
   try { await vi.waitFor(() => expect(attention).toEqual(["alpha/design"])); }
   finally { await channel.close(); await server.close(); }
 });
+
+function nextJson(socket: WebSocket): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    socket.once("message", (raw) => {
+      try { resolve(JSON.parse(raw.toString()) as unknown); }
+      catch (error) { reject(error); }
+    });
+    socket.once("error", reject);
+  });
+}

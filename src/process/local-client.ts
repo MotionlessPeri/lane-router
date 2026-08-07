@@ -13,9 +13,6 @@ export class LocalRouterClient {
   call(name: LaneToolName, args: Record<string, unknown>, context: CallerContext): Promise<unknown> {
     return this.rpc(name, args, context);
   }
-  createCodexThread(cwd: string): Promise<string> { return this.rpc("codex.thread.create", { cwd }) as Promise<string>; }
-  resumeCodexThread(threadId: string): Promise<string> { return this.rpc("codex.thread.resume", { threadId }) as Promise<string>; }
-
   private async rpc(method: string, params: Record<string, unknown>, context?: CallerContext): Promise<unknown> {
     const response = await fetch(`${this.url}/rpc`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ method, params, ...(context ? { context } : {}) }) });
     const body = await response.json() as { result?: unknown; error?: string };

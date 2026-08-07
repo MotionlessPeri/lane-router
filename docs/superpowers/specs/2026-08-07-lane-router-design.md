@@ -246,7 +246,7 @@ backend 自己完成状态检查与动作选择，避免 Router core 先检查�
 
 Claude/Codex 接入进程连接时先确保 Router process 存在；若不存在则在后台按需启动。并发启动由单实例锁收敛为一个进程。Router 启动后常驻到进程被显式终止或系统关闭。
 
-用户不需要单独启动或管理 Router process。Claude MCP 接入会直接确保它存在；Codex 使用单用途 `lane-router-codex` launcher 完成同一件事。launcher 通过仅供自身使用的内部 thread bootstrap 操作，让共享 App Server 创建或恢复带四项 dynamic tools 的 Router-owned thread，再执行 Codex 自带的 `codex --remote <endpoint> resume <thread-id>` 打开 TUI。该内部操作不属于 agent tools，也不执行 lane 注册或管理。
+用户不需要单独启动或管理 Router process。Claude MCP 接入会直接确保它存在；Codex 使用单用途 `lane-router-codex` launcher 完成同一件事。launcher 将 Codex 自带 TUI 连接到 Router 的本地 App Server adapter；新对话仍由 TUI 正常调用 `thread/start`，adapter 只向该请求注入四项 dynamic tools 和 Router instructions，并从响应取得权威 `threadId`。这样避免在首个真实 turn 前恢复尚未落盘的 thread。恢复已有 Router-owned thread 时，adapter 校验所有权后转发 TUI 的 `thread/resume`。该 adapter 不执行 lane 注册或管理。
 
 这是 V1 唯一的命令行例外。它没有 lane 注册、查询、状态、诊断或管理子命令，也不改变“lane 操作全部由对话工具完成”的边界。V1 不注册 Windows 服务，也不暴露运行时重试和 deadline 调参项。
 
@@ -286,7 +286,7 @@ V1 完成必须证明：
 5. 消息文件不可修改；correction 通过新文件和 `reply_to` 保留历史。
 6. normal 消息不会打断繁忙 turn；Codex correction 能 steer，Claude correction 如实排入下一 turn。
 7. lane 离线、Router 重启或处理未 ack 时，pending 消息不会丢失，并会再次获得处理机会。
-8. Claude MCP 或 Codex launcher 都可以按需启动 Router process；Codex launcher 创建的 thread 带四项 dynamic tools，并可由 remote TUI 打开。用户不需要 Lane Router 管理 CLI 或 Windows 服务。
+8. Claude MCP 或 Codex launcher 都可以按需启动 Router process；Codex remote TUI 通过本地 adapter 创建带四项 dynamic tools 的 thread，不需要预创建后 resume。用户不需要 Lane Router 管理 CLI 或 Windows 服务。
 9. 数据模型和公开接口中不存在本设计明确删除的 project/workspace、管理面和安全扩展。
 
 ## 实施前置条件

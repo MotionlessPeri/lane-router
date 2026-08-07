@@ -285,7 +285,7 @@ flowchart TD
 
 - [ ] **Step 2: 实现最小本机内部 transport**
 
-  只绑定 loopback。agent-facing RPC 只服务四项 lane 操作；另外保留 Claude Channel 连接、健康探测，以及只供 `lane-router-codex` 使用的 `codex.thread.create` / `codex.thread.resume` 内部端点。后两项只创建或恢复带四项 dynamic tools 的 Router-owned thread，不执行任何 lane 操作，也不形成通用管理 API。discovery 文件只保存当前 PID、Router port、Codex App Server endpoint 和 instance ID；不生成 bearer token、admin session 或 HMAC credential。
+  只绑定 loopback。agent-facing RPC 只服务四项 lane 操作；另外保留 Claude Channel 连接、健康探测和 Codex TUI 的本地 App Server adapter。adapter 转发 TUI 协议，只在 `thread/start` 注入四项 dynamic tools 和 Router instructions、记录返回的权威 `threadId`，并在 `thread/resume` 前校验 Router ownership；不增加内部 thread 管理 RPC。discovery 文件只保存当前 PID、Router port、Codex adapter endpoint 和 instance ID；不生成 bearer token、admin session 或 HMAC credential。
 
 - [ ] **Step 3: 实现按需启动**
 
@@ -295,7 +295,7 @@ flowchart TD
 
   Claude MCP server 启动时先确保 Router 存在，并以本次 MCP/Channel 连接作为当前 conversation 身份；不再要求预先绑定环境变量。
 
-  Router process 持有一个共享 Codex App Server。`lane-router-codex` 无参数启动时调用 Router 内部接口创建一个带四项 dynamic tools 的未绑定 thread，然后执行 `codex --remote <endpoint> resume <thread-id>` 打开 TUI；`lane-router-codex resume <thread-id>` 恢复 Router-owned thread。tool call 继续使用 App Server 提供的权威 `threadId`。
+  Router process 持有一个共享 Codex App Server。`lane-router-codex` 无参数启动时执行 `codex --remote <adapter-endpoint>`，由 TUI 正常创建新 thread，adapter 在转发 `thread/start` 时注入四项 dynamic tools；`lane-router-codex resume <thread-id>` 经 adapter 校验后恢复 Router-owned thread。tool call 继续使用 App Server 提供的权威 `threadId`。
 
   `package.json` 只注册一个 `lane-router-codex` bin。launcher 使用当前目录作为新 thread 的 cwd；它是唯一命令行例外，只负责 Codex conversation 冷启动和 TUI attach，不提供 lane 注册、目录、状态或管理命令。所有 lane 操作仍在对话中完成。
 
@@ -306,7 +306,7 @@ flowchart TD
   npm run typecheck
   ```
 
-  预期：聚焦测试全部 PASS，并发两个 `ensureRouter` 只得到一个 Router process；Codex-only 冷启动能创建带四项 dynamic tools 的 thread 并以正确 endpoint/thread ID 启动 TUI。此时旧 server/broker 测试可能仍引用已切换的工具接口，因此不创建中间 commit，直接进入 Task 5 删除旧路径并恢复全量绿色。
+  预期：聚焦测试全部 PASS，并发两个 `ensureRouter` 只得到一个 Router process；Codex-only 冷启动把 TUI 指向 adapter，TUI 的 `thread/start` 获得四项 dynamic tools，且无需恢复尚未落盘的 thread。此时旧 server/broker 测试可能仍引用已切换的工具接口，因此不创建中间 commit，直接进入 Task 5 删除旧路径并恢复全量绿色。
 
 ## Task 5：删除旧实现并完成端到端验收
 
@@ -355,7 +355,7 @@ flowchart TD
 
 - [ ] **Step 5: 更新并运行有权限的真实 fixture**
 
-  更新 manual test，只验证批准后的平台语义和文件 mailbox。Codex fixture 同时覆盖共享 App Server、在线 TUI wake、TUI 退出后的离线 turn，以及用 `codex --remote <endpoint> resume <thread-id>` 恢复完整历史。真实 Claude/Kimi 或 Codex 调用若需要外部模型、账户或人工窗口，只在已有授权和环境就绪时运行；否则记录为未运行，不用 fake 结果冒充真实验证。
+  更新 manual test，只验证批准后的平台语义和文件 mailbox。Codex fixture 同时覆盖共享 App Server、adapter 注入、在线 TUI wake、TUI 退出后的离线 turn，以及用 `codex --remote <adapter-endpoint> resume <thread-id>` 恢复完整历史。真实 Claude/Kimi 或 Codex 调用若需要外部模型、账户或人工窗口，只在已有授权和环境就绪时运行；否则记录为未运行，不用 fake 结果冒充真实验证。
 
 - [ ] **Step 6: 最终范围审查**
 
