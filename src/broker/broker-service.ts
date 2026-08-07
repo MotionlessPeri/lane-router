@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { parse } from "smol-toml";
 
 import type { AckOutcome, Delivery } from "../core/model.js";
@@ -64,6 +65,19 @@ export interface BrokerDependencies {
   readonly pathAvailable?: (rootPath: string) => boolean;
   readonly projectIdAtRoot?: (rootPath: string) => string | null;
 }
+export class BrokerContractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+export interface RelinkPreview {
+  readonly workspaceId: string;
+  readonly oldRootPath: string;
+  readonly newRootPath: string;
+  readonly affectedBindings: string[];
+  readonly digest: string;
+}
 
 export class BrokerService {
   readonly config: RuntimeConfig;
@@ -101,6 +115,16 @@ export class BrokerService {
     rootPath: string;
     manifest: ProjectManifest;
   }): { projectId: string; workspaceId: string; laneAddresses: string[] } {
+    const replay = this.operations.replay<
+      typeof input,
+      ReturnType<BrokerService["syncProject"]>
+    >({
+      operationId: input.operationId,
+      actor: { kind: "admin", id: input.adminId },
+      method: "sync_project",
+      request: input,
+    });
+    if (replay.found) return replay.result;
     return this.mutate(
       input.operationId,
       { kind: "admin", id: input.adminId },
@@ -116,6 +140,34 @@ export class BrokerService {
             throw new Error(
               "Project key conflicts with existing project identity",
             );
+          if (existing) {
+            const declared = (
+              this.database
+                .prepare(
+                  "SELECT name,role_document,communication_entry FROM lane WHERE project_id=? ORDER BY name",
+                )
+                .all(m.projectId) as Array<{
+                name: string;
+                role_document: string;
+                communication_entry: number;
+              }>
+            ).map((lane) => ({
+              name: lane.name,
+              roleFile: lane.role_document,
+              communicationEntry: lane.communication_entry === 1,
+            }));
+            const incoming = [...m.lanes]
+              .map((lane) => ({
+                name: lane.name,
+                roleFile: lane.roleFile,
+                communicationEntry: lane.communicationEntry,
+              }))
+              .sort((left, right) => left.name.localeCompare(right.name));
+            if (canonicalJson(declared) !== canonicalJson(incoming))
+              throw new BrokerContractError(
+                "Project lane declaration conflict across workspaces",
+              );
+          }
           this.database
             .prepare(
               "INSERT INTO project(id,project_key,display_name,manifest_identity,manifest_version,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,manifest_identity=excluded.manifest_identity,manifest_version=excluded.manifest_version",
@@ -182,7 +234,18 @@ export class BrokerService {
     workspaceId: string;
     newRootPath: string;
     projectId: string;
+    previewDigest: string;
   }): { workspaceId: string; rootPath: string; affectedBindings: string[] } {
+    const replay = this.operations.replay<
+      typeof input,
+      ReturnType<BrokerService["relinkWorkspace"]>
+    >({
+      operationId: input.operationId,
+      actor: { kind: "admin", id: input.adminId },
+      method: "relink_workspace",
+      request: input,
+    });
+    if (replay.found) return replay.result;
     return this.mutate(
       input.operationId,
       { kind: "admin", id: input.adminId },
@@ -190,46 +253,40 @@ export class BrokerService {
       input,
       () =>
         inTransaction(this.database, () => {
-          const workspace = this.database
-            .prepare("SELECT project_id FROM workspace WHERE id=?")
-            .get(input.workspaceId) as { project_id: string } | undefined;
-          if (!workspace || workspace.project_id !== input.projectId)
-            throw new Error("Workspace project does not match relink target");
-          const oldRoot = (
-            this.database
-              .prepare("SELECT local_root FROM workspace WHERE id=?")
-              .get(input.workspaceId) as { local_root: string }
-          ).local_root;
-          if (this.pathAvailable(oldRoot))
-            throw new Error(
-              "Workspace old root is still available; relink is only for moves",
+          const preview = this.computeRelinkPreview(input);
+          if (preview.digest !== input.previewDigest)
+            throw new BrokerContractError(
+              "Relink preview changed; review and acknowledge the current affected bindings",
             );
-          if (this.projectIdAtRoot(input.newRootPath) !== input.projectId)
-            throw new Error(
-              "Relink target project manifest does not match the workspace project",
-            );
-          const affectedBindings = (
-            this.database
-              .prepare(
-                "SELECT id FROM binding WHERE workspace_id=? AND is_current=1",
-              )
-              .all(input.workspaceId) as { id: string }[]
-          ).map((row) => row.id);
           this.database
             .prepare(
               "INSERT INTO workspace_relink(workspace_id,old_root,new_root,relinked_at) VALUES(?,?,?,?)",
             )
-            .run(input.workspaceId, oldRoot, input.newRootPath, this.now());
+            .run(
+              input.workspaceId,
+              preview.oldRootPath,
+              input.newRootPath,
+              this.now(),
+            );
           this.database
             .prepare("UPDATE workspace SET local_root=? WHERE id=?")
             .run(input.newRootPath, input.workspaceId);
           return {
             workspaceId: input.workspaceId,
             rootPath: input.newRootPath,
-            affectedBindings,
+            affectedBindings: preview.affectedBindings,
           };
         }),
     );
+  }
+
+  previewRelink(input: {
+    adminId: string;
+    workspaceId: string;
+    newRootPath: string;
+    projectId: string;
+  }): RelinkPreview {
+    return this.computeRelinkPreview(input);
   }
 
   bind(input: {
@@ -241,6 +298,16 @@ export class BrokerService {
     adapter: "claude" | "codex";
     conversationId: string;
   }): { binding: CurrentBinding; bootstrap: BootstrapEnvelope } {
+    const replay = this.operations.replay<
+      typeof input,
+      ReturnType<BrokerService["bind"]>
+    >({
+      operationId: input.operationId,
+      actor: { kind: "admin", id: input.adminId },
+      method: "bind",
+      request: input,
+    });
+    if (replay.found) return replay.result;
     return this.mutate(
       input.operationId,
       { kind: "admin", id: input.adminId },
@@ -251,6 +318,15 @@ export class BrokerService {
           const laneId = this.resolveLane(input.laneAddress);
           if (this.repositories.getCurrentBinding(laneId))
             throw new Error("Lane already has a current binding");
+          const ownsWorkspace = this.database
+            .prepare(
+              "SELECT 1 FROM lane l JOIN workspace w ON w.id=? AND w.project_id=l.project_id WHERE l.id=?",
+            )
+            .get(input.workspaceId, laneId);
+          if (!ownsWorkspace)
+            throw new BrokerContractError(
+              "Initial bind workspace must belong to the lane project",
+            );
           this.database
             .prepare(
               "INSERT INTO binding(id,lane_id,workspace_id,adapter,conversation_id,generation,active_at,inactive_at,inactive_reason,is_current,state,state_changed_at,state_reason) VALUES(?,?,?,?,?,1,?,NULL,NULL,1,'bound',NULL,NULL)",
@@ -285,6 +361,13 @@ export class BrokerService {
     laneAddress: string;
     reason: string;
   }): CurrentBinding {
+    const replay = this.operations.replay<typeof input, CurrentBinding>({
+      operationId: input.operationId,
+      actor: { kind: "admin", id: input.adminId },
+      method: "unbind",
+      request: input,
+    });
+    if (replay.found) return replay.result;
     return this.mutate(
       input.operationId,
       { kind: "admin", id: input.adminId },
@@ -313,6 +396,16 @@ export class BrokerService {
     conversationId: string;
     reason: string;
   }): { binding: CurrentBinding; bootstrap: BootstrapEnvelope } {
+    const replay = this.operations.replay<
+      typeof input,
+      ReturnType<BrokerService["rebuild"]>
+    >({
+      operationId: input.operationId,
+      actor: { kind: "admin", id: input.adminId },
+      method: "rebuild",
+      request: input,
+    });
+    if (replay.found) return replay.result;
     return this.mutate(
       input.operationId,
       { kind: "admin", id: input.adminId },
@@ -357,6 +450,16 @@ export class BrokerService {
     },
     waitUntilIdle = this.waitUntilIdle,
   ): Promise<{ binding: CurrentBinding; bootstrap: BootstrapEnvelope }> {
+    const replay = this.operations.replay<
+      typeof input,
+      { binding: CurrentBinding; bootstrap: BootstrapEnvelope }
+    >({
+      operationId: input.operationId,
+      actor: { kind: "admin", id: input.adminId },
+      method: "rotate",
+      request: input,
+    });
+    if (replay.found) return replay.result;
     const laneId = this.resolveLane(input.laneAddress);
     const previous = this.requireCurrentBinding(laneId);
     if (!waitUntilIdle)
@@ -393,6 +496,16 @@ export class BrokerService {
     metadata: unknown;
     replyTo?: string | null;
   }): { messageId: string; deliveryId: string; sequence: number } {
+    const replay = this.operations.replay<
+      typeof input,
+      ReturnType<BrokerService["send"]>
+    >({
+      operationId: input.operationId,
+      actor: { kind: "binding", id: input.actor.bindingId },
+      method: "send",
+      request: input,
+    });
+    if (replay.found) return replay.result;
     const actor = this.authenticate(input.actor);
     return this.mutate(
       input.operationId,
@@ -432,11 +545,22 @@ export class BrokerService {
     deliveryId: string;
     claimId?: string;
   }): { claimId: string; deadline: number } {
+    const operationMethod = input.claimId ? "renew_claim" : "claim";
+    const replay = this.operations.replay<
+      typeof input,
+      { claimId: string; deadline: number }
+    >({
+      operationId: input.operationId,
+      actor: { kind: "binding", id: input.actor.bindingId },
+      method: operationMethod,
+      request: input,
+    });
+    if (replay.found) return replay.result;
     const actor = this.authenticate(input.actor);
     return this.mutate(
       input.operationId,
       { kind: "binding", id: actor.id },
-      input.claimId ? "renew_claim" : "claim",
+      operationMethod,
       input,
       () => {
         this.assertTargetsActor(input.deliveryId, actor);
@@ -486,6 +610,13 @@ export class BrokerService {
     claimId: string;
     outcome: AckOutcome;
   }): Delivery {
+    const replay = this.operations.replay<typeof input, Delivery>({
+      operationId: input.operationId,
+      actor: { kind: "binding", id: input.actor.bindingId },
+      method: "ack",
+      request: input,
+    });
+    if (replay.found) return replay.result;
     const actor = this.authenticate(input.actor);
     return this.mutate(
       input.operationId,
@@ -510,6 +641,13 @@ export class BrokerService {
     deliveryId: string;
     reason: string;
   }): Delivery {
+    const replay = this.operations.replay<typeof input, Delivery>({
+      operationId: input.operationId,
+      actor: { kind: "binding", id: input.actor.bindingId },
+      method: "park",
+      request: input,
+    });
+    if (replay.found) return replay.result;
     const actor = this.authenticate(input.actor);
     return this.mutate(
       input.operationId,
@@ -527,6 +665,13 @@ export class BrokerService {
             )
             .run(this.now(), current.claimId);
         this.persistDelivery(parked);
+        appendEvent(
+          this.database,
+          "delivery_parked",
+          this.now(),
+          { reason: input.reason },
+          { deliveryId: input.deliveryId },
+        );
         return parked;
       },
     );
@@ -536,6 +681,13 @@ export class BrokerService {
     adminId: string;
     deliveryId: string;
   }): Delivery {
+    const replay = this.operations.replay<typeof input, Delivery>({
+      operationId: input.operationId,
+      actor: { kind: "admin", id: input.adminId },
+      method: "unpark",
+      request: input,
+    });
+    if (replay.found) return replay.result;
     return this.mutate(
       input.operationId,
       { kind: "admin", id: input.adminId },
@@ -546,6 +698,13 @@ export class BrokerService {
           this.repositories.readDelivery(input.deliveryId),
         );
         this.persistDelivery(pending);
+        appendEvent(
+          this.database,
+          "delivery_unparked",
+          this.now(),
+          { status: "pending" },
+          { deliveryId: input.deliveryId },
+        );
         return pending;
       },
     );
@@ -555,12 +714,14 @@ export class BrokerService {
     bindingId: string;
     generation: number;
     laneAddress: string;
+    adapter: "claude" | "codex";
   } {
     const binding = this.authenticate(actor);
     return {
       bindingId: binding.id,
       generation: binding.generation,
       laneAddress: this.addressFor(binding.laneId),
+      adapter: binding.adapter,
     };
   }
   status(): unknown {
@@ -724,6 +885,53 @@ export class BrokerService {
     this.idSequence += 1;
     return `${this.randomId(prefix)}-${this.idSequence}`;
   }
+  private computeRelinkPreview(input: {
+    workspaceId: string;
+    newRootPath: string;
+    projectId: string;
+  }): RelinkPreview {
+    const workspace = this.database
+      .prepare("SELECT project_id,local_root FROM workspace WHERE id=?")
+      .get(input.workspaceId) as
+      | { project_id: string; local_root: string }
+      | undefined;
+    if (!workspace || workspace.project_id !== input.projectId)
+      throw new BrokerContractError(
+        "Workspace project does not match relink target",
+      );
+    if (this.pathAvailable(workspace.local_root))
+      throw new BrokerContractError(
+        "Workspace old root is still available; relink is only for moves",
+      );
+    if (this.projectIdAtRoot(input.newRootPath) !== input.projectId)
+      throw new BrokerContractError(
+        "Relink target project manifest does not match the workspace project",
+      );
+    const affectedBindings = (
+      this.database
+        .prepare(
+          "SELECT id FROM binding WHERE workspace_id=? AND is_current=1 ORDER BY id",
+        )
+        .all(input.workspaceId) as { id: string }[]
+    ).map((row) => row.id);
+    const identity = {
+      workspaceId: input.workspaceId,
+      oldRootPath: workspace.local_root,
+      newRootPath: input.newRootPath,
+      projectId: input.projectId,
+      affectedBindings,
+    };
+    return {
+      workspaceId: input.workspaceId,
+      oldRootPath: workspace.local_root,
+      newRootPath: input.newRootPath,
+      affectedBindings,
+      digest: createHash("sha256")
+        .update(canonicalJson(identity))
+        .digest("hex"),
+    };
+  }
+
   private persistDelivery(delivery: Delivery): void {
     const deadlineKind =
       delivery.status === "notified"

@@ -78,6 +78,12 @@ describe("BrokerService", () => {
       manifest,
     });
     expect(first.workspaceId).not.toBe(clone.workspaceId);
+    const relinkPreview = service.previewRelink({
+      adminId: "admin",
+      workspaceId: "w1",
+      newRootPath: "C:/moved",
+      projectId: "p",
+    });
     expect(
       service.relinkWorkspace({
         operationId: "op-3",
@@ -85,6 +91,7 @@ describe("BrokerService", () => {
         workspaceId: "w1",
         newRootPath: "C:/moved",
         projectId: "p",
+        previewDigest: relinkPreview.digest,
       }).rootPath,
     ).toBe("C:/moved");
     expect(
@@ -130,6 +137,7 @@ describe("BrokerService", () => {
         workspaceId: "w",
         newRootPath: "C:/new",
         projectId: "p",
+        previewDigest: "unreviewed",
       }),
     ).toThrow(/old.*available/i);
     oldAvailable = false;
@@ -141,6 +149,7 @@ describe("BrokerService", () => {
         workspaceId: "w",
         newRootPath: "C:/new",
         projectId: "p",
+        previewDigest: "unreviewed",
       }),
     ).toThrow(/target.*project/i);
   });
@@ -580,3 +589,289 @@ function createTwoLaneService(): BrokerService {
   });
   return service;
 }
+
+test("exact conversation mutations replay after their binding becomes historical", async () => {
+  const service = createTwoLaneService();
+  const first = service.send({
+    operationId: "replay-send",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "project/b",
+    kind: "normal",
+    body: "one",
+    metadata: {},
+  });
+  const claim = service.claim({
+    operationId: "replay-claim",
+    actor: { bindingId: "bb", generation: 1 },
+    deliveryId: first.deliveryId,
+  });
+  const renew = service.claim({
+    operationId: "replay-renew",
+    actor: { bindingId: "bb", generation: 1 },
+    deliveryId: first.deliveryId,
+    claimId: claim.claimId,
+  });
+  const ack = service.ack({
+    operationId: "replay-ack",
+    actor: { bindingId: "bb", generation: 1 },
+    deliveryId: first.deliveryId,
+    claimId: claim.claimId,
+    outcome: { kind: "recorded", summary: "done" },
+  });
+  const second = service.send({
+    operationId: "second",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "project/b",
+    kind: "normal",
+    body: "two",
+    metadata: {},
+  });
+  const parked = service.park({
+    operationId: "replay-park",
+    actor: { bindingId: "bb", generation: 1 },
+    deliveryId: second.deliveryId,
+    reason: "later",
+  });
+  await service.rotate(
+    {
+      operationId: "rotate-a",
+      adminId: "admin",
+      bindingId: "ba2",
+      laneAddress: "project/a",
+      workspaceId: "w",
+      adapter: "codex",
+      conversationId: "ta2",
+      reason: "rotate",
+      timeoutMs: 5,
+    },
+    async () => true,
+  );
+  await service.rotate(
+    {
+      operationId: "rotate-b",
+      adminId: "admin",
+      bindingId: "bb2",
+      laneAddress: "project/b",
+      workspaceId: "w",
+      adapter: "codex",
+      conversationId: "tb2",
+      reason: "rotate",
+      timeoutMs: 5,
+    },
+    async () => true,
+  );
+  expect(
+    service.send({
+      operationId: "replay-send",
+      actor: { bindingId: "ba", generation: 1 },
+      target: "project/b",
+      kind: "normal",
+      body: "one",
+      metadata: {},
+    }),
+  ).toEqual(first);
+  expect(
+    service.claim({
+      operationId: "replay-claim",
+      actor: { bindingId: "bb", generation: 1 },
+      deliveryId: first.deliveryId,
+    }),
+  ).toEqual(claim);
+  expect(
+    service.claim({
+      operationId: "replay-renew",
+      actor: { bindingId: "bb", generation: 1 },
+      deliveryId: first.deliveryId,
+      claimId: claim.claimId,
+    }),
+  ).toEqual(renew);
+  expect(
+    service.ack({
+      operationId: "replay-ack",
+      actor: { bindingId: "bb", generation: 1 },
+      deliveryId: first.deliveryId,
+      claimId: claim.claimId,
+      outcome: { kind: "recorded", summary: "done" },
+    }),
+  ).toEqual(ack);
+  expect(
+    service.park({
+      operationId: "replay-park",
+      actor: { bindingId: "bb", generation: 1 },
+      deliveryId: second.deliveryId,
+      reason: "later",
+    }),
+  ).toEqual(parked);
+});
+
+test("exact admin lifecycle retries replay before wait or mutable state validation", async () => {
+  const service = createTwoLaneService();
+  let waits = 0;
+  const rotateInput = {
+    operationId: "admin-rotate",
+    adminId: "admin",
+    bindingId: "bb2",
+    laneAddress: "project/b",
+    workspaceId: "w",
+    adapter: "codex" as const,
+    conversationId: "tb2",
+    reason: "planned",
+    timeoutMs: 5,
+  };
+  const rotated = await service.rotate(rotateInput, async () => {
+    waits += 1;
+    return true;
+  });
+  expect(
+    await service.rotate(rotateInput, async () => {
+      waits += 1;
+      throw new Error("must not wait");
+    }),
+  ).toEqual(rotated);
+  expect(waits).toBe(1);
+  const unbound = service.unbind({
+    operationId: "admin-unbind",
+    adminId: "admin",
+    laneAddress: "project/b",
+    reason: "lost",
+  });
+  const rebuilt = service.rebuild({
+    operationId: "admin-rebuild",
+    adminId: "admin",
+    bindingId: "bb3",
+    laneAddress: "project/b",
+    workspaceId: "w",
+    adapter: "codex",
+    conversationId: "tb3",
+    reason: "lost",
+  });
+  expect(
+    service.unbind({
+      operationId: "admin-unbind",
+      adminId: "admin",
+      laneAddress: "project/b",
+      reason: "lost",
+    }),
+  ).toEqual(unbound);
+  expect(
+    service.rebuild({
+      operationId: "admin-rebuild",
+      adminId: "admin",
+      bindingId: "bb3",
+      laneAddress: "project/b",
+      workspaceId: "w",
+      adapter: "codex",
+      conversationId: "tb3",
+      reason: "lost",
+    }),
+  ).toEqual(rebuilt);
+  expect(
+    service.bind({
+      operationId: "bind-two-b",
+      adminId: "admin",
+      bindingId: "bb",
+      laneAddress: "project/b",
+      workspaceId: "w",
+      adapter: "codex",
+      conversationId: "tb",
+    }).binding.id,
+  ).toBe("bb");
+});
+
+test("clone sync rejects conflicting lane declarations without mutation", () => {
+  const service = createTwoLaneService();
+  expect(() =>
+    service.syncProject({
+      operationId: "clone-conflict",
+      adminId: "admin",
+      workspaceId: "clone",
+      rootPath: "C:/clone",
+      manifest: {
+        projectId: "p",
+        projectKey: "project",
+        displayName: "Project",
+        manifestHash: "other",
+        manifestVersion: 1,
+        lanes: [
+          { name: "a", roleFile: "different.md", communicationEntry: true },
+          { name: "b", roleFile: "b.md", communicationEntry: false },
+        ],
+      },
+    }),
+  ).toThrow(/declaration.*conflict/i);
+  expect(
+    (
+      service.database
+        .prepare("SELECT COUNT(*) AS count FROM workspace")
+        .get() as { count: number }
+    ).count,
+  ).toBe(1);
+  expect(
+    (
+      service.database
+        .prepare("SELECT role_document FROM lane WHERE id='p/a'")
+        .get() as { role_document: string }
+    ).role_document,
+  ).toBe("a.md");
+});
+
+test("relink requires acknowledgement of an exact preflight digest", () => {
+  const service = createTwoLaneService();
+  const preview = service.previewRelink({
+    adminId: "admin",
+    workspaceId: "w",
+    newRootPath: "C:/moved",
+    projectId: "p",
+  });
+  expect(preview.affectedBindings.sort()).toEqual(["ba", "bb"]);
+  expect(() =>
+    service.relinkWorkspace({
+      operationId: "relink-no-review",
+      adminId: "admin",
+      workspaceId: "w",
+      newRootPath: "C:/moved",
+      projectId: "p",
+      previewDigest: "wrong",
+    }),
+  ).toThrow(/preview.*changed/i);
+  expect(
+    service.relinkWorkspace({
+      operationId: "relink-reviewed",
+      adminId: "admin",
+      workspaceId: "w",
+      newRootPath: "C:/moved",
+      projectId: "p",
+      previewDigest: preview.digest,
+    }),
+  ).toMatchObject({ affectedBindings: ["ba", "bb"] });
+});
+
+test("whoami reports adapter and park lifecycle events remain body-free", () => {
+  const service = createTwoLaneService();
+  expect(service.whoami({ bindingId: "bb", generation: 1 })).toMatchObject({
+    adapter: "codex",
+  });
+  const sent = service.send({
+    operationId: "event-send",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "project/b",
+    kind: "normal",
+    body: "NEVER IN EVENTS",
+    metadata: {},
+  });
+  service.park({
+    operationId: "event-park",
+    actor: { bindingId: "bb", generation: 1 },
+    deliveryId: sent.deliveryId,
+    reason: "later",
+  });
+  service.unpark({
+    operationId: "event-unpark",
+    adminId: "admin",
+    deliveryId: sent.deliveryId,
+  });
+  const serialized = JSON.stringify(service.events());
+  expect(serialized).toContain("delivery_parked");
+  expect(serialized).toContain("delivery_unparked");
+  expect(serialized).not.toContain("NEVER IN EVENTS");
+});

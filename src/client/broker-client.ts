@@ -11,10 +11,16 @@ export interface RpcRequestMap {
     rootPath: string;
     manifest: unknown;
   };
+  previewRelink: {
+    workspaceId: string;
+    newRootPath: string;
+    projectId: string;
+  };
   relinkWorkspace: Operation & {
     workspaceId: string;
     newRootPath: string;
     projectId: string;
+    previewDigest: string;
   };
   bind: Operation & {
     bindingId: string;
@@ -47,6 +53,13 @@ export interface RpcResultMap {
     workspaceId: string;
     laneAddresses: string[];
   };
+  previewRelink: {
+    workspaceId: string;
+    oldRootPath: string;
+    newRootPath: string;
+    affectedBindings: string[];
+    digest: string;
+  };
   relinkWorkspace: {
     workspaceId: string;
     rootPath: string;
@@ -69,7 +82,7 @@ export interface RpcResultMap {
     bindingId: string;
     generation: number;
     laneAddress: string;
-    adapter?: "claude" | "codex";
+    adapter: "claude" | "codex";
   };
   inbox: unknown[];
   message: unknown;
@@ -77,6 +90,7 @@ export interface RpcResultMap {
 
 const ADMIN_METHODS = new Set<RpcMethod>([
   "syncProject",
+  "previewRelink",
   "relinkWorkspace",
   "bind",
   "unbind",

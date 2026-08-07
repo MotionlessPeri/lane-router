@@ -26,7 +26,9 @@ interface StoredOperation {
 
 export class OperationConflictError extends Error {
   constructor(readonly operationId: string) {
-    super(`Operation ID ${operationId} was already used for a different operation`);
+    super(
+      `Operation ID ${operationId} was already used for a different operation`,
+    );
     this.name = new.target.name;
   }
 }
@@ -47,11 +49,17 @@ export class OperationStore {
   ): TResult {
     return inTransaction(this.database, () => {
       const requestJson = canonicalJson(input.request);
-      const requestDigest = createHash("sha256").update(requestJson).digest("hex");
-      const stored = this.database.prepare(`
+      const requestDigest = createHash("sha256")
+        .update(requestJson)
+        .digest("hex");
+      const stored = this.database
+        .prepare(
+          `
         SELECT actor_kind, actor_id, method, request_digest, request_json, result_json
         FROM operation WHERE operation_id = ?
-      `).get(input.operationId) as StoredOperation | undefined;
+      `,
+        )
+        .get(input.operationId) as StoredOperation | undefined;
 
       if (stored !== undefined) {
         if (
@@ -67,27 +75,60 @@ export class OperationStore {
       }
 
       if (!Number.isSafeInteger(input.createdAt)) {
-        throw new RangeError("Operation createdAt must be a JavaScript safe integer");
+        throw new RangeError(
+          "Operation createdAt must be a JavaScript safe integer",
+        );
       }
       const result = perform();
       const resultJson = canonicalJson(result);
-      this.database.prepare(`
+      this.database
+        .prepare(
+          `
         INSERT INTO operation (
           operation_id, actor_kind, actor_id, method, request_digest,
           request_json, result_json, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        input.operationId,
-        input.actor.kind,
-        input.actor.id,
-        input.method,
-        requestDigest,
-        requestJson,
-        resultJson,
-        input.createdAt,
-      );
+      `,
+        )
+        .run(
+          input.operationId,
+          input.actor.kind,
+          input.actor.id,
+          input.method,
+          requestDigest,
+          requestJson,
+          resultJson,
+          input.createdAt,
+        );
       return JSON.parse(resultJson) as TResult;
     });
+  }
+
+  replay<TRequest, TResult>(
+    input: Omit<OperationInput<TRequest>, "createdAt">,
+  ): Readonly<{ found: false }> | Readonly<{ found: true; result: TResult }> {
+    const requestJson = canonicalJson(input.request);
+    const requestDigest = createHash("sha256")
+      .update(requestJson)
+      .digest("hex");
+    const stored = this.database
+      .prepare(
+        `
+      SELECT actor_kind, actor_id, method, request_digest, request_json, result_json
+      FROM operation WHERE operation_id = ?
+    `,
+      )
+      .get(input.operationId) as StoredOperation | undefined;
+    if (stored === undefined) return { found: false };
+    if (
+      stored.actor_kind !== input.actor.kind ||
+      stored.actor_id !== input.actor.id ||
+      stored.method !== input.method ||
+      stored.request_digest !== requestDigest ||
+      stored.request_json !== requestJson
+    )
+      throw new OperationConflictError(input.operationId);
+    return { found: true, result: JSON.parse(stored.result_json) as TResult };
   }
 }
 
@@ -95,43 +136,73 @@ export function canonicalJson(value: unknown): string {
   return JSON.stringify(validateAndSortJson(value, new WeakSet<object>()));
 }
 
-function validateAndSortJson(value: unknown, ancestors: WeakSet<object>): unknown {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
+function validateAndSortJson(
+  value: unknown,
+  ancestors: WeakSet<object>,
+): unknown {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
     return value;
   }
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new CanonicalJsonError("JSON numbers must be finite");
+    if (!Number.isFinite(value))
+      throw new CanonicalJsonError("JSON numbers must be finite");
     return Object.is(value, -0) ? 0 : value;
   }
   if (typeof value !== "object") {
-    throw new CanonicalJsonError(`Unsupported JSON value type: ${typeof value}`);
+    throw new CanonicalJsonError(
+      `Unsupported JSON value type: ${typeof value}`,
+    );
   }
-  if (ancestors.has(value)) throw new CanonicalJsonError("Cyclic JSON values are not supported");
+  if (ancestors.has(value))
+    throw new CanonicalJsonError("Cyclic JSON values are not supported");
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
       if (Object.getOwnPropertySymbols(value).length > 0) {
-        throw new CanonicalJsonError("JSON arrays cannot have symbol properties");
+        throw new CanonicalJsonError(
+          "JSON arrays cannot have symbol properties",
+        );
       }
       const keys = Object.keys(value);
-      if (keys.length !== value.length || keys.some((key, index) => key !== String(index))) {
-        throw new CanonicalJsonError("JSON arrays must be dense and cannot have extra properties");
+      if (
+        keys.length !== value.length ||
+        keys.some((key, index) => key !== String(index))
+      ) {
+        throw new CanonicalJsonError(
+          "JSON arrays must be dense and cannot have extra properties",
+        );
       }
       return value.map((entry) => validateAndSortJson(entry, ancestors));
     }
 
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) {
-      throw new CanonicalJsonError("JSON objects must use Object.prototype or a null prototype");
+      throw new CanonicalJsonError(
+        "JSON objects must use Object.prototype or a null prototype",
+      );
     }
     if (Object.getOwnPropertySymbols(value).length > 0) {
-      throw new CanonicalJsonError("JSON objects cannot have symbol properties");
+      throw new CanonicalJsonError(
+        "JSON objects cannot have symbol properties",
+      );
     }
     const result: Record<string, unknown> = {};
-    for (const key of Object.getOwnPropertyNames(value).sort((left, right) => left.localeCompare(right))) {
+    for (const key of Object.getOwnPropertyNames(value).sort((left, right) =>
+      left.localeCompare(right),
+    )) {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)) {
-        throw new CanonicalJsonError("JSON object properties must be enumerable data properties");
+      if (
+        descriptor === undefined ||
+        !descriptor.enumerable ||
+        !("value" in descriptor)
+      ) {
+        throw new CanonicalJsonError(
+          "JSON object properties must be enumerable data properties",
+        );
       }
       result[key] = validateAndSortJson(descriptor.value, ancestors);
     }

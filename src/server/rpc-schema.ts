@@ -45,12 +45,21 @@ export const rpcSchemas = {
       ...identityFields,
     })
     .strict(),
+  previewRelink: z
+    .object({
+      workspaceId: text,
+      newRootPath: text,
+      projectId: text,
+      ...identityFields,
+    })
+    .strict(),
   relinkWorkspace: z
     .object({
       ...operation,
       workspaceId: text,
       newRootPath: text,
       projectId: text,
+      previewDigest: text,
       ...identityFields,
     })
     .strict(),
@@ -139,6 +148,7 @@ export const rpcSchemas = {
 export type RpcMethod = keyof typeof rpcSchemas;
 export const adminMethods = new Set<RpcMethod>([
   "syncProject",
+  "previewRelink",
   "relinkWorkspace",
   "bind",
   "unbind",
@@ -180,6 +190,15 @@ export const rpcResultSchemas: Record<RpcMethod, z.ZodType> = {
       projectId: text,
       workspaceId: text,
       laneAddresses: z.array(text),
+    })
+    .strict(),
+  previewRelink: z
+    .object({
+      workspaceId: text,
+      oldRootPath: text,
+      newRootPath: text,
+      affectedBindings: z.array(text),
+      digest: text,
     })
     .strict(),
   relinkWorkspace: z
