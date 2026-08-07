@@ -12,6 +12,7 @@ import {
   MIGRATION_V2_SQL,
   MIGRATION_V3_SQL,
   MIGRATION_V4_SQL,
+  MIGRATION_V6_SQL,
 } from "../../src/storage/migrations.js";
 import { StorageRepositories } from "../../src/storage/repositories.js";
 import { SCHEDULER_UNRESOLVED_SQL } from "../../src/broker/scheduler.js";
@@ -36,6 +37,73 @@ function temporaryDatabasePath(): string {
 }
 
 describe("SQLite schema", () => {
+  it("models dispatch fences as repeatable attempts with durable lane suppression", () => {
+    const database = openDatabase(":memory:");
+    try {
+      seedStorage(database);
+      const repositories = new StorageRepositories(database);
+      repositories.createMessageWithInitialDelivery({
+        messageId: "message-fence-attempts", deliveryId: "delivery-fence-attempts",
+        senderBindingId: "binding-1", targetLaneId: "lane-1", kind: "normal",
+        body: "body", metadata: {}, replyTo: null, createdAt: 10,
+      });
+      const insert = database.prepare(`
+        INSERT INTO dispatch_fence(
+          fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code,
+          resolved_at,resolution,resolution_operation_id
+        ) VALUES(?, 'delivery-fence-attempts', 'lane-1', 'queued_next_turn', 20,
+          'post_adapter_persistence_failed', ?, ?, ?)
+      `);
+      insert.run("fence-resolved", 21, "retry", "operation-1");
+      insert.run("fence-active", null, null, null);
+      expect(() => insert.run("fence-second-active", null, null, null)).toThrow();
+      expect(database.prepare(`
+        INSERT INTO adapter_suppression(lane_id,source_delivery_id,created_at,reason_code)
+        VALUES('lane-1','delivery-fence-attempts',22,'stored_pending')
+      `).run().changes).toBe(1);
+      expect(database.pragma("user_version", { simple: true })).toBe(8);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("deterministically backfills v7 fence history into v8 attempts", () => {
+    const path = temporaryDatabasePath();
+    const legacy = openDatabase(path);
+    seedStorage(legacy);
+    const repositories = new StorageRepositories(legacy);
+    repositories.createMessageWithInitialDelivery({
+      messageId: "message-legacy-fence", deliveryId: "delivery-legacy-fence",
+      senderBindingId: "binding-1", targetLaneId: "lane-1", kind: "normal",
+      body: "body", metadata: {}, replyTo: null, createdAt: 10,
+    });
+    legacy.exec(`
+      DROP TRIGGER dispatch_fence_lane_must_match_delivery;
+      DROP TRIGGER delivery_lane_change_must_preserve_dispatch_fence;
+      DROP TABLE adapter_suppression;
+      DROP TABLE dispatch_fence;
+    `);
+    legacy.exec(MIGRATION_V6_SQL);
+    legacy.prepare(`INSERT INTO dispatch_fence(
+      delivery_id,lane_id,adapter_outcome,fenced_at,reason_code,
+      resolved_at,resolution,resolution_operation_id
+    ) VALUES('delivery-legacy-fence','lane-1','queued_next_turn',20,
+      'post_adapter_persistence_failed',21,'retry','legacy-operation')`).run();
+    legacy.pragma("user_version = 7");
+    legacy.close();
+
+    const upgraded = openDatabase(path);
+    try {
+      expect(upgraded.prepare(`SELECT fence_id,created_at,resolution
+        FROM dispatch_fence WHERE delivery_id='delivery-legacy-fence'`).get()).toEqual({
+        fence_id: "legacy:delivery-legacy-fence:20",
+        created_at: 20,
+        resolution: "retry",
+      });
+    } finally {
+      upgraded.close();
+    }
+  });
   it("upgrades an existing migration-v1 binding table to durable lifecycle state", () => {
     const path = temporaryDatabasePath();
     const legacy = new Database(path);
@@ -660,7 +728,7 @@ describe("SQLite schema", () => {
       );
       const columns = (upgraded.pragma("table_info(dispatch_fence)") as Array<{ name: string }>).map((column) => column.name);
       expect(columns).toEqual([
-        "delivery_id", "lane_id", "adapter_outcome", "fenced_at",
+        "fence_id", "delivery_id", "lane_id", "adapter_outcome", "created_at",
         "reason_code", "resolved_at", "resolution", "resolution_operation_id",
       ]);
       expect(columns).not.toContain("body");
@@ -704,7 +772,7 @@ describe("SQLite schema", () => {
     v6.close();
     const upgraded = openDatabase(path);
     try {
-      expect(upgraded.pragma("user_version", { simple: true })).toBe(7);
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(8);
       expect(upgraded.prepare(`SELECT name FROM sqlite_master WHERE name IN (
         'dispatch_fence_lane_must_match_delivery',
         'delivery_lane_change_must_preserve_dispatch_fence',
@@ -728,8 +796,8 @@ describe("SQLite schema", () => {
       INSERT INTO lane VALUES ('lane-other','project-1','other','other.md',0);
       INSERT INTO message VALUES ('fenced-message','binding-1','lane-1','normal','body','{}',NULL,10);
       INSERT INTO delivery VALUES ('fenced-delivery','fenced-message','lane-1',1,'pending',0,NULL,NULL,NULL,NULL,NULL,NULL,10);
-      INSERT INTO dispatch_fence(delivery_id,lane_id,adapter_outcome,fenced_at,reason_code)
-        VALUES('fenced-delivery','lane-other','queued_next_turn',10,'post_adapter_persistence_failed');
+      INSERT INTO dispatch_fence(fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code)
+        VALUES('dirty-fence','fenced-delivery','lane-other','queued_next_turn',10,'post_adapter_persistence_failed');
       PRAGMA user_version=6;
     `);
     dirty.close();
@@ -755,10 +823,10 @@ describe("SQLite schema", () => {
         INSERT INTO message VALUES ('fenced-message','binding-1','lane-1','normal','body','{}',NULL,10);
         INSERT INTO delivery VALUES ('fenced-delivery','fenced-message','lane-1',1,'pending',0,NULL,NULL,NULL,NULL,NULL,NULL,10);
       `);
-      expect(() => db.prepare(`INSERT INTO dispatch_fence(delivery_id,lane_id,adapter_outcome,fenced_at,reason_code)
-        VALUES('fenced-delivery','lane-other','queued_next_turn',10,'post_adapter_persistence_failed')`).run()).toThrow(/lane|delivery/i);
-      db.prepare(`INSERT INTO dispatch_fence(delivery_id,lane_id,adapter_outcome,fenced_at,reason_code)
-        VALUES('fenced-delivery','lane-1','queued_next_turn',10,'post_adapter_persistence_failed')`).run();
+      expect(() => db.prepare(`INSERT INTO dispatch_fence(fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code)
+        VALUES('bad-fence','fenced-delivery','lane-other','queued_next_turn',10,'post_adapter_persistence_failed')`).run()).toThrow(/lane|delivery/i);
+      db.prepare(`INSERT INTO dispatch_fence(fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code)
+        VALUES('good-fence','fenced-delivery','lane-1','queued_next_turn',10,'post_adapter_persistence_failed')`).run();
       expect(() => db.prepare("UPDATE delivery SET target_lane_id='lane-other' WHERE id='fenced-delivery'").run()).toThrow(/lane|fence/i);
     } finally {
       db.close();

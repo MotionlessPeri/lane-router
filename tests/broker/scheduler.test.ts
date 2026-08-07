@@ -534,7 +534,7 @@ test("runtime-state probe failures degrade a lane without failing its delivery",
   expect(deliveries).toBe(1);
 });
 
-test("offline health polling suppresses delivery until reconnect", async () => {
+test("offline observation is durably suppressed until explicit reconnect", async () => {
   const x = setup("started_new_turn");
   x.service.send({
     operationId: "offline-pending",
@@ -569,8 +569,11 @@ test("offline health polling suppresses delivery until reconnect", async () => {
   await scheduler.runOnce();
   await scheduler.runOnce();
   expect(deliveries).toBe(0);
-  expect(healthChecks).toBe(3);
+  expect(healthChecks).toBe(1);
   online = true;
+  x.service.notifyAdapterAvailable({
+    operationId: "offline-reconnected", adminId: "admin", laneId: "p/b",
+  });
   await scheduler.runOnce();
   expect(deliveries).toBe(1);
 });
@@ -640,7 +643,7 @@ test("an older backed-off correction blocks later corrections but not normal FIF
   expect(x.adapter.requests[1]?.kind).toBe("normal");
 });
 
-test("stored_pending suppresses repeated delivery until an availability signal", async () => {
+test("stored_pending suppression survives scheduler restart until an explicit reconnect", async () => {
   const x = setup("stored_pending");
   x.service.send({
     operationId: "stored",
@@ -651,10 +654,56 @@ test("stored_pending suppresses repeated delivery until an availability signal",
     metadata: {},
   });
   await x.scheduler.runOnce();
-  await x.scheduler.runOnce();
+  const restarted = new Scheduler(
+    x.db,
+    { codex: x.adapter, claude: x.adapter },
+    x.service.config,
+    { now: () => 100, random: () => 0.5 },
+  );
+  await restarted.runOnce();
   expect(x.adapter.requests).toHaveLength(1);
-  x.scheduler.setLaneAvailable("p/b", true);
-  await x.scheduler.runOnce();
+  expect(x.service.notifyAdapterAvailable({
+    operationId: "adapter-reconnected", adminId: "admin", laneId: "p/b",
+  })).toEqual({ laneId: "p/b", cleared: true });
+  await restarted.runOnce();
+  expect(x.adapter.requests).toHaveLength(2);
+});
+
+test("retry permits a new ambiguous attempt and the new fence survives restart", async () => {
+  const x = setup("queued_next_turn");
+  const sent = x.service.send({
+    operationId: "repeatable-fence-send", actor: { bindingId: "ba", generation: 1 },
+    target: "p/b", kind: "normal", body: "ambiguous", metadata: {},
+  });
+  x.db.exec(`
+    CREATE TRIGGER fail_repeatable_adapter_event
+    BEFORE INSERT ON event
+    WHEN NEW.event_type='adapter_result' AND NEW.delivery_id='${sent.deliveryId}'
+    BEGIN SELECT RAISE(ABORT, 'injected repeated ambiguity'); END;
+  `);
+  await expect(x.scheduler.runOnce()).rejects.toBeInstanceOf(AggregateError);
+  const first = x.db.prepare(`
+    SELECT fence_id FROM dispatch_fence WHERE delivery_id=? AND resolved_at IS NULL
+  `).get(sent.deliveryId) as { fence_id: string };
+  expect(x.service.resolveDispatchFence({
+    operationId: "retry-first-attempt", adminId: "admin",
+    fenceId: first.fence_id, resolution: "retry",
+  })).toEqual({ fenceId: first.fence_id, deliveryId: sent.deliveryId, resolution: "retry" });
+
+  await expect(x.scheduler.runOnce()).rejects.toBeInstanceOf(AggregateError);
+  const attempts = x.db.prepare(`
+    SELECT fence_id,resolution FROM dispatch_fence WHERE delivery_id=? ORDER BY created_at,fence_id
+  `).all(sent.deliveryId) as Array<{ fence_id: string; resolution: string | null }>;
+  expect(attempts).toHaveLength(2);
+  expect(attempts.find((attempt) => attempt.fence_id === first.fence_id)?.resolution).toBe("retry");
+  const active = attempts.find((attempt) => attempt.resolution === null);
+  expect(active?.fence_id).not.toBe(first.fence_id);
+
+  const restarted = new Scheduler(
+    x.db, { codex: x.adapter, claude: x.adapter }, x.service.config,
+    { now: () => 100, random: () => 0.5 },
+  );
+  await expect(restarted.runOnce()).resolves.toBe(0);
   expect(x.adapter.requests).toHaveLength(2);
 });
 
@@ -877,30 +926,67 @@ test("explicit operation-backed reconciliation clears or settles dispatch fences
     operationId: "retry-fenced-send", actor: { bindingId: "ba", generation: 1 },
     target: "p/b", kind: "normal", body: "retry", metadata: {},
   });
-  x.db.prepare(`INSERT INTO dispatch_fence(delivery_id,lane_id,adapter_outcome,fenced_at,reason_code)
-    VALUES(?, 'p/b', 'queued_next_turn', 100, 'post_adapter_persistence_failed')`).run(retry.deliveryId);
+  x.db.prepare(`INSERT INTO dispatch_fence(fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code)
+    VALUES('fence-retry', ?, 'p/b', 'queued_next_turn', 100, 'post_adapter_persistence_failed')`).run(retry.deliveryId);
   expect(() => x.service.resolveDispatchFence({
-    operationId: "resolve-unauthorized", adminId: "", deliveryId: retry.deliveryId, resolution: "retry",
+    operationId: "resolve-unauthorized", adminId: "", fenceId: "fence-retry", resolution: "retry",
   })).toThrow(/admin identity/i);
   expect(x.service.resolveDispatchFence({
-    operationId: "resolve-retry", adminId: "admin", deliveryId: retry.deliveryId, resolution: "retry",
-  })).toEqual({ deliveryId: retry.deliveryId, resolution: "retry" });
+    operationId: "resolve-retry", adminId: "admin", fenceId: "fence-retry", resolution: "retry",
+  })).toEqual({ fenceId: "fence-retry", deliveryId: retry.deliveryId, resolution: "retry" });
+  expect(() => x.service.resolveDispatchFence({
+    operationId: "resolve-retry-stale", adminId: "admin", fenceId: "fence-retry", resolution: "retry",
+  })).toThrow(/missing|already resolved/i);
   expect(x.service.resolveDispatchFence({
-    operationId: "resolve-retry", adminId: "admin", deliveryId: retry.deliveryId, resolution: "retry",
-  })).toEqual({ deliveryId: retry.deliveryId, resolution: "retry" });
+    operationId: "resolve-retry", adminId: "admin", fenceId: "fence-retry", resolution: "retry",
+  })).toEqual({ fenceId: "fence-retry", deliveryId: retry.deliveryId, resolution: "retry" });
 
   const settled = x.service.send({
     operationId: "settle-fenced-send", actor: { bindingId: "ba", generation: 1 },
     target: "p/b", kind: "normal", body: "settle", metadata: {},
   });
-  x.db.prepare(`INSERT INTO dispatch_fence(delivery_id,lane_id,adapter_outcome,fenced_at,reason_code)
-    VALUES(?, 'p/b', 'queued_next_turn', 100, 'post_adapter_persistence_failed')`).run(settled.deliveryId);
+  x.db.prepare(`INSERT INTO dispatch_fence(fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code)
+    VALUES('fence-settled', ?, 'p/b', 'queued_next_turn', 100, 'post_adapter_persistence_failed')`).run(settled.deliveryId);
   expect(x.service.resolveDispatchFence({
-    operationId: "resolve-settled", adminId: "admin", deliveryId: settled.deliveryId, resolution: "settled",
-  })).toEqual({ deliveryId: settled.deliveryId, resolution: "settled" });
+    operationId: "resolve-settled", adminId: "admin", fenceId: "fence-settled", resolution: "settled",
+  })).toEqual({ fenceId: "fence-settled", deliveryId: settled.deliveryId, resolution: "settled" });
   expect(x.db.prepare("SELECT state FROM delivery WHERE id=?").get(settled.deliveryId)).toEqual({ state: "notified" });
   expect(x.db.prepare("SELECT resolution,resolution_operation_id FROM dispatch_fence ORDER BY delivery_id").all()).toEqual([
     { resolution: "retry", resolution_operation_id: "resolve-retry" },
     { resolution: "settled", resolution_operation_id: "resolve-settled" },
   ]);
+});
+
+test("settled reconciliation uses normal adapter-result binding and suppression semantics", () => {
+  const missing = setup("binding_not_found");
+  const missingDelivery = missing.service.send({
+    operationId: "settled-missing-send", actor: { bindingId: "ba", generation: 1 },
+    target: "p/b", kind: "normal", body: "missing", metadata: {},
+  });
+  missing.db.prepare(`INSERT INTO dispatch_fence(
+    fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code
+  ) VALUES('fence-missing',?,'p/b','binding_not_found',100,'post_adapter_persistence_failed')`).run(missingDelivery.deliveryId);
+  missing.service.resolveDispatchFence({
+    operationId: "settle-missing", adminId: "admin", fenceId: "fence-missing", resolution: "settled",
+  });
+  expect(missing.db.prepare("SELECT state FROM binding WHERE id='bb'").get()).toEqual({ state: "unbound" });
+  expect(missing.db.prepare("SELECT state,failure_count FROM delivery WHERE id=?").get(missingDelivery.deliveryId)).toEqual({
+    state: "pending", failure_count: 0,
+  });
+
+  const stored = setup("stored_pending");
+  const storedDelivery = stored.service.send({
+    operationId: "settled-stored-send", actor: { bindingId: "ba", generation: 1 },
+    target: "p/b", kind: "normal", body: "stored", metadata: {},
+  });
+  stored.db.prepare(`INSERT INTO dispatch_fence(
+    fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code
+  ) VALUES('fence-stored',?,'p/b','stored_pending',100,'post_adapter_persistence_failed')`).run(storedDelivery.deliveryId);
+  stored.service.resolveDispatchFence({
+    operationId: "settle-stored", adminId: "admin", fenceId: "fence-stored", resolution: "settled",
+  });
+  expect(stored.db.prepare("SELECT reason_code FROM adapter_suppression WHERE lane_id='p/b'").get()).toEqual({
+    reason_code: "stored_pending",
+  });
+  expect(stored.service.events().filter((event) => event.type === "adapter_result")).toHaveLength(1);
 });

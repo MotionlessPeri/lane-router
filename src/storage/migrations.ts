@@ -402,7 +402,66 @@ CREATE INDEX IF NOT EXISTS delivery_recovery_notified_idx
   WHERE state='notified';
 `;
 
-export const LATEST_MIGRATION_VERSION = 7;
+export const MIGRATION_V8_SQL = `
+DROP TRIGGER IF EXISTS dispatch_fence_lane_must_match_delivery;
+DROP TRIGGER IF EXISTS delivery_lane_change_must_preserve_dispatch_fence;
+DROP INDEX IF EXISTS dispatch_fence_active_lane_idx;
+ALTER TABLE dispatch_fence RENAME TO dispatch_fence_v7;
+CREATE TABLE dispatch_fence (
+  fence_id TEXT PRIMARY KEY,
+  delivery_id TEXT NOT NULL REFERENCES delivery(id) ON DELETE RESTRICT,
+  lane_id TEXT NOT NULL REFERENCES lane(id) ON DELETE RESTRICT,
+  adapter_outcome TEXT NOT NULL CHECK (adapter_outcome IN (
+    'started_new_turn','applied_current_turn','queued_next_turn',
+    'stored_pending','binding_not_found','adapter_failed'
+  )),
+  created_at INTEGER NOT NULL CHECK (
+    typeof(created_at)='integer' AND created_at BETWEEN -${MAX_SAFE_INTEGER} AND ${MAX_SAFE_INTEGER}
+  ),
+  reason_code TEXT NOT NULL CHECK (reason_code='post_adapter_persistence_failed'),
+  resolved_at INTEGER CHECK (
+    resolved_at IS NULL OR (typeof(resolved_at)='integer' AND resolved_at BETWEEN -${MAX_SAFE_INTEGER} AND ${MAX_SAFE_INTEGER})
+  ),
+  resolution TEXT CHECK (resolution IN ('retry','settled')),
+  resolution_operation_id TEXT,
+  CHECK ((resolved_at IS NULL) = (resolution IS NULL)),
+  CHECK ((resolved_at IS NULL) = (resolution_operation_id IS NULL))
+);
+INSERT INTO dispatch_fence(
+  fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code,
+  resolved_at,resolution,resolution_operation_id
+)
+SELECT 'legacy:' || delivery_id || ':' || CAST(fenced_at AS TEXT),
+  delivery_id,lane_id,adapter_outcome,fenced_at,reason_code,
+  resolved_at,resolution,resolution_operation_id
+FROM dispatch_fence_v7;
+DROP TABLE dispatch_fence_v7;
+CREATE UNIQUE INDEX dispatch_fence_one_active_per_delivery_idx
+  ON dispatch_fence(delivery_id) WHERE resolved_at IS NULL;
+CREATE INDEX dispatch_fence_active_lane_idx
+  ON dispatch_fence(lane_id) WHERE resolved_at IS NULL;
+CREATE TABLE adapter_suppression (
+  lane_id TEXT PRIMARY KEY REFERENCES lane(id) ON DELETE RESTRICT,
+  source_delivery_id TEXT REFERENCES delivery(id) ON DELETE RESTRICT,
+  created_at INTEGER NOT NULL CHECK (
+    typeof(created_at)='integer' AND created_at BETWEEN -${MAX_SAFE_INTEGER} AND ${MAX_SAFE_INTEGER}
+  ),
+  reason_code TEXT NOT NULL CHECK (reason_code IN ('stored_pending','offline'))
+);
+CREATE TRIGGER dispatch_fence_lane_must_match_delivery
+BEFORE INSERT ON dispatch_fence
+WHEN (SELECT target_lane_id FROM delivery WHERE id=NEW.delivery_id) IS NOT NEW.lane_id
+BEGIN SELECT RAISE(ABORT, 'dispatch fence lane must match delivery'); END;
+CREATE TRIGGER delivery_lane_change_must_preserve_dispatch_fence
+BEFORE UPDATE OF target_lane_id ON delivery
+WHEN EXISTS (
+  SELECT 1 FROM dispatch_fence f
+  WHERE f.delivery_id=OLD.id AND f.lane_id IS NOT NEW.target_lane_id
+)
+BEGIN SELECT RAISE(ABORT, 'delivery lane change would invalidate dispatch fence'); END;
+`;
+
+export const LATEST_MIGRATION_VERSION = 8;
 
 export class DatabaseIntegrityError extends Error {
   constructor(message: string) {
@@ -475,6 +534,15 @@ export function migrateDatabase(database: Database.Database): void {
       database.transaction(() => {
         database.exec(MIGRATION_V7_SQL);
         database.pragma("user_version = 7");
+      })();
+    }
+    const versionAfterV7 = database.pragma("user_version", { simple: true }) as number;
+    if (versionAfterV7 === 7) {
+      assertV6Integrity(database);
+      database.transaction(() => {
+        if (!columnExists(database, "dispatch_fence", "fence_id"))
+          database.exec(MIGRATION_V8_SQL);
+        database.pragma("user_version = 8");
       })();
     }
   })();

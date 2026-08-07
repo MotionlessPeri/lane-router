@@ -8,7 +8,6 @@ import type { JsonValue } from "../core/json.js";
 import type { AckOutcome, Delivery } from "../core/model.js";
 import type { AdapterResult } from "../core/adapter-contract.js";
 import {
-  applyAdapterResult,
   parkDelivery,
   renewClaim,
   unparkDelivery,
@@ -29,7 +28,11 @@ import {
   type CurrentBinding,
 } from "../storage/repositories.js";
 import { appendEvent, listEvents, type BrokerEvent } from "./events.js";
-import { retryDelay, validateRuntimeConfig, type RuntimeConfig } from "./runtime.js";
+import {
+  clearAdapterSuppression,
+  persistAdapterResult,
+} from "./adapter-result-persistence.js";
+import { validateRuntimeConfig, type RuntimeConfig } from "./runtime.js";
 
 export { validateRuntimeConfig } from "./runtime.js";
 export type BindingActor = Readonly<{ bindingId: string; generation: number }>;
@@ -777,9 +780,9 @@ export class BrokerService {
   resolveDispatchFence(input: {
     operationId: string;
     adminId: string;
-    deliveryId: string;
+    fenceId: string;
     resolution: "retry" | "settled";
-  }): { deliveryId: string; resolution: "retry" | "settled" } {
+  }): { fenceId: string; deliveryId: string; resolution: "retry" | "settled" } {
     if (!input.adminId.trim())
       throw new BrokerContractError("Dispatch fence reconciliation requires an admin identity");
     return this.mutate(
@@ -789,34 +792,74 @@ export class BrokerService {
       input,
       () => {
         const fence = this.database.prepare(`
-          SELECT adapter_outcome FROM dispatch_fence
-          WHERE delivery_id=? AND resolved_at IS NULL
-        `).get(input.deliveryId) as { adapter_outcome: AdapterResult } | undefined;
+          SELECT delivery_id,lane_id,adapter_outcome FROM dispatch_fence
+          WHERE fence_id=? AND resolved_at IS NULL
+        `).get(input.fenceId) as {
+          delivery_id: string;
+          lane_id: string;
+          adapter_outcome: AdapterResult;
+        } | undefined;
         if (!fence)
           throw new BrokerContractError("Dispatch fence is missing or already resolved");
         if (input.resolution === "settled") {
-          const current = this.repositories.readDelivery(input.deliveryId);
-          const settled = applyAdapterResult(current, fence.adapter_outcome, {
-            claimDeadlineAt: this.now() + this.config.claimDeadlineMs,
-            queueDeadlineAt: this.now() + this.config.queueDeadlineMs,
-            failureLimit: this.config.failureLimit,
-            nextAttemptAt:
-              this.now() + retryDelay(this.config, current.failureCount, () => 0.5),
+          persistAdapterResult({
+            database: this.database,
+            deliveryIds: [fence.delivery_id],
+            result: fence.adapter_outcome,
+            now: this.now,
+            random: () => 0.5,
+            config: this.config,
           });
-          this.persistDelivery(settled);
+        } else {
+          clearAdapterSuppression({
+            database: this.database,
+            laneId: fence.lane_id,
+            now: this.now,
+            eventType: "adapter_suppression_cleared",
+            reason: "dispatch_fence_retry",
+            deliveryId: fence.delivery_id,
+          });
         }
-        this.database.prepare(`
+        const updated = this.database.prepare(`
           UPDATE dispatch_fence SET resolved_at=?,resolution=?,resolution_operation_id=?
-          WHERE delivery_id=? AND resolved_at IS NULL
-        `).run(this.now(), input.resolution, input.operationId, input.deliveryId);
+          WHERE fence_id=? AND resolved_at IS NULL
+        `).run(this.now(), input.resolution, input.operationId, input.fenceId);
+        if (updated.changes !== 1)
+          throw new BrokerContractError("Dispatch fence is missing or already resolved");
         appendEvent(
           this.database,
           "dispatch_fence_resolved",
           this.now(),
-          { resolution: input.resolution, adapterOutcome: fence.adapter_outcome },
-          { deliveryId: input.deliveryId },
+          { fenceId: input.fenceId, resolution: input.resolution, adapterOutcome: fence.adapter_outcome },
+          { deliveryId: fence.delivery_id },
         );
-        return { deliveryId: input.deliveryId, resolution: input.resolution };
+        return {
+          fenceId: input.fenceId,
+          deliveryId: fence.delivery_id,
+          resolution: input.resolution,
+        };
+      },
+    );
+  }
+  notifyAdapterAvailable(input: {
+    operationId: string;
+    adminId: string;
+    laneId: string;
+  }): { laneId: string; cleared: boolean } {
+    if (!input.adminId.trim())
+      throw new BrokerContractError("Adapter reconnect notification requires an admin identity");
+    return this.mutate(
+      input.operationId,
+      { kind: "admin", id: input.adminId },
+      "notify_adapter_available",
+      input,
+      () => {
+        const cleared = clearAdapterSuppression({
+          database: this.database,
+          laneId: input.laneId,
+          now: this.now,
+        });
+        return { laneId: input.laneId, cleared };
       },
     );
   }

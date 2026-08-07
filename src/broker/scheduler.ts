@@ -1,6 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { AdapterResult, DeliveryAdapter } from "../core/adapter-contract.js";
 import {
-  applyAdapterResult,
   recordStartedTurnEndedBeforeClaim,
   type Delivery,
 } from "../core/delivery-state.js";
@@ -9,6 +9,11 @@ import { inTransaction } from "../storage/database.js";
 import { StorageRepositories } from "../storage/repositories.js";
 import { recoverDatabase } from "../storage/recovery.js";
 import { appendEvent } from "./events.js";
+import {
+  clearAdapterSuppression,
+  persistAdapterResult,
+  persistAdapterSuppression,
+} from "./adapter-result-persistence.js";
 import { retryDelay, type RuntimeConfig } from "./runtime.js";
 
 export type AdapterRegistry = Readonly<{
@@ -18,6 +23,7 @@ export type AdapterRegistry = Readonly<{
 interface SchedulerDependencies {
   readonly now?: () => number;
   readonly random?: () => number;
+  readonly randomId?: () => string;
   readonly onFatal?: (error: SchedulerFatalError) => void;
 }
 interface EligibleRow {
@@ -45,6 +51,9 @@ export const SCHEDULER_UNRESOLVED_SQL = `
       SELECT 1 FROM dispatch_fence f
       WHERE f.delivery_id=d.id AND f.resolved_at IS NULL
     )
+    AND NOT EXISTS (
+      SELECT 1 FROM adapter_suppression s WHERE s.lane_id=d.target_lane_id
+    )
   ORDER BY d.target_lane_id,d.sequence
 `;
 
@@ -53,9 +62,9 @@ export class Scheduler {
   private readonly busy = new Set<string>();
   private readonly running = new Set<string>();
   private readonly unavailable = new Set<string>();
-  private readonly storedPending = new Set<string>();
   private readonly now: () => number;
   private readonly random: () => number;
+  private readonly randomId: () => string;
   private readonly onFatal: (error: SchedulerFatalError) => void;
   private fatal: SchedulerFatalError | null = null;
   constructor(
@@ -67,6 +76,7 @@ export class Scheduler {
     this.repositories = new StorageRepositories(database);
     this.now = dependencies.now ?? Date.now;
     this.random = dependencies.random ?? Math.random;
+    this.randomId = dependencies.randomId ?? randomUUID;
     this.onFatal = dependencies.onFatal ?? (() => undefined);
   }
   setLaneBusy(laneId: string, busy: boolean): void {
@@ -76,7 +86,7 @@ export class Scheduler {
   setLaneAvailable(laneId: string, available: boolean): void {
     if (available) {
       this.unavailable.delete(laneId);
-      this.storedPending.delete(laneId);
+      clearAdapterSuppression({ database: this.database, laneId, now: this.now });
     } else this.unavailable.add(laneId);
   }
 
@@ -141,11 +151,18 @@ export class Scheduler {
           }
           if (runtime.availability !== "online") {
             this.unavailable.add(laneId);
+            if (runtime.availability === "offline")
+              persistAdapterSuppression({
+                database: this.database,
+                laneId,
+                sourceDeliveryId: candidates[0]?.id ?? null,
+                reasonCode: "offline",
+                now: this.now,
+              });
             return;
           }
           this.unavailable.delete(laneId);
-          if (this.unavailable.has(laneId) || this.storedPending.has(laneId))
-            return;
+          if (this.unavailable.has(laneId)) return;
           const durableTurn = candidates.some(
             (row) => row.state === "notified" || row.state === "claimed",
           );
@@ -216,41 +233,13 @@ export class Scheduler {
       result = "adapter_failed";
     }
     try {
-      inTransaction(this.database, () => {
-        for (const row of rows) {
-          const current = this.repositories.readDelivery(row.id);
-          const attempt = current.failureCount;
-          const next = applyAdapterResult(current, result, {
-            claimDeadlineAt: this.now() + this.config.claimDeadlineMs,
-            queueDeadlineAt: this.now() + this.config.queueDeadlineMs,
-            failureLimit: this.config.failureLimit,
-            nextAttemptAt:
-              this.now() + retryDelay(this.config, attempt, this.random),
-          });
-          this.persist(
-            next,
-            result === "adapter_failed" ? "adapter failed" : null,
-          );
-          appendEvent(
-            this.database,
-            "adapter_result",
-            this.now(),
-            { result, status: next.status, failureCount: next.failureCount },
-            { deliveryId: row.id },
-          );
-        }
-        if (result === "binding_not_found") {
-          const binding = this.repositories.getCurrentBinding(
-            first.target_lane_id,
-          );
-          if (binding?.state === "bound")
-            this.repositories.markCurrentBindingUnbound({
-              laneId: first.target_lane_id,
-              generation: binding.generation,
-              occurredAt: this.now(),
-              reason: "adapter reported binding not found",
-            });
-        }
+      persistAdapterResult({
+        database: this.database,
+        deliveryIds: rows.map((row) => row.id),
+        result,
+        now: this.now,
+        random: this.random,
+        config: this.config,
       });
     } catch (persistenceError) {
       try {
@@ -261,18 +250,25 @@ export class Scheduler {
       throw persistenceError;
     }
     if (result === "started_new_turn") this.busy.add(first.target_lane_id);
-    if (result === "stored_pending")
-      this.storedPending.add(first.target_lane_id);
   }
   private persistDispatchFences(rows: EligibleRow[], result: AdapterResult): void {
     inTransaction(this.database, () => {
       const statement = this.database.prepare(`
         INSERT INTO dispatch_fence(
-          delivery_id,lane_id,adapter_outcome,fenced_at,reason_code
-        ) VALUES(?,?,?,?,'post_adapter_persistence_failed')
+          fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code
+        ) VALUES(?,?,?,?,?,'post_adapter_persistence_failed')
       `);
-      for (const row of rows)
-        statement.run(row.id, row.target_lane_id, result, this.now());
+      for (const row of rows) {
+        const fenceId = `fence-${this.randomId()}`;
+        statement.run(fenceId, row.id, row.target_lane_id, result, this.now());
+        appendEvent(
+          this.database,
+          "dispatch_fenced",
+          this.now(),
+          { fenceId, adapterOutcome: result, reason: "post_adapter_persistence_failed" },
+          { deliveryId: row.id },
+        );
+      }
     });
   }
   private markFatal(persistenceError: unknown, fenceError: unknown): never {
