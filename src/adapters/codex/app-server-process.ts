@@ -23,7 +23,7 @@ export class CodexAppServerProcess {
   get client(): AppServerClient { return this._client; }
   get state(): CodexProcessState { return this.processState; }
   constructor(private readonly options: { command: CodexCommand; gate: CodexCapabilityGate; readinessTimeoutMs?: number; requestTimeoutMs?: number; restartLimit?: number; sameEndpointReconnectLimit?: number; restartBackoffMs?: number; restartBackoffCapMs?: number; random?: () => number; sleep?: (ms: number, signal: AbortSignal) => Promise<void>; spawnProcess?: typeof spawn; onReconnect?: (event: CodexRecoveryEvent) => void }) {
-    this._client = new AppServerClient({ url: "ws://127.0.0.1:0", requestTimeoutMs: options.requestTimeoutMs ?? 30_000 });
+    this._client = new AppServerClient({ url: "ws://127.0.0.1:0", connectTimeoutMs: options.readinessTimeoutMs ?? 5_000, requestTimeoutMs: options.requestTimeoutMs ?? 30_000 });
     this._client.onTransportLoss((event) => this.handleTransportLoss(event));
   }
   onReconnect(handler: (event: CodexRecoveryEvent) => void): () => void { this.reconnectHandlers.add(handler); return () => this.reconnectHandlers.delete(handler); }
@@ -65,7 +65,7 @@ export class CodexAppServerProcess {
         this.assertActive(epoch);
         if (child.exitCode !== null) throw new Error(`Codex App Server exited before readiness (${child.exitCode})`);
         try {
-          await this._client.connect(); this.assertActive(epoch);
+          await this._client.connect({ timeoutMs: Math.max(1, deadline - Date.now()) }); this.assertActive(epoch);
           if (child.exitCode !== null) throw new Error(`Codex App Server exited before readiness (${child.exitCode})`);
           ready = true; return endpoint;
         } catch (error) { lastError = error; await delay(20); }
@@ -94,7 +94,13 @@ export class CodexAppServerProcess {
   private async recover(epoch: number, signal: AbortSignal, preferSameEndpoint: boolean): Promise<void> {
     if (preferSameEndpoint && this.child && this.child.exitCode === null && this.endpoint) {
       try {
-        await this._client.reconnect({ attempts: this.options.sameEndpointReconnectLimit ?? 2, backoffMs: this.options.restartBackoffMs ?? 100 });
+        await this._client.reconnect({
+          attempts: this.options.sameEndpointReconnectLimit ?? 2,
+          backoffMs: this.options.restartBackoffMs ?? 100,
+          backoffCapMs: this.options.restartBackoffCapMs ?? 5_000,
+          random: this.options.random ?? Math.random,
+          sleep: (ms) => this.sleep(ms, signal),
+        });
         if (!this.isActive(epoch) || signal.aborted) return;
         this.processState = "ready"; this.notifyRecovered({ kind: "recovered", strategy: "same_endpoint", attempt: 1 }); return;
       } catch { /* replace the live but unreachable child */ }

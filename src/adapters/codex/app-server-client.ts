@@ -24,7 +24,7 @@ export class AppServerClient {
   private requestHandler?: (message: ServerRequest) => Promise<unknown>;
   private protocolErrorHandler: (error: ProtocolDecodeError) => void = () => undefined;
   private readonly transportLossHandlers = new Set<(event: AppServerTransportLoss) => void>();
-  constructor(private readonly options: { url: string; requestTimeoutMs?: number; clientName?: string; clientVersion?: string }) { this.url = options.url; }
+  constructor(private readonly options: { url: string; connectTimeoutMs?: number; requestTimeoutMs?: number; clientName?: string; clientVersion?: string }) { this.url = options.url; }
 
   isConnected(): boolean { return this.state === "ready" && this.socket?.readyState === WebSocket.OPEN; }
   onNotification(handler: (message: Notification) => void): () => void { this.notificationHandler = handler; return () => { if (this.notificationHandler === handler) this.notificationHandler = () => undefined; }; }
@@ -33,7 +33,7 @@ export class AppServerClient {
   onTransportLoss(handler: (event: AppServerTransportLoss) => void): () => void { this.transportLossHandlers.add(handler); return () => this.transportLossHandlers.delete(handler); }
   setUrl(url: string): void { if (this.state !== "disconnected") throw new Error("Cannot change App Server URL while connected"); this.url = url; }
 
-  connect(): Promise<void> {
+  connect(options: { timeoutMs?: number } = {}): Promise<void> {
     if (this.isConnected()) return Promise.resolve();
     if (this.connectTask) return this.connectTask;
     const epoch = ++this.connectionEpoch;
@@ -42,7 +42,7 @@ export class AppServerClient {
     this.state = "connecting";
     this.attachSocket(socket, epoch);
     let tracked: Promise<void>;
-    tracked = this.initializeSocket(socket, epoch).catch(async (error: unknown) => {
+    tracked = this.initializeSocket(socket, epoch, options.timeoutMs ?? this.options.connectTimeoutMs ?? this.options.requestTimeoutMs ?? 15_000).catch(async (error: unknown) => {
       await this.closeExactSocket(socket, epoch, error instanceof Error ? error : new Error(String(error)));
       throw error;
     }).finally(() => { if (this.connectTask === tracked) this.connectTask = undefined; });
@@ -50,11 +50,18 @@ export class AppServerClient {
     return tracked;
   }
 
-  async reconnect(options: { attempts: number; backoffMs: number }): Promise<void> {
+  async reconnect(options: { attempts: number; backoffMs: number; backoffCapMs?: number; random?: () => number; sleep?: (ms: number) => Promise<void> }): Promise<void> {
     let last: unknown;
     for (let attempt = 0; attempt < options.attempts; attempt += 1) {
       try { await this.connect(); return; }
-      catch (error) { last = error; if (attempt + 1 < options.attempts) await new Promise((resolve) => setTimeout(resolve, options.backoffMs * 2 ** attempt)); }
+      catch (error) {
+        last = error;
+        if (attempt + 1 < options.attempts) {
+          const ceiling = Math.min(options.backoffCapMs ?? Number.MAX_SAFE_INTEGER, options.backoffMs * 2 ** attempt);
+          const delayMs = Math.floor(ceiling * Math.max(0, Math.min(1, (options.random ?? Math.random)())));
+          await (options.sleep ?? delay)(delayMs);
+        }
+      }
     }
     throw new AppServerDisconnectedError(`Codex App Server reconnect exhausted ${options.attempts} attempts: ${last instanceof Error ? last.message : String(last)}`);
   }
@@ -80,9 +87,12 @@ export class AppServerClient {
     await this.closeExactSocket(socket, epoch, new AppServerDisconnectedError("Codex App Server client shut down"));
   }
 
-  private async initializeSocket(socket: WebSocket, epoch: number): Promise<void> {
+  private async initializeSocket(socket: WebSocket, epoch: number, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
     await new Promise<void>((resolve, reject) => {
-      const cleanup = () => { socket.off("open", onOpen); socket.off("error", onError); socket.off("close", onClose); };
+      const timer = setTimeout(() => { cleanup(); reject(new AppServerRequestTimeoutError("initialize")); }, timeoutMs);
+      timer.unref?.();
+      const cleanup = () => { clearTimeout(timer); socket.off("open", onOpen); socket.off("error", onError); socket.off("close", onClose); };
       const onOpen = () => { cleanup(); resolve(); };
       const onError = (error: Error) => { cleanup(); reject(error); };
       const onClose = () => { cleanup(); reject(new AppServerDisconnectedError("Codex App Server closed while connecting")); };
@@ -90,7 +100,8 @@ export class AppServerClient {
     });
     this.assertCurrent(socket, epoch);
     this.state = "initializing";
-    await this.sendRequest(socket, epoch, "initialize", { clientInfo: { name: this.options.clientName ?? "lane-router", title: "Lane Router", version: this.options.clientVersion ?? "0.1.0" }, capabilities: { experimentalApi: true } });
+    const remainingMs = Math.max(1, deadline - Date.now());
+    await this.sendRequest(socket, epoch, "initialize", { clientInfo: { name: this.options.clientName ?? "lane-router", title: "Lane Router", version: this.options.clientVersion ?? "0.1.0" }, capabilities: { experimentalApi: true } }, remainingMs);
     this.assertCurrent(socket, epoch);
     socket.send(JSON.stringify({ method: "initialized" }));
     this.state = "ready";
@@ -109,11 +120,11 @@ export class AppServerClient {
     socket.on("error", () => undefined);
   }
 
-  private sendRequest(socket: WebSocket, epoch: number, method: string, params: unknown): Promise<unknown> {
+  private sendRequest(socket: WebSocket, epoch: number, method: string, params: unknown, timeoutMs = this.options.requestTimeoutMs ?? 15_000): Promise<unknown> {
     if (!this.isCurrentOpen(socket, epoch)) return Promise.reject(new AppServerDisconnectedError());
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new AppServerRequestTimeoutError(method)); }, this.options.requestTimeoutMs ?? 15_000);
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new AppServerRequestTimeoutError(method)); }, timeoutMs);
       timer.unref?.();
       this.pending.set(id, { method, epoch, resolve, reject, timer });
       socket.send(JSON.stringify({ id, method, params }));
@@ -128,18 +139,18 @@ export class AppServerClient {
     try { decoded = decodeServerMessage(parsed); }
     catch (error) {
       const protocolError = error instanceof ProtocolDecodeError ? error : new ProtocolDecodeError(error instanceof Error ? error.message : String(error));
-      this.protocolErrorHandler(protocolError);
       const id = messageId(parsed);
       const pending = id === undefined ? undefined : this.pending.get(id);
       if (pending?.epoch === epoch) { this.pending.delete(id!); clearTimeout(pending.timer); pending.reject(protocolError); }
       else this.fenceProtocol(protocolError, socket, epoch, false);
+      this.emitProtocolError(protocolError);
       return;
     }
     if (decoded.kind === "response") {
       const pending = this.pending.get(decoded.id); if (!pending || pending.epoch !== epoch) return;
       this.pending.delete(decoded.id); clearTimeout(pending.timer);
       decoded.error ? pending.reject(new AppServerRpcError(decoded.error.code, decoded.error.message, decoded.error.data)) : pending.resolve(decoded.result);
-    } else if (decoded.kind === "notification") this.notificationHandler(decoded);
+    } else if (decoded.kind === "notification") { try { this.notificationHandler(decoded); } catch { /* observers cannot own connection state */ } }
     else void this.answer(decoded, socket, epoch);
   }
 
@@ -154,11 +165,11 @@ export class AppServerClient {
   }
 
   private fenceProtocol(error: ProtocolDecodeError, socket: WebSocket, epoch: number, emit = true): void {
-    if (emit) this.protocolErrorHandler(error);
     const wasReady = this.state === "ready";
     this.disconnectExact(socket, epoch, error);
     socket.close();
     if (wasReady) this.emitTransportLoss({ reason: "protocol_error", epoch, error });
+    if (emit) this.emitProtocolError(error);
   }
 
   private async closeExactSocket(socket: WebSocket, epoch: number, error: Error): Promise<void> {
@@ -183,6 +194,7 @@ export class AppServerClient {
   private assertCurrent(socket: WebSocket, epoch: number): void { if (!this.isCurrent(socket, epoch)) throw new AppServerDisconnectedError(); }
   private isCurrent(socket: WebSocket, epoch: number): boolean { return this.socket === socket && this.connectionEpoch === epoch; }
   private isCurrentOpen(socket: WebSocket, epoch: number): boolean { return this.isCurrent(socket, epoch) && socket.readyState === WebSocket.OPEN; }
+  private emitProtocolError(error: ProtocolDecodeError): void { try { this.protocolErrorHandler(error); } catch { /* observers cannot own protocol state */ } }
   private emitTransportLoss(event: AppServerTransportLoss): void { for (const handler of this.transportLossHandlers) { try { handler(event); } catch { /* observers cannot own transport state */ } } }
 }
 
@@ -191,3 +203,4 @@ function messageId(value: unknown): JsonRpcId | undefined {
   const id = (value as Record<string, unknown>).id;
   return typeof id === "string" || typeof id === "number" ? id : undefined;
 }
+function delay(ms: number): Promise<void> { return new Promise((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); }); }

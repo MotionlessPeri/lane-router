@@ -76,9 +76,11 @@ async function readCache(cacheDir: string, fingerprint: string): Promise<boolean
   try {
     const info = await lstat(cachePath);
     if (info.isSymbolicLink() || !info.isFile()) throw new CodexCapabilityError("Codex capability cache entry must be a regular file");
-    return JSON.parse(await readFile(cachePath, "utf8")).fingerprint === fingerprint;
+    const parsed = JSON.parse(await readFile(cachePath, "utf8")) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && (parsed as Record<string, unknown>).fingerprint === fingerprint;
   } catch (error) {
     if (error instanceof CodexCapabilityError) throw error;
+    if (error instanceof SyntaxError) return false;
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new CodexCapabilityError("Unable to read Codex capability cache", error);
     return false;
   }

@@ -1,7 +1,7 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { basename, dirname, join } from "node:path";
-import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
@@ -214,6 +214,35 @@ test("a malformed correlated response rejects immediately with a typed protocol 
   await client.close();
 });
 
+test("throwing protocol-error observers cannot escape before correlated rejection", async () => {
+  const url = await server((message, socket) => {
+    if (message.method === "initialize") socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
+    if (message.method === "broken") socket.send(JSON.stringify({ id: message.id, result: {}, error: { code: 1, message: "both" } }));
+  });
+  const client = new AppServerClient({ url, requestTimeoutMs: 1_000 });
+  client.onProtocolError(() => { throw new Error("external protocol observer failed"); });
+  await client.connect();
+  await expect(client.request("broken", {})).rejects.toBeInstanceOf(ProtocolDecodeError);
+  expect(client.isConnected()).toBe(true);
+  await client.close();
+});
+
+test("throwing notification observers cannot escape or break a legal connection", async () => {
+  const url = await server((message, socket) => {
+    if (message.method === "initialize") socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
+    if (message.method === "notify-then-reply") {
+      socket.send(JSON.stringify({ method: "thread/status/changed", params: { threadId: "th", status: { type: "idle" } } }));
+      socket.send(JSON.stringify({ id: message.id, result: { ok: true } }));
+    }
+  });
+  const client = new AppServerClient({ url, requestTimeoutMs: 1_000 });
+  client.onNotification(() => { throw new Error("external notification observer failed"); });
+  await client.connect();
+  await expect(client.request("notify-then-reply", {})).resolves.toEqual({ ok: true });
+  expect(client.isConnected()).toBe(true);
+  await client.close();
+});
+
 test("an uncorrelated malformed message fences the connection and rejects pending", async () => {
   const url = await server((message, socket) => {
     if (message.method === "initialize") socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
@@ -225,10 +254,35 @@ test("an uncorrelated malformed message fences the connection and rejects pendin
   expect(client.isConnected()).toBe(false);
 });
 
+test("throwing protocol observers run only after an uncorrelated message is fenced", async () => {
+  const url = await server((message, socket) => {
+    if (message.method === "initialize") socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
+    if (message.method === "pending") socket.send(JSON.stringify({ method: "turn/started", params: { threadId: 2 } }));
+  });
+  const client = new AppServerClient({ url, requestTimeoutMs: 1_000 });
+  client.onProtocolError(() => { throw new Error("external protocol observer failed"); });
+  await client.connect();
+  await expect(client.request("pending", {})).rejects.toBeInstanceOf(ProtocolDecodeError);
+  expect(client.isConnected()).toBe(false);
+});
+
 test("reconnect attempts are bounded", async () => {
   const client = new AppServerClient({ url: "ws://127.0.0.1:1", requestTimeoutMs: 20 });
   await expect(client.reconnect({ attempts: 2, backoffMs: 1 })).rejects.toBeInstanceOf(AppServerDisconnectedError);
   expect(client.isConnected()).toBe(false);
+});
+
+test("same-endpoint reconnect uses injected bounded full jitter", async () => {
+  const delays: number[] = [];
+  const client = new AppServerClient({ url: "ws://127.0.0.1:1", requestTimeoutMs: 20 });
+  await expect(client.reconnect({
+    attempts: 3,
+    backoffMs: 100,
+    backoffCapMs: 150,
+    random: () => 0.5,
+    sleep: async (ms) => { delays.push(ms); },
+  })).rejects.toBeInstanceOf(AppServerDisconnectedError);
+  expect(delays).toEqual([50, 75]);
 });
 
 function fakeCommand(env: Record<string, string> = {}) {
@@ -252,6 +306,19 @@ test("semantic schema formatting changes preserve the fingerprint and cache hit"
   const pretty = await gate.verify(fakeCommand({ FAKE_CODEX_FORMAT: "pretty" }));
   expect(pretty.fingerprint).toBe(compact.fingerprint);
   expect(pretty.cached).toBe(true);
+});
+
+test("corrupt ordinary capability cache is a miss and is atomically rebuilt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lane-router-capability-corrupt-cache-")); dirs.push(root);
+  const cacheDir = join(root, "cache");
+  await mkdir(cacheDir);
+  const cachePath = join(cacheDir, "codex-capability.json");
+  await writeFile(cachePath, "{not-json", "utf8");
+  const gate = new CodexCapabilityGate({ cacheDir });
+  const rebuilt = await gate.verify(fakeCommand());
+  expect(rebuilt.cached).toBe(false);
+  expect(JSON.parse(await readFile(cachePath, "utf8"))).toMatchObject({ fingerprint: rebuilt.fingerprint });
+  expect((await gate.verify(fakeCommand())).cached).toBe(true);
 });
 
 test("decoy method strings with incompatible structural shapes fail the gate", async () => {
@@ -317,6 +384,39 @@ test("process manager selects loopback, waits for readiness, and shuts down clea
   expect(manager.client.isConnected()).toBe(true);
   await manager.shutdown();
   expect(manager.client.isConnected()).toBe(false);
+});
+
+test("readiness bounds the complete WebSocket initialize handshake", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lane-router-process-handshake-timeout-")); dirs.push(root);
+  let opened = 0;
+  let closed = 0;
+  const url = await server((_message, socket) => {
+    if (opened === 0) { opened += 1; socket.once("close", () => { closed += 1; }); }
+  });
+  const manager = new CodexAppServerProcess({
+    command: fakeCommand(),
+    gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }),
+    readinessTimeoutMs: 100,
+    requestTimeoutMs: 1_000,
+  });
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    manager.client.setUrl(url);
+    const startedAt = Date.now();
+    await expect(manager.client.connect()).rejects.toBeInstanceOf(AppServerRequestTimeoutError);
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(opened).toBe(1);
+    expect(manager.client.isConnected()).toBe(false);
+    await vi.waitFor(() => expect(closed).toBe(1));
+    expect(servers.at(-1)?.clients.size).toBe(0);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    await manager.shutdown();
+  }
 });
 
 test("process manager keeps request latency independent from readiness latency", async () => {
@@ -463,7 +563,7 @@ test("recovery exhaustion fails closed and the next start is fresh", async () =>
   try {
     await manager.start();
     await vi.waitFor(() => expect(manager.state).toBe("failed"), { timeout: 5_000 });
-    expect(delays).toEqual([50, 75]);
+    expect(delays).toEqual([50, 50, 75]);
     await manager.start();
     expect(spawnAttempt).toBe(4);
     expect(manager.state).toBe("ready");
