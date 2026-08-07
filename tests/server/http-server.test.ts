@@ -46,7 +46,6 @@ test("RPC carries admin and binding identity plus operation IDs", async () => {
   const x = await setup();
   await x.client.call("syncProject", {
     operationId: "s",
-    adminId: "admin",
     workspaceId: "w",
     rootPath: "C:/r",
     manifest: {
@@ -58,9 +57,8 @@ test("RPC carries admin and binding identity plus operation IDs", async () => {
       lanes: [{ name: "a", roleFile: "a", communicationEntry: true }],
     },
   });
-  await x.client.call("bind", {
+  const bound = await x.client.call("bind", {
     operationId: "b",
-    adminId: "admin",
     bindingId: "ba",
     laneAddress: "p/a",
     workspaceId: "w",
@@ -68,7 +66,7 @@ test("RPC carries admin and binding identity plus operation IDs", async () => {
     conversationId: "t",
   });
   expect(
-    await x.client.call("whoami", { bindingId: "ba", generation: 1 }),
+    await x.client.withCredential(bound.bindingCredential).call("whoami", {}),
   ).toMatchObject({ laneAddress: "p/a" });
 });
 test("malformed and oversized input fail without invoking service and non-loopback bind is rejected", async () => {
@@ -76,7 +74,7 @@ test("malformed and oversized input fail without invoking service and non-loopba
   const malformed = await fetch(`${x.server.url}/v1/rpc`, {
     method: "POST",
     headers: {
-      authorization: "Bearer secret",
+      authorization: await x.client.actorAuthorization(),
       "content-type": "application/json",
     },
     body: "{",
@@ -102,10 +100,14 @@ test("oversized JSON receives a typed 413 response", async () => {
     maxJsonBytes: 16,
   });
   servers.push(server);
+  const authorization = await new BrokerClient(
+    server.url,
+    "secret",
+  ).actorAuthorization();
   const response = await fetch(`${server.url}/v1/rpc`, {
     method: "POST",
     headers: {
-      authorization: "Bearer secret",
+      authorization,
       "content-type": "application/json",
     },
     body: JSON.stringify({
@@ -123,7 +125,6 @@ test("WebSocket authenticates before upgrade and streams body-free events", asyn
   const x = await setup();
   await x.client.call("syncProject", {
     operationId: "s",
-    adminId: "a",
     workspaceId: "w",
     rootPath: "C:/r",
     manifest: {
@@ -135,9 +136,8 @@ test("WebSocket authenticates before upgrade and streams body-free events", asyn
       lanes: [{ name: "a", roleFile: "a", communicationEntry: true }],
     },
   });
-  await x.client.call("bind", {
+  const bound = await x.client.call("bind", {
     operationId: "b",
-    adminId: "a",
     bindingId: "ba",
     laneAddress: "p/a",
     workspaceId: "w",
@@ -146,7 +146,7 @@ test("WebSocket authenticates before upgrade and streams body-free events", asyn
   });
   const url = x.server.url.replace("http", "ws") + "/v1/events/ws";
   const socket = new WebSocket(url, {
-    headers: { authorization: "Bearer secret" },
+    headers: { authorization: await x.client.actorAuthorization() },
   });
   const event = await new Promise<string>((resolve, reject) => {
     socket.once("message", (data) => resolve(data.toString()));
@@ -174,7 +174,6 @@ test("WebSocket streams events created after the upgrade", async () => {
   const x = await setup();
   await x.client.call("syncProject", {
     operationId: "s",
-    adminId: "a",
     workspaceId: "w",
     rootPath: "C:/r",
     manifest: {
@@ -188,7 +187,7 @@ test("WebSocket streams events created after the upgrade", async () => {
   });
   const socket = new WebSocket(
     x.server.url.replace("http", "ws") + "/v1/events/ws",
-    { headers: { authorization: "Bearer secret" } },
+    { headers: { authorization: await x.client.actorAuthorization() } },
   );
   await new Promise<void>((resolve, reject) => {
     socket.once("open", () => resolve());
@@ -199,7 +198,6 @@ test("WebSocket streams events created after the upgrade", async () => {
   );
   await x.client.call("bind", {
     operationId: "b",
-    adminId: "a",
     bindingId: "ba",
     laneAddress: "p/a",
     workspaceId: "w",
@@ -233,37 +231,35 @@ test("fake adapter drives a full lifecycle through loopback across a broker rest
   };
   await client.call("syncProject", {
     operationId: "s",
-    adminId: "x",
     workspaceId: "w",
     rootPath: "C:/r",
     manifest,
   });
-  await client.call("bind", {
+  const senderBinding = await client.call("bind", {
     operationId: "a",
-    adminId: "x",
     bindingId: "ba",
     laneAddress: "p/a",
     workspaceId: "w",
     adapter: "codex",
     conversationId: "a",
   });
-  await client.call("bind", {
+  const targetBinding = await client.call("bind", {
     operationId: "b",
-    adminId: "x",
     bindingId: "bb",
     laneAddress: "p/b",
     workspaceId: "w",
     adapter: "codex",
     conversationId: "b",
   });
-  const sent = await client.call<{ deliveryId: string }>("send", {
-    operationId: "m",
-    actor: { bindingId: "ba", generation: 1 },
-    target: "p/b",
-    kind: "normal",
-    body: "hello",
-    metadata: {},
-  });
+  const sent = await client
+    .withCredential(senderBinding.bindingCredential)
+    .call("send", {
+      operationId: "m",
+      target: "p/b",
+      kind: "normal",
+      body: "hello",
+      metadata: {},
+    });
   const adapter: DeliveryAdapter = { deliver: async () => "started_new_turn" };
   await new Scheduler(db, { codex: adapter, claude: adapter }, service.config, {
     now: () => 100,
@@ -278,15 +274,14 @@ test("fake adapter drives a full lifecycle through loopback across a broker rest
   });
   servers.push(server);
   client = new BrokerClient(server.url, "secret");
-  const claim = await client.call<{ claimId: string }>("claim", {
+  const bindingClient = client.withCredential(targetBinding.bindingCredential);
+  const claim = await bindingClient.call("claim", {
     operationId: "c",
-    actor: { bindingId: "bb", generation: 1 },
     deliveryId: sent.deliveryId,
   });
   expect(
-    await client.call("ack", {
+    await bindingClient.call("ack", {
       operationId: "ack",
-      actor: { bindingId: "bb", generation: 1 },
       deliveryId: sent.deliveryId,
       claimId: claim.claimId,
       outcome: { kind: "recorded", summary: "done" },

@@ -1,12 +1,12 @@
 import type { Server as HttpServer, IncomingMessage } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
 import type { BrokerService } from "../broker/broker-service.js";
-import { isAuthorized } from "./auth.js";
+import { verifyActorCredential } from "./auth.js";
 
 export function attachEventWebSocket(
   server: HttpServer,
   service: BrokerService,
-  token: string,
+  sessionSecret: string,
 ): { close(): Promise<void> } {
   const websocket = new WebSocketServer({ noServer: true });
   const cursors = new WeakMap<WebSocket, number>();
@@ -14,7 +14,7 @@ export function attachEventWebSocket(
     const url = new URL(request.url ?? "/", "http://localhost");
     if (
       url.pathname !== "/v1/events/ws" ||
-      !isAuthorized(request.headers.authorization, token)
+      !verifyActorCredential(request.headers.authorization, sessionSecret)
     ) {
       socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
       socket.destroy();

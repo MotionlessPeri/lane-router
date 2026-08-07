@@ -27,6 +27,8 @@ export function validateRuntimeConfig(
   )) {
     if (!Number.isFinite(value) || value <= 0)
       throw new RangeError(`${name} must be finite and positive`);
+    if (!Number.isSafeInteger(value))
+      throw new RangeError(`${name} must be a safe integer`);
   }
   if (!Number.isInteger(result.failureLimit))
     throw new RangeError("failureLimit must be an integer");
