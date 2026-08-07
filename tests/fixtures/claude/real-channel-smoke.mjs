@@ -22,6 +22,7 @@ let child;
 let claudeDiagnostic = "none";
 let outcome;
 const startedAt = Date.now();
+class FixtureError extends Error { constructor(code, phase) { super(code); this.code = code; this.phase = phase; } }
 
 try {
   const sourceSettings = requiredEnvironment("CLAUDE_SETTINGS_FILE");
@@ -194,4 +195,3 @@ async function waitFor(predicate, limit, phase) {
 function recordedInstruction(label) { return `Disposable ${label} check: fetch this message, claim its delivery, then acknowledge it with outcome {"kind":"recorded","summary":"lane-router disposable channel smoke recorded"}. Do not modify files or call non-Lane tools.`; }
 function requiredEnvironment(name) { const value = process.env[name]; if (!value) throw new FixtureError("missing_environment", name); return value; }
 function fail(code) { throw new FixtureError(code); }
-class FixtureError extends Error { constructor(code, phase) { super(code); this.code = code; this.phase = phase; } }
