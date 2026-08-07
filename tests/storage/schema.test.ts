@@ -332,6 +332,175 @@ describe("SQLite schema", () => {
     },
   );
 
+  it.each([
+    "delivery_pending",
+    "claim_active",
+    "claim_closed_for_park",
+  ] as const)(
+    "rejects dirty-v3 acknowledged state with %s before v4",
+    (corruption) => {
+      const path = temporaryDatabasePath();
+      const dirty = openDatabase(path);
+      seedStorage(dirty);
+      const repositories = new StorageRepositories(dirty);
+      repositories.createMessageWithInitialDelivery({
+        messageId: "ack-state-message",
+        deliveryId: "ack-state-delivery",
+        senderBindingId: "binding-1",
+        targetLaneId: "lane-1",
+        kind: "normal",
+        body: "body",
+        metadata: {},
+        replyTo: null,
+        createdAt: 10,
+      });
+      repositories.createClaim({
+        claimId: "ack-state-claim",
+        deliveryId: "ack-state-delivery",
+        generation: 1,
+        createdAt: 20,
+        leaseDeadlineAt: 100,
+      });
+      repositories.acknowledge({
+        deliveryId: "ack-state-delivery",
+        claimId: "ack-state-claim",
+        generation: 1,
+        outcome: { kind: "recorded", summary: "done" },
+        acknowledgedAt: 30,
+      });
+      if (corruption === "delivery_pending") {
+        dirty
+          .prepare("UPDATE delivery SET state='pending' WHERE id='ack-state-delivery'")
+          .run();
+      } else if (corruption === "claim_active") {
+        dirty
+          .prepare(
+            "UPDATE delivery SET state='claimed',deadline_kind='lease',deadline_at=100 WHERE id='ack-state-delivery'",
+          )
+          .run();
+        dirty
+          .prepare(
+            "UPDATE claim SET closed_at=NULL,close_reason=NULL WHERE id='ack-state-claim'",
+          )
+          .run();
+      } else {
+        dirty
+          .prepare(
+            "UPDATE claim SET close_reason='parked' WHERE id='ack-state-claim'",
+          )
+          .run();
+      }
+      dirty.exec(`
+        DROP TABLE project_declaration;
+        DROP TABLE workspace_manifest;
+        PRAGMA user_version = 3;
+      `);
+      dirty.close();
+
+      expect(() => {
+        const unexpectedlyOpened = openDatabase(path);
+        unexpectedlyOpened.close();
+      }).toThrow(/ack|acknowledged|integrity/i);
+      const repair = new Database(path);
+      try {
+        expect(repair.pragma("user_version", { simple: true })).toBe(3);
+        expect(
+          repair
+            .prepare(
+              "SELECT state FROM delivery WHERE id='ack-state-delivery'",
+            )
+            .get(),
+        ).toBeDefined();
+        expect(
+          repair
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type='table' AND name='project_declaration'",
+            )
+            .get(),
+        ).toBeUndefined();
+        expect(() => {
+          if (corruption === "delivery_pending")
+            repair
+              .prepare(
+                "UPDATE delivery SET state='acknowledged' WHERE id='ack-state-delivery'",
+              )
+              .run();
+          else if (corruption === "claim_active")
+            repair.exec(`
+              UPDATE claim SET closed_at=30,close_reason='acknowledged'
+                WHERE id='ack-state-claim';
+              UPDATE delivery SET state='acknowledged',deadline_kind=NULL,deadline_at=NULL
+                WHERE id='ack-state-delivery';
+            `);
+          else
+            repair
+              .prepare(
+                "UPDATE claim SET close_reason='acknowledged' WHERE id='ack-state-claim'",
+              )
+              .run();
+        }).not.toThrow();
+      } finally {
+        repair.close();
+      }
+    },
+  );
+
+  it("upgrades a legitimate acknowledged v3 delivery to v4", () => {
+    const path = temporaryDatabasePath();
+    const clean = openDatabase(path);
+    seedStorage(clean);
+    const repositories = new StorageRepositories(clean);
+    repositories.createMessageWithInitialDelivery({
+      messageId: "clean-ack-message",
+      deliveryId: "clean-ack-delivery",
+      senderBindingId: "binding-1",
+      targetLaneId: "lane-1",
+      kind: "normal",
+      body: "body",
+      metadata: {},
+      replyTo: null,
+      createdAt: 10,
+    });
+    repositories.createClaim({
+      claimId: "clean-ack-claim",
+      deliveryId: "clean-ack-delivery",
+      generation: 1,
+      createdAt: 20,
+      leaseDeadlineAt: 100,
+    });
+    repositories.acknowledge({
+      deliveryId: "clean-ack-delivery",
+      claimId: "clean-ack-claim",
+      generation: 1,
+      outcome: { kind: "recorded", summary: "done" },
+      acknowledgedAt: 30,
+    });
+    clean.exec(`
+      DROP TABLE project_declaration;
+      DROP TABLE workspace_manifest;
+      PRAGMA user_version = 3;
+    `);
+    clean.close();
+
+    const upgraded = openDatabase(path);
+    try {
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(4);
+      expect(
+        upgraded
+          .prepare(
+            "SELECT d.state,c.closed_at,c.close_reason FROM delivery d JOIN ack a ON a.delivery_id=d.id JOIN claim c ON c.id=a.claim_id WHERE d.id='clean-ack-delivery'",
+          )
+          .get(),
+      ).toEqual({
+        state: "acknowledged",
+        closed_at: 30,
+        close_reason: "acknowledged",
+      });
+    } finally {
+      upgraded.close();
+    }
+  });
+
   it.each(["unbound", "rebuilt"] as const)(
     "upgrades a v2 database with an internally valid historical claim after binding is %s",
     (bindingState) => {

@@ -489,8 +489,15 @@ function assertV2Integrity(database: Database.Database): void {
     const badAck = database.prepare(`
       SELECT a.delivery_id AS id FROM ack a WHERE
         json_extract(a.outcome_payload_json, '$.kind') IS NOT a.outcome_kind OR NOT EXISTS (
-          SELECT 1 FROM claim c WHERE c.id=a.claim_id
-            AND c.delivery_id=a.delivery_id AND c.generation=a.generation
+          SELECT 1 FROM claim c
+          JOIN delivery d ON d.id=a.delivery_id
+          JOIN binding b ON b.lane_id=d.target_lane_id AND b.generation=a.generation
+          WHERE c.id=a.claim_id
+            AND c.delivery_id=a.delivery_id
+            AND c.generation=a.generation
+            AND d.state='acknowledged'
+            AND c.closed_at=a.acknowledged_at
+            AND c.close_reason='acknowledged'
         ) LIMIT 1
     `).get() as { id: string } | undefined;
     if (badAck !== undefined) throw new DatabaseIntegrityError(`Ack integrity failed for delivery ${badAck.id}`);
