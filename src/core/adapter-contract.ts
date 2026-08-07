@@ -23,4 +23,10 @@ export interface AdapterDeliveryRequest {
 
 export interface DeliveryAdapter {
   deliver(request: AdapterDeliveryRequest): Promise<AdapterResult>;
+  getRuntimeState?(request: {
+    readonly targetLaneId: string;
+    readonly bindingGeneration: number;
+  }): Promise<
+    Readonly<{ availability: "online" | "offline"; turn: "idle" | "busy" }>
+  >;
 }

@@ -27,12 +27,16 @@ interface EligibleRow {
   kind: "normal" | "correction";
   generation: number;
   adapter: "claude" | "codex";
+  state: Delivery["status"];
+  next_attempt_at: number | null;
+  deadline_kind: "claim" | "queue" | "lease" | null;
 }
 
 export class Scheduler {
   private readonly repositories: StorageRepositories;
   private readonly busy = new Set<string>();
   private readonly running = new Set<string>();
+  private readonly suppressed = new Set<string>();
   private readonly now: () => number;
   private readonly random: () => number;
   constructor(
@@ -48,6 +52,10 @@ export class Scheduler {
   setLaneBusy(laneId: string, busy: boolean): void {
     if (busy) this.busy.add(laneId);
     else this.busy.delete(laneId);
+  }
+  setLaneAvailable(laneId: string, available: boolean): void {
+    if (available) this.suppressed.delete(laneId);
+    else this.suppressed.add(laneId);
   }
 
   turnEndedBeforeClaim(deliveryId: string): Delivery {
@@ -77,9 +85,9 @@ export class Scheduler {
     });
     const rows = this.database
       .prepare(
-        `SELECT d.id,d.message_id,d.target_lane_id,d.sequence,m.kind,b.generation,b.adapter FROM delivery d JOIN message m ON m.id=d.message_id JOIN binding b ON b.lane_id=d.target_lane_id AND b.is_current=1 WHERE d.state='pending' AND (d.next_attempt_at IS NULL OR d.next_attempt_at<=?) AND b.state='bound' ORDER BY d.target_lane_id,CASE m.kind WHEN 'correction' THEN 0 ELSE 1 END,d.sequence`,
+        `SELECT d.id,d.message_id,d.target_lane_id,d.sequence,m.kind,b.generation,b.adapter,d.state,d.next_attempt_at,d.deadline_kind FROM delivery d JOIN message m ON m.id=d.message_id JOIN binding b ON b.lane_id=d.target_lane_id AND b.is_current=1 WHERE d.state NOT IN ('acknowledged','parked') AND b.state='bound' ORDER BY d.target_lane_id,d.sequence`,
       )
-      .all(this.now()) as EligibleRow[];
+      .all() as EligibleRow[];
     const groups = new Map<string, EligibleRow[]>();
     for (const row of rows) {
       const current = groups.get(row.target_lane_id) ?? [];
@@ -89,14 +97,42 @@ export class Scheduler {
     await Promise.all(
       [...groups.entries()].map(async ([laneId, candidates]) => {
         if (this.running.has(laneId)) return;
+        const adapter = this.adapters[candidates[0]!.adapter];
+        const runtime = adapter.getRuntimeState
+          ? await adapter.getRuntimeState({
+              targetLaneId: laneId,
+              bindingGeneration: candidates[0]!.generation,
+            })
+          : null;
+        if (runtime?.availability === "offline") {
+          this.suppressed.add(laneId);
+          return;
+        }
+        if (runtime?.availability === "online") this.suppressed.delete(laneId);
+        if (this.suppressed.has(laneId)) return;
+        const durableTurn = candidates.some(
+          (row) => row.state === "notified" || row.state === "claimed",
+        );
+        const ended =
+          runtime?.turn === "idle" &&
+          candidates.find(
+            (row) => row.state === "notified" && row.deadline_kind === "claim",
+          );
+        if (ended) {
+          this.turnEndedBeforeClaim(ended.id);
+          return;
+        }
+        const busy =
+          this.busy.has(laneId) || runtime?.turn === "busy" || durableTurn;
         const corrections = candidates.filter(
           (row) => row.kind === "correction",
         );
-        const selected = corrections.length
-          ? corrections
-          : this.busy.has(laneId)
+        const normals = candidates.filter((row) => row.kind === "normal");
+        const selected = this.eligiblePrefix(corrections).length
+          ? this.eligiblePrefix(corrections)
+          : busy
             ? []
-            : candidates.filter((row) => row.kind === "normal");
+            : this.eligiblePrefix(normals);
         if (!selected.length) return;
         this.running.add(laneId);
         try {
@@ -107,6 +143,19 @@ export class Scheduler {
       }),
     );
     return groups.size;
+  }
+
+  private eligiblePrefix(rows: EligibleRow[]): EligibleRow[] {
+    const selected: EligibleRow[] = [];
+    for (const row of rows) {
+      if (
+        row.state !== "pending" ||
+        (row.next_attempt_at !== null && row.next_attempt_at > this.now())
+      )
+        break;
+      selected.push(row);
+    }
+    return selected;
   }
 
   private async deliverBatch(rows: EligibleRow[]): Promise<void> {
@@ -163,6 +212,7 @@ export class Scheduler {
       }
     });
     if (result === "started_new_turn") this.busy.add(first.target_lane_id);
+    if (result === "stored_pending") this.suppressed.add(first.target_lane_id);
   }
   private persist(delivery: Delivery, error: string | null): void {
     const kind =

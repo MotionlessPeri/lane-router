@@ -210,7 +210,7 @@ test("binding_not_found durably unbinds without counting a failure", async () =>
 
 test("a Router-started turn keeps its lane serialized until orchestration marks it idle", async () => {
   const x = setup("started_new_turn");
-  x.service.send({
+  const first = x.service.send({
     operationId: "one",
     actor: { bindingId: "ba", generation: 1 },
     target: "p/b",
@@ -230,6 +230,10 @@ test("a Router-started turn keeps its lane serialized until orchestration marks 
   await x.scheduler.runOnce();
   expect(x.adapter.requests).toHaveLength(1);
   x.scheduler.setLaneBusy("p/b", false);
+  const failed = x.scheduler.turnEndedBeforeClaim(first.deliveryId) as {
+    nextAttemptAt: number;
+  };
+  x.setNow(failed.nextAttemptAt);
   await x.scheduler.runOnce();
   expect(x.adapter.requests).toHaveLength(2);
 });
@@ -351,4 +355,181 @@ test("different lanes deliver in parallel", async () => {
     { now: () => 100, random: () => 0.5 },
   ).runOnce();
   expect(maximum).toBe(2);
+});
+
+test("an older backed-off normal blocks a later eligible normal", async () => {
+  const x = setup("adapter_failed");
+  x.service.send({
+    operationId: "blocked-first",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "first",
+    metadata: {},
+  });
+  await x.scheduler.runOnce();
+  x.service.send({
+    operationId: "blocked-second",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "second",
+    metadata: {},
+  });
+  await x.scheduler.runOnce();
+  expect(x.adapter.requests).toHaveLength(1);
+});
+
+test("a fresh scheduler respects durable notified work and adapter busy state", async () => {
+  const x = setup("started_new_turn");
+  x.service.send({
+    operationId: "restart-first",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "first",
+    metadata: {},
+  });
+  await x.scheduler.runOnce();
+  x.service.send({
+    operationId: "restart-second",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "second",
+    metadata: {},
+  });
+  const runtimeAdapter: DeliveryAdapter = {
+    deliver: (request) => x.adapter.deliver(request),
+    getRuntimeState: async () => ({ availability: "online", turn: "busy" }),
+  };
+  await new Scheduler(
+    x.db,
+    { codex: runtimeAdapter, claude: runtimeAdapter },
+    x.service.config,
+    { now: () => 100, random: () => 0.5 },
+  ).runOnce();
+  expect(x.adapter.requests).toHaveLength(1);
+});
+
+test("offline health polling suppresses delivery until reconnect", async () => {
+  const x = setup("started_new_turn");
+  x.service.send({
+    operationId: "offline-pending",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "wait",
+    metadata: {},
+  });
+  let online = false;
+  let healthChecks = 0;
+  let deliveries = 0;
+  const adapter: DeliveryAdapter = {
+    deliver: async () => {
+      deliveries += 1;
+      return "started_new_turn";
+    },
+    getRuntimeState: async () => {
+      healthChecks += 1;
+      return { availability: online ? "online" : "offline", turn: "idle" };
+    },
+  };
+  const scheduler = new Scheduler(
+    x.db,
+    { codex: adapter, claude: adapter },
+    x.service.config,
+    { now: () => 100, random: () => 0.5 },
+  );
+  await scheduler.runOnce();
+  await scheduler.runOnce();
+  await scheduler.runOnce();
+  expect(deliveries).toBe(0);
+  expect(healthChecks).toBe(3);
+  online = true;
+  await scheduler.runOnce();
+  expect(deliveries).toBe(1);
+});
+
+test("an older claimed normal blocks later normals after scheduler restart", async () => {
+  const x = setup("started_new_turn");
+  const first = x.service.send({
+    operationId: "claimed-first",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "first",
+    metadata: {},
+  });
+  x.service.claim({
+    operationId: "claimed",
+    actor: { bindingId: "bb", generation: 1 },
+    deliveryId: first.deliveryId,
+  });
+  x.service.send({
+    operationId: "claimed-second",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "second",
+    metadata: {},
+  });
+  const adapter = new FakeAdapter("started_new_turn");
+  await new Scheduler(
+    x.db,
+    { codex: adapter, claude: adapter },
+    x.service.config,
+    { now: () => 100, random: () => 0.5 },
+  ).runOnce();
+  expect(adapter.requests).toHaveLength(0);
+});
+
+test("an older backed-off correction blocks later corrections but not normal FIFO", async () => {
+  const x = setup("adapter_failed");
+  x.service.send({
+    operationId: "correction-first",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "correction",
+    body: "first",
+    metadata: {},
+  });
+  await x.scheduler.runOnce();
+  x.service.send({
+    operationId: "correction-second",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "correction",
+    body: "second",
+    metadata: {},
+  });
+  x.service.send({
+    operationId: "normal-independent",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "normal",
+    metadata: {},
+  });
+  await x.scheduler.runOnce();
+  expect(x.adapter.requests).toHaveLength(2);
+  expect(x.adapter.requests[1]?.kind).toBe("normal");
+});
+
+test("stored_pending suppresses repeated delivery until an availability signal", async () => {
+  const x = setup("stored_pending");
+  x.service.send({
+    operationId: "stored",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "wait",
+    metadata: {},
+  });
+  await x.scheduler.runOnce();
+  await x.scheduler.runOnce();
+  expect(x.adapter.requests).toHaveLength(1);
+  x.scheduler.setLaneAvailable("p/b", true);
+  await x.scheduler.runOnce();
+  expect(x.adapter.requests).toHaveLength(2);
 });

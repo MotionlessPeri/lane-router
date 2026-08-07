@@ -12,12 +12,20 @@ import {
 import WebSocket from "ws";
 import { Scheduler } from "../../src/broker/scheduler.js";
 import type { DeliveryAdapter } from "../../src/core/adapter-contract.js";
+import { acquireRuntimeLock } from "../../src/broker/runtime.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const servers: RunningBrokerServer[] = [];
 const databases: RouterDatabase[] = [];
+const dataDirs: string[] = [];
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => s.close()));
   databases.splice(0).forEach((d) => d.close());
+  await Promise.all(
+    dataDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+  );
 });
 async function setup() {
   const db = openDatabase(":memory:");
@@ -287,4 +295,111 @@ test("fake adapter drives a full lifecycle through loopback across a broker rest
       outcome: { kind: "recorded", summary: "done" },
     }),
   ).toMatchObject({ status: "acknowledged" });
+});
+
+test("real data directory reopens DB and lock across adapter error paths", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "lane-router-reopen-"));
+  dataDirs.push(dataDir);
+  const databasePath = join(dataDir, "router.sqlite");
+  let lock = await acquireRuntimeLock(dataDir);
+  let database = openDatabase(databasePath);
+  let now = 100;
+  let service = new BrokerService(database, {
+    now: () => now,
+    randomId: (prefix) => `${prefix}-${now}`,
+  });
+  let server = await startBrokerHttpServer({
+    service,
+    token: "secret",
+    sessionSecret: "stable-session-secret",
+    port: 0,
+  });
+  let admin = new BrokerClient(server.url, "secret");
+  await admin.call("syncProject", {
+    operationId: "disk-sync",
+    workspaceId: "w",
+    rootPath: "C:/r",
+    manifest: {
+      projectId: "p",
+      projectKey: "p",
+      displayName: "P",
+      manifestHash: "h",
+      manifestVersion: 1,
+      lanes: [
+        { name: "a", roleFile: "a", communicationEntry: true },
+        { name: "b", roleFile: "b", communicationEntry: false },
+      ],
+    },
+  });
+  const sender = await admin.call("bind", {
+    operationId: "disk-a",
+    bindingId: "ba",
+    laneAddress: "p/a",
+    workspaceId: "w",
+    adapter: "codex",
+    conversationId: "a",
+  });
+  await admin.call("bind", {
+    operationId: "disk-b",
+    bindingId: "bb",
+    laneAddress: "p/b",
+    workspaceId: "w",
+    adapter: "codex",
+    conversationId: "b",
+  });
+  await admin
+    .withCredential(sender.bindingCredential)
+    .call("send", {
+      operationId: "disk-send",
+      target: "p/b",
+      kind: "normal",
+      body: "persist",
+      metadata: {},
+    });
+  const failedAdapter: DeliveryAdapter = {
+    deliver: async () => "adapter_failed",
+  };
+  await new Scheduler(
+    database,
+    { codex: failedAdapter, claude: failedAdapter },
+    service.config,
+    { now: () => now, random: () => 0.5 },
+  ).runOnce();
+  const nextAttempt = (
+    database.prepare("SELECT next_attempt_at FROM delivery").get() as {
+      next_attempt_at: number;
+    }
+  ).next_attempt_at;
+  await server.close();
+  database.close();
+  lock.release();
+
+  lock = await acquireRuntimeLock(dataDir);
+  database = openDatabase(databasePath);
+  now = nextAttempt;
+  service = new BrokerService(database, {
+    now: () => now,
+    randomId: (prefix) => `${prefix}-${now}`,
+  });
+  server = await startBrokerHttpServer({
+    service,
+    token: "secret",
+    sessionSecret: "stable-session-secret",
+    port: 0,
+  });
+  admin = new BrokerClient(server.url, "secret");
+  const missingAdapter: DeliveryAdapter = {
+    deliver: async () => "binding_not_found",
+  };
+  await new Scheduler(
+    database,
+    { codex: missingAdapter, claude: missingAdapter },
+    service.config,
+    { now: () => now, random: () => 0.5 },
+  ).runOnce();
+  expect(await admin.status()).toMatchObject({ pending: { count: 1 } });
+  expect(JSON.stringify(await admin.events())).toContain("binding_not_found");
+  await server.close();
+  database.close();
+  lock.release();
 });
