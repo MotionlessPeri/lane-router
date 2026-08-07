@@ -372,7 +372,7 @@ export function migrateDatabase(database: Database.Database): void {
 }
 
 function assertV3Integrity(database: Database.Database): void {
-  assertSafeIntegerIntegrity(database);
+  assertV2Integrity(database);
   const orphaned = database.prepare(`
     SELECT p.id FROM project p
     WHERE EXISTS (SELECT 1 FROM lane l WHERE l.project_id=p.id)

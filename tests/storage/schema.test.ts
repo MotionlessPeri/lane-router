@@ -253,6 +253,85 @@ describe("SQLite schema", () => {
     }
   });
 
+  it.each(["binding", "claim", "ack"] as const)(
+    "rejects repairable dirty-v3 %s cross-row corruption before v4",
+    (corruption) => {
+      const path = temporaryDatabasePath();
+      const dirty = openDatabase(path);
+      seedStorage(dirty);
+      const repositories = new StorageRepositories(dirty);
+      if (corruption === "binding") {
+        dirty.exec(`
+          DROP TRIGGER binding_workspace_must_match_lane_project;
+          DROP TRIGGER binding_identity_is_immutable;
+          DROP TRIGGER binding_update_must_be_lifecycle_transition;
+          INSERT INTO project VALUES ('other-project', 'other', 'Other', 'other-hash', 1, 1);
+          INSERT INTO workspace VALUES ('other-workspace', 'other-project', 'C:/other', 1, 1);
+          UPDATE binding SET workspace_id='other-workspace' WHERE id='binding-1';
+        `);
+      } else {
+        repositories.createMessageWithInitialDelivery({
+          messageId: `dirty-${corruption}-message`,
+          deliveryId: `dirty-${corruption}-delivery`,
+          senderBindingId: "binding-1",
+          targetLaneId: "lane-1",
+          kind: "normal",
+          body: "body",
+          metadata: {},
+          replyTo: null,
+          createdAt: 10,
+        });
+        repositories.createClaim({
+          claimId: `dirty-${corruption}-claim`,
+          deliveryId: `dirty-${corruption}-delivery`,
+          generation: 1,
+          createdAt: 20,
+          leaseDeadlineAt: 100,
+        });
+        if (corruption === "claim")
+          dirty
+            .prepare("UPDATE delivery SET deadline_at=101 WHERE id=?")
+            .run("dirty-claim-delivery");
+        else {
+          repositories.acknowledge({
+            deliveryId: "dirty-ack-delivery",
+            claimId: "dirty-ack-claim",
+            generation: 1,
+            outcome: { kind: "recorded", summary: "done" },
+            acknowledgedAt: 30,
+          });
+          dirty
+            .prepare("UPDATE ack SET outcome_kind='rejected' WHERE delivery_id=?")
+            .run("dirty-ack-delivery");
+        }
+      }
+      dirty.exec(`
+        DROP TABLE project_declaration;
+        DROP TABLE workspace_manifest;
+        PRAGMA user_version = 3;
+      `);
+      dirty.close();
+
+      expect(() => {
+        const unexpectedlyOpened = openDatabase(path);
+        unexpectedlyOpened.close();
+      }).toThrow(/integrity|ownership|claim|ack/i);
+      const repair = new Database(path);
+      try {
+        expect(repair.pragma("user_version", { simple: true })).toBe(3);
+        expect(
+          repair
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type='table' AND name='project_declaration'",
+            )
+            .get(),
+        ).toBeUndefined();
+      } finally {
+        repair.close();
+      }
+    },
+  );
+
   it.each(["unbound", "rebuilt"] as const)(
     "upgrades a v2 database with an internally valid historical claim after binding is %s",
     (bindingState) => {
