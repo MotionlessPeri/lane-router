@@ -215,7 +215,7 @@ async function handle(
               parsed.messageId as string,
             )
           : await method.call(options.service, input as never);
-    data = serviceRpcResultSchemas[rpcMethod].parse(data);
+    data = parseInternalResult(serviceRpcResultSchemas[rpcMethod], data);
     if (["bind", "rebuild", "rotate"].includes(rpcMethod)) {
       const binding = (data as { binding: { id: string; generation: number } })
         .binding;
@@ -227,7 +227,7 @@ async function handle(
         ),
       };
     }
-    data = rpcResultSchemas[rpcMethod].parse(data);
+    data = parseInternalResult(rpcResultSchemas[rpcMethod], data);
     reply(response, 200, { ok: true, data });
   } catch (error) {
     const mapped = mapError(error);
@@ -249,6 +249,18 @@ async function handle(
     );
   } finally {
     clearTimeout(deadline);
+  }
+}
+function parseInternalResult(
+  schema: { parse(value: unknown): unknown },
+  value: unknown,
+): unknown {
+  try {
+    return schema.parse(value);
+  } catch (error) {
+    if (error instanceof ZodError)
+      throw typed("INTERNAL_ERROR", "Internal broker error");
+    throw error;
   }
 }
 function requireJsonContentType(request: IncomingMessage): void {

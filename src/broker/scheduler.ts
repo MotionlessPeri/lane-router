@@ -33,6 +33,21 @@ interface EligibleRow {
   deadline_kind: "claim" | "queue" | "lease" | null;
 }
 
+export const SCHEDULER_UNRESOLVED_SQL = `
+  SELECT d.id,d.message_id,d.target_lane_id,d.sequence,m.kind,b.generation,
+    b.adapter,d.state,d.next_attempt_at,d.deadline_kind
+  FROM delivery d
+  JOIN message m ON m.id=d.message_id
+  JOIN binding b ON b.lane_id=d.target_lane_id AND b.is_current=1
+  WHERE d.state NOT IN ('acknowledged','parked')
+    AND b.state='bound'
+    AND NOT EXISTS (
+      SELECT 1 FROM dispatch_fence f
+      WHERE f.delivery_id=d.id AND f.resolved_at IS NULL
+    )
+  ORDER BY d.target_lane_id,d.sequence
+`;
+
 export class Scheduler {
   private readonly repositories: StorageRepositories;
   private readonly busy = new Set<string>();
@@ -94,9 +109,7 @@ export class Scheduler {
       retryDelay: (attempt) => retryDelay(this.config, attempt, this.random),
     });
     const rows = this.database
-      .prepare(
-        `SELECT d.id,d.message_id,d.target_lane_id,d.sequence,m.kind,b.generation,b.adapter,d.state,d.next_attempt_at,d.deadline_kind FROM delivery d JOIN message m ON m.id=d.message_id JOIN binding b ON b.lane_id=d.target_lane_id AND b.is_current=1 WHERE d.state NOT IN ('acknowledged','parked') AND b.state='bound' AND NOT EXISTS (SELECT 1 FROM dispatch_fence f WHERE f.delivery_id=d.id AND f.resolved_at IS NULL) ORDER BY d.target_lane_id,d.sequence`,
-      )
+      .prepare(SCHEDULER_UNRESOLVED_SQL)
       .all() as EligibleRow[];
     const groups = new Map<string, EligibleRow[]>();
     for (const row of rows) {

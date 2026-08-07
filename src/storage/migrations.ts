@@ -374,7 +374,35 @@ CREATE INDEX IF NOT EXISTS dispatch_fence_active_lane_idx
   ON dispatch_fence(lane_id) WHERE resolved_at IS NULL;
 `;
 
-export const LATEST_MIGRATION_VERSION = 6;
+export const MIGRATION_V7_SQL = `
+CREATE TRIGGER IF NOT EXISTS dispatch_fence_lane_must_match_delivery
+BEFORE INSERT ON dispatch_fence
+WHEN (SELECT target_lane_id FROM delivery WHERE id=NEW.delivery_id) IS NOT NEW.lane_id
+BEGIN
+  SELECT RAISE(ABORT, 'dispatch fence lane must match delivery');
+END;
+
+CREATE TRIGGER IF NOT EXISTS delivery_lane_change_must_preserve_dispatch_fence
+BEFORE UPDATE OF target_lane_id ON delivery
+WHEN EXISTS (
+  SELECT 1 FROM dispatch_fence f
+  WHERE f.delivery_id=OLD.id AND f.lane_id IS NOT NEW.target_lane_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'delivery lane change would invalidate dispatch fence');
+END;
+
+DROP INDEX IF EXISTS delivery_scheduler_order_idx;
+DROP INDEX IF EXISTS delivery_recovery_deadline_idx;
+CREATE INDEX IF NOT EXISTS delivery_scheduler_unresolved_idx
+  ON delivery(target_lane_id,sequence)
+  WHERE state NOT IN ('acknowledged','parked');
+CREATE INDEX IF NOT EXISTS delivery_recovery_notified_idx
+  ON delivery(deadline_at,target_lane_id,sequence)
+  WHERE state='notified';
+`;
+
+export const LATEST_MIGRATION_VERSION = 7;
 
 export class DatabaseIntegrityError extends Error {
   constructor(message: string) {
@@ -441,7 +469,29 @@ export function migrateDatabase(database: Database.Database): void {
         database.pragma("user_version = 6");
       })();
     }
+    const versionAfterV6 = database.pragma("user_version", { simple: true }) as number;
+    if (versionAfterV6 === 6) {
+      assertV6Integrity(database);
+      database.transaction(() => {
+        database.exec(MIGRATION_V7_SQL);
+        database.pragma("user_version = 7");
+      })();
+    }
   })();
+}
+
+function assertV6Integrity(database: Database.Database): void {
+  assertV4Integrity(database);
+  const invalid = database.prepare(`
+    SELECT f.delivery_id FROM dispatch_fence f
+    LEFT JOIN delivery d ON d.id=f.delivery_id
+    WHERE d.id IS NULL OR d.target_lane_id IS NOT f.lane_id
+    LIMIT 1
+  `).get() as { delivery_id: string } | undefined;
+  if (invalid)
+    throw new DatabaseIntegrityError(
+      `Dispatch fence ${invalid.delivery_id} lane crosses delivery ownership`,
+    );
 }
 
 function assertV4Integrity(database: Database.Database): void {

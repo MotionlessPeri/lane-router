@@ -150,6 +150,40 @@ test("unexpected service errors return a stable non-leaking 500", async () => {
   expect(await response.json()).toEqual({ ok: false, error: { code: "INTERNAL_ERROR", message: "Internal broker error" } });
 });
 
+test("malformed internal RPC results are generic 500s while request Zod errors remain 400s", async () => {
+  const x = await setup();
+  Object.defineProperty(x.service, "syncProject", {
+    value: () => ({ projectId: "INTERNAL_RESULT_SECRET" }),
+  });
+  const authorization = await x.client.actorAuthorization();
+  const internal = await fetch(`${x.server.url}/v1/rpc`, {
+    method: "POST",
+    headers: { authorization, "content-type": "application/json" },
+    body: JSON.stringify({
+      method: "syncProject",
+      params: {
+        operationId: "malformed-result", workspaceId: "w", rootPath: "C:/r",
+        manifest: { projectId: "p", projectKey: "p", displayName: "P", manifestHash: "h", manifestVersion: 1, lanes: [] },
+      },
+    }),
+  });
+  expect(internal.status).toBe(500);
+  expect(await internal.json()).toEqual({
+    ok: false,
+    error: { code: "INTERNAL_ERROR", message: "Internal broker error" },
+  });
+  const invalid = await fetch(`${x.server.url}/v1/rpc`, {
+    method: "POST",
+    headers: { authorization, "content-type": "application/json" },
+    body: JSON.stringify({ method: "syncProject", params: { operationId: "bad-request" } }),
+  });
+  expect(invalid.status).toBe(400);
+  expect(await invalid.json()).toMatchObject({
+    ok: false,
+    error: { code: "INVALID_REQUEST", details: expect.any(Array) },
+  });
+});
+
 test("heartbeat persistence failure fences and closes the server before stale reclaim", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "lane-router-fenced-server-"));
   dataDirs.push(dataDir);

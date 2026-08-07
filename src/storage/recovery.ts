@@ -28,22 +28,38 @@ interface ExpiredRow {
   readonly lease_deadline_at: number | null;
 }
 
+const RECOVERY_COLUMNS = `
+  d.id, d.target_lane_id, d.sequence, m.kind, d.state,
+  d.failure_count, d.deadline_kind, d.deadline_at, d.adapter_result
+`;
+export const RECOVERY_NOTIFIED_SQL = `
+  SELECT ${RECOVERY_COLUMNS}, NULL AS claim_id, NULL AS generation,
+    NULL AS lease_deadline_at
+  FROM delivery d
+  JOIN message m ON m.id=d.message_id
+  WHERE d.state='notified' AND d.deadline_at<=?
+`;
+export const RECOVERY_CLAIMED_SQL = `
+  SELECT ${RECOVERY_COLUMNS}, c.id AS claim_id, c.generation,
+    c.lease_deadline_at
+  FROM claim c
+  JOIN delivery d ON d.id=c.delivery_id
+  JOIN message m ON m.id=d.message_id
+  WHERE c.closed_at IS NULL AND c.lease_deadline_at<=? AND d.state='claimed'
+`;
+
 export function recoverDatabase(
   database: RouterDatabase,
   config: RecoveryConfig,
 ): RecoveryResult {
   return inTransaction(database, () => {
-    const rows = database.prepare(`
-      SELECT d.id, d.target_lane_id, d.sequence, m.kind, d.state,
-        d.failure_count, d.deadline_kind, d.deadline_at, d.adapter_result,
-        c.id AS claim_id, c.generation, c.lease_deadline_at
-      FROM delivery d
-      JOIN message m ON m.id = d.message_id
-      LEFT JOIN claim c ON c.delivery_id = d.id AND c.closed_at IS NULL
-      WHERE (d.state = 'notified' AND d.deadline_at <= ?)
-        OR (d.state = 'claimed' AND c.lease_deadline_at <= ?)
-      ORDER BY d.target_lane_id, d.sequence
-    `).all(config.now, config.now) as ExpiredRow[];
+    const rows = [
+      ...(database.prepare(RECOVERY_NOTIFIED_SQL).all(config.now) as ExpiredRow[]),
+      ...(database.prepare(RECOVERY_CLAIMED_SQL).all(config.now) as ExpiredRow[]),
+    ].sort((left, right) =>
+      left.target_lane_id.localeCompare(right.target_lane_id) ||
+      left.sequence - right.sequence,
+    );
 
     let parked = 0;
     for (const row of rows) {

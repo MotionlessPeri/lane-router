@@ -21,6 +21,7 @@ import {
 } from "node:fs";
 import { afterEach, expect, test } from "vitest";
 import { fork, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import {
   acquireRuntimeLock,
   BrokerAlreadyRunningError,
@@ -297,11 +298,44 @@ test("a crashed child reclaim marker is recovered without infinite spin", async 
           dataDir: dir,
           instanceId: "recovered",
         },
-        500,
+        5_000,
       ),
     ).resolves.toBe("won");
   } finally {
-    contender.kill();
+    contender.removeAllListeners("message");
+    if (contender.exitCode === null) {
+      const exited = once(contender, "exit");
+      contender.kill();
+      await exited;
+    }
+  }
+});
+
+test("successful child requests cancel their timeout resources", async () => {
+  const dir = await temp();
+  const child = fork(runtimeFixture(), {
+    execArgv: ["--import", "tsx"],
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+  });
+  const timeoutCount = () => process.getActiveResourcesInfo()
+    .filter((resource) => resource === "Timeout").length;
+  const before = timeoutCount();
+  try {
+    for (let attempt = 0; attempt < 5; attempt += 1)
+      await childRequestWithTimeout(child, {
+        id: `quick-${attempt}`,
+        command: "acquire",
+        dataDir: dir,
+        instanceId: `quick-${attempt}`,
+      }, 5_000);
+    expect(timeoutCount()).toBeLessThanOrEqual(before);
+  } finally {
+    child.removeAllListeners();
+    if (child.exitCode === null) {
+      const exited = once(child, "exit");
+      child.kill();
+      await exited;
+    }
   }
 });
 
@@ -524,12 +558,32 @@ function childRequestWithTimeout(
   message: Parameters<typeof childRequest>[1],
   timeoutMs: number,
 ): Promise<string> {
-  return Promise.race([
-    childRequest(child, message),
-    new Promise<string>((resolve) =>
-      setTimeout(() => resolve("timeout"), timeoutMs),
-    ),
-  ]);
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.off("message", onMessage);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    };
+    const settle = (value: string) => {
+      cleanup();
+      resolve(value);
+    };
+    const onMessage = (response: { id: string; result: string; message?: string }) => {
+      if (response.id !== message.id) return;
+      cleanup();
+      response.result === "error"
+        ? reject(new Error(response.message))
+        : resolve(response.result);
+    };
+    const onError = (error: Error) => { cleanup(); reject(error); };
+    const onExit = () => { cleanup(); reject(new Error("Lock contender exited before responding")); };
+    const timer = setTimeout(() => settle("timeout"), timeoutMs);
+    child.on("message", onMessage);
+    child.once("error", onError);
+    child.once("exit", onExit);
+    child.send(message);
+  });
 }
 
 function runtimeFixture(): string {

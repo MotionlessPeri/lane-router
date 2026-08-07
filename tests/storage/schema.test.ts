@@ -14,6 +14,11 @@ import {
   MIGRATION_V4_SQL,
 } from "../../src/storage/migrations.js";
 import { StorageRepositories } from "../../src/storage/repositories.js";
+import { SCHEDULER_UNRESOLVED_SQL } from "../../src/broker/scheduler.js";
+import {
+  RECOVERY_CLAIMED_SQL,
+  RECOVERY_NOTIFIED_SQL,
+} from "../../src/storage/recovery.js";
 import { seedStorage } from "../fixtures/storage/seed.js";
 
 const temporaryDirectories: string[] = [];
@@ -609,25 +614,10 @@ describe("SQLite schema", () => {
     }
   });
 
-  it("uses v5 indexes for scheduler, recovery, and foreign-key hot paths", () => {
+  it("uses supporting indexes for foreign-key hot paths without redundant indexes", () => {
     const db = openDatabase(temporaryDatabasePath());
     try {
       const cases = [
-        [
-          "delivery_scheduler_order_idx",
-          "SELECT id FROM delivery WHERE target_lane_id=? AND state=? ORDER BY sequence",
-          ["lane-1", "pending"],
-        ],
-        [
-          "delivery_recovery_deadline_idx",
-          "SELECT id FROM delivery WHERE state=? AND deadline_at<=?",
-          ["notified", 100],
-        ],
-        [
-          "claim_recovery_deadline_idx",
-          "SELECT id FROM claim WHERE closed_at IS NULL AND lease_deadline_at<=?",
-          [100],
-        ],
         ["binding_workspace_idx", "SELECT id FROM binding WHERE workspace_id=?", ["workspace-1"]],
         ["message_target_lane_idx", "SELECT id FROM message WHERE target_lane_id=?", ["lane-1"]],
         ["message_sender_binding_idx", "SELECT id FROM message WHERE sender_binding_id=?", ["binding-1"]],
@@ -665,7 +655,9 @@ describe("SQLite schema", () => {
 
     const upgraded = openDatabase(path);
     try {
-      expect(upgraded.pragma("user_version", { simple: true })).toBe(6);
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(
+        LATEST_MIGRATION_VERSION,
+      );
       const columns = (upgraded.pragma("table_info(dispatch_fence)") as Array<{ name: string }>).map((column) => column.name);
       expect(columns).toEqual([
         "delivery_id", "lane_id", "adapter_outcome", "fenced_at",
@@ -675,6 +667,101 @@ describe("SQLite schema", () => {
       expect(columns).not.toContain("error_text");
     } finally {
       upgraded.close();
+    }
+  });
+
+  it("uses v7 indexes for the literal production scheduler and recovery queries", () => {
+    const db = openDatabase(temporaryDatabasePath());
+    try {
+      const schedulerPlan = db.prepare(`EXPLAIN QUERY PLAN ${SCHEDULER_UNRESOLVED_SQL}`).all()
+        .map((row) => (row as { detail: string }).detail).join("\n");
+      expect(schedulerPlan).toContain("delivery_scheduler_unresolved_idx");
+      expect(schedulerPlan).not.toContain("sqlite_autoindex_delivery_3");
+      for (const [sql, parameters, index] of [
+        [RECOVERY_NOTIFIED_SQL, [100], "delivery_recovery_notified_idx"],
+        [RECOVERY_CLAIMED_SQL, [100], "claim_recovery_deadline_idx"],
+      ] as const) {
+        const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...parameters)
+          .map((row) => (row as { detail: string }).detail).join("\n");
+        expect(plan).toContain(index);
+        expect(plan).not.toContain("USE TEMP B-TREE");
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  it("upgrades a clean v6 database to reciprocal v7 constraints atomically", () => {
+    const path = temporaryDatabasePath();
+    const v6 = openDatabase(path);
+    v6.exec(`
+      DROP TRIGGER dispatch_fence_lane_must_match_delivery;
+      DROP TRIGGER delivery_lane_change_must_preserve_dispatch_fence;
+      DROP INDEX delivery_scheduler_unresolved_idx;
+      DROP INDEX delivery_recovery_notified_idx;
+      PRAGMA user_version=6;
+    `);
+    v6.close();
+    const upgraded = openDatabase(path);
+    try {
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(7);
+      expect(upgraded.prepare(`SELECT name FROM sqlite_master WHERE name IN (
+        'dispatch_fence_lane_must_match_delivery',
+        'delivery_lane_change_must_preserve_dispatch_fence',
+        'delivery_scheduler_unresolved_idx',
+        'delivery_recovery_notified_idx'
+      ) ORDER BY name`).all()).toHaveLength(4);
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("rejects dirty v6 dispatch fence ownership atomically", () => {
+    const path = temporaryDatabasePath();
+    const dirty = openDatabase(path);
+    seedStorage(dirty);
+    dirty.exec(`
+      DROP TRIGGER IF EXISTS dispatch_fence_lane_must_match_delivery;
+      DROP TRIGGER IF EXISTS delivery_lane_change_must_preserve_dispatch_fence;
+      DROP INDEX IF EXISTS delivery_scheduler_unresolved_idx;
+      DROP INDEX IF EXISTS delivery_recovery_notified_idx;
+      INSERT INTO lane VALUES ('lane-other','project-1','other','other.md',0);
+      INSERT INTO message VALUES ('fenced-message','binding-1','lane-1','normal','body','{}',NULL,10);
+      INSERT INTO delivery VALUES ('fenced-delivery','fenced-message','lane-1',1,'pending',0,NULL,NULL,NULL,NULL,NULL,NULL,10);
+      INSERT INTO dispatch_fence(delivery_id,lane_id,adapter_outcome,fenced_at,reason_code)
+        VALUES('fenced-delivery','lane-other','queued_next_turn',10,'post_adapter_persistence_failed');
+      PRAGMA user_version=6;
+    `);
+    dirty.close();
+    expect(() => {
+      const unexpectedlyOpened = openDatabase(path);
+      unexpectedlyOpened.close();
+    }).toThrow(/dispatch fence.*lane|ownership|integrity/i);
+    const repair = new Database(path);
+    try {
+      expect(repair.pragma("user_version", { simple: true })).toBe(6);
+      expect(repair.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='delivery_scheduler_unresolved_idx'").get()).toBeUndefined();
+    } finally {
+      repair.close();
+    }
+  });
+
+  it("fresh v7 enforces reciprocal dispatch fence lane ownership", () => {
+    const db = openDatabase(temporaryDatabasePath());
+    try {
+      seedStorage(db);
+      db.exec(`
+        INSERT INTO lane VALUES ('lane-other','project-1','other','other.md',0);
+        INSERT INTO message VALUES ('fenced-message','binding-1','lane-1','normal','body','{}',NULL,10);
+        INSERT INTO delivery VALUES ('fenced-delivery','fenced-message','lane-1',1,'pending',0,NULL,NULL,NULL,NULL,NULL,NULL,10);
+      `);
+      expect(() => db.prepare(`INSERT INTO dispatch_fence(delivery_id,lane_id,adapter_outcome,fenced_at,reason_code)
+        VALUES('fenced-delivery','lane-other','queued_next_turn',10,'post_adapter_persistence_failed')`).run()).toThrow(/lane|delivery/i);
+      db.prepare(`INSERT INTO dispatch_fence(delivery_id,lane_id,adapter_outcome,fenced_at,reason_code)
+        VALUES('fenced-delivery','lane-1','queued_next_turn',10,'post_adapter_persistence_failed')`).run();
+      expect(() => db.prepare("UPDATE delivery SET target_lane_id='lane-other' WHERE id='fenced-delivery'").run()).toThrow(/lane|fence/i);
+    } finally {
+      db.close();
     }
   });
 
