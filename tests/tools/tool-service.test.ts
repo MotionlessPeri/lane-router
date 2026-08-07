@@ -113,7 +113,7 @@ test("tool identity comes only from immutable binding context", async () => {
       },
       a,
     ),
-  ).not.toThrow();
+  ).toThrow(/unrecognized/i);
   expect(() =>
     x.tools.call("lane_whoami", {}, { bindingId: "ba", generation: 2 }),
   ).toThrow(/stale/i);
@@ -141,4 +141,21 @@ test("status and park tools operate on the current target binding", async () => 
       b,
     ),
   ).toMatchObject({ status: "parked" });
+});
+
+test.each([
+  ["lane_send", { operation_id: "bad-kind", target: "p/b", kind: "typo", body: "x", metadata: {} }],
+  ["lane_send", { operation_id: "extra", target: "p/b", kind: "normal", body: "x", metadata: {}, extra: true }],
+  ["lane_message_ack", { operation_id: "bad-outcome", delivery_id: "d", claim_id: "c", outcome: { kind: "recorded" } }],
+] as const)("rejects invalid strict %s arguments before durable effects", (name, args) => {
+  const x = setup();
+  const before = x.broker.database.prepare("SELECT COUNT(*) AS count FROM operation").get();
+  expect(() => x.tools.call(name, args, { bindingId: "ba", generation: 1 })).toThrow();
+  expect(x.broker.database.prepare("SELECT COUNT(*) AS count FROM operation").get()).toEqual(before);
+});
+
+test("validates tool results before returning them", () => {
+  const x = setup();
+  Object.defineProperty(x.broker, "status", { value: () => ({ pending: { count: -1 } }) });
+  expect(() => x.tools.call("lane_status", {}, { bindingId: "ba", generation: 1 })).toThrow();
 });

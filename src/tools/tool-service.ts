@@ -1,21 +1,6 @@
 import type { BrokerService, BindingActor } from "../broker/broker-service.js";
-import type { AckOutcome } from "../core/model.js";
 import type { LaneToolName, ToolBindingContext } from "./tool-contract.js";
-import type {
-  BrokerStatus,
-  RpcResultMap,
-} from "../server/rpc-schema.js";
-
-export interface ToolResultMap {
-  lane_whoami: RpcResultMap["whoami"];
-  lane_status: BrokerStatus;
-  lane_send: RpcResultMap["send"];
-  lane_inbox_list: RpcResultMap["inbox"];
-  lane_message_get: RpcResultMap["message"];
-  lane_message_claim: RpcResultMap["claim"];
-  lane_message_ack: RpcResultMap["ack"];
-  lane_message_park: RpcResultMap["park"];
-}
+import { toolArgsSchemas, toolResultSchemas, type ToolResultMap } from "./tool-schema.js";
 
 export class ToolService {
   constructor(private readonly broker: BrokerService) {}
@@ -34,67 +19,64 @@ export class ToolService {
       generation: context.generation,
     };
     switch (name) {
-      case "lane_whoami":
-        return this.broker.whoami(actor);
-      case "lane_status":
-        this.broker.whoami(actor);
-        return this.broker.status();
-      case "lane_send": {
-        const replyTo = optionalText(args, "reply_to");
-        return this.broker.send({
-          operationId: text(args, "operation_id"),
-          actor,
-          target: text(args, "target"),
-          kind: args.kind === "correction" ? "correction" : "normal",
-          body: text(args, "body"),
-          metadata: args.metadata ?? {},
-          ...(replyTo === undefined ? {} : { replyTo }),
-        });
+      case "lane_whoami": {
+        toolArgsSchemas.lane_whoami.parse(args);
+        return toolResultSchemas.lane_whoami.parse(this.broker.whoami(actor));
       }
-      case "lane_inbox_list":
-        return this.broker.inbox(actor);
-      case "lane_message_get":
-        return this.broker.message(actor, text(args, "message_id"));
-      case "lane_message_claim":
-        return this.broker.claim({
-          operationId: text(args, "operation_id"),
+      case "lane_status":
+        toolArgsSchemas.lane_status.parse(args);
+        this.broker.whoami(actor);
+        return toolResultSchemas.lane_status.parse(this.broker.status());
+      case "lane_send": {
+        const parsed = toolArgsSchemas.lane_send.parse(args);
+        return toolResultSchemas.lane_send.parse(this.broker.send({
+          operationId: parsed.operation_id,
           actor,
-          deliveryId: text(args, "delivery_id"),
-          ...(args.claim_id === undefined
+          target: parsed.target,
+          kind: parsed.kind,
+          body: parsed.body,
+          metadata: parsed.metadata,
+          ...(parsed.reply_to === undefined ? {} : { replyTo: parsed.reply_to }),
+        }));
+      }
+      case "lane_inbox_list": {
+        toolArgsSchemas.lane_inbox_list.parse(args);
+        return toolResultSchemas.lane_inbox_list.parse(this.broker.inbox(actor));
+      }
+      case "lane_message_get": {
+        const parsed = toolArgsSchemas.lane_message_get.parse(args);
+        return toolResultSchemas.lane_message_get.parse(this.broker.message(actor, parsed.message_id));
+      }
+      case "lane_message_claim": {
+        const parsed = toolArgsSchemas.lane_message_claim.parse(args);
+        return toolResultSchemas.lane_message_claim.parse(this.broker.claim({
+          operationId: parsed.operation_id,
+          actor,
+          deliveryId: parsed.delivery_id,
+          ...(parsed.claim_id === undefined
             ? {}
-            : { claimId: text(args, "claim_id") }),
-        });
-      case "lane_message_ack":
-        return this.broker.ack({
-          operationId: text(args, "operation_id"),
+            : { claimId: parsed.claim_id }),
+        }));
+      }
+      case "lane_message_ack": {
+        const parsed = toolArgsSchemas.lane_message_ack.parse(args);
+        return toolResultSchemas.lane_message_ack.parse(this.broker.ack({
+          operationId: parsed.operation_id,
           actor,
-          deliveryId: text(args, "delivery_id"),
-          claimId: text(args, "claim_id"),
-          outcome: args.outcome as AckOutcome,
-        });
-      case "lane_message_park":
-        return this.broker.park({
-          operationId: text(args, "operation_id"),
+          deliveryId: parsed.delivery_id,
+          claimId: parsed.claim_id,
+          outcome: parsed.outcome,
+        }));
+      }
+      case "lane_message_park": {
+        const parsed = toolArgsSchemas.lane_message_park.parse(args);
+        return toolResultSchemas.lane_message_park.parse(this.broker.park({
+          operationId: parsed.operation_id,
           actor,
-          deliveryId: text(args, "delivery_id"),
-          reason: text(args, "reason"),
-        });
+          deliveryId: parsed.delivery_id,
+          reason: parsed.reason,
+        }));
+      }
     }
   }
-}
-function text(args: Record<string, unknown>, key: string): string {
-  const value = args[key];
-  if (typeof value !== "string" || !value.trim())
-    throw new TypeError(`${key} must be a non-empty string`);
-  return value;
-}
-function optionalText(
-  args: Record<string, unknown>,
-  key: string,
-): string | null | undefined {
-  const value = args[key];
-  if (value === undefined || value === null) return value;
-  if (typeof value !== "string")
-    throw new TypeError(`${key} must be a string or null`);
-  return value;
 }

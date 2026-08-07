@@ -129,6 +129,26 @@ test("oversized JSON receives a typed 413 response", async () => {
     error: { code: "PAYLOAD_TOO_LARGE" },
   });
 });
+test("RPC rejects non-JSON media types before dispatch", async () => {
+  const x = await setup();
+  const response = await fetch(`${x.server.url}/v1/rpc`, {
+    method: "POST",
+    headers: { authorization: await x.client.actorAuthorization(), "content-type": "text/plain" },
+    body: JSON.stringify({ method: "status", params: {} }),
+  });
+  expect(response.status).toBe(415);
+  expect(await response.json()).toMatchObject({ error: { code: "UNSUPPORTED_MEDIA_TYPE" } });
+});
+
+test("unexpected service errors return a stable non-leaking 500", async () => {
+  const x = await setup();
+  Object.defineProperty(x.service, "status", { value: () => { throw new Error("SQL secret at C:/private/router.sqlite"); } });
+  const response = await fetch(`${x.server.url}/v1/status`, {
+    headers: { authorization: await x.client.actorAuthorization() },
+  });
+  expect(response.status).toBe(500);
+  expect(await response.json()).toEqual({ ok: false, error: { code: "INTERNAL_ERROR", message: "Internal broker error" } });
+});
 test("WebSocket authenticates before upgrade and streams body-free events", async () => {
   const x = await setup();
   await x.client.call("syncProject", {
@@ -214,6 +234,48 @@ test("WebSocket streams events created after the upgrade", async () => {
   });
   expect(await next).toContain("binding_created");
   socket.close();
+});
+test("WebSocket rejects excess clients and non-loopback browser origins", async () => {
+  const db = openDatabase(":memory:");
+  databases.push(db);
+  const server = await startBrokerHttpServer({
+    service: new BrokerService(db), token: "secret", port: 0,
+    webSocket: { maxClients: 1 },
+  });
+  servers.push(server);
+  const client = new BrokerClient(server.url, "secret");
+  const authorization = await client.actorAuthorization();
+  const url = server.url.replace("http", "ws") + "/v1/events/ws";
+  const first = new WebSocket(url, { headers: { authorization } });
+  await new Promise<void>((resolve, reject) => { first.once("open", resolve); first.once("error", reject); });
+  const excess = new WebSocket(url, { headers: { authorization } });
+  await expect(new Promise((resolve, reject) => {
+    excess.once("open", resolve);
+    excess.once("unexpected-response", (_request, response) => reject(Object.assign(new Error("excess"), { statusCode: response.statusCode })));
+  })).rejects.toMatchObject({ statusCode: 503 });
+  first.close();
+  await new Promise((resolve) => first.once("close", resolve));
+  const foreign = new WebSocket(url, { headers: { authorization, origin: "https://evil.example" } });
+  await expect(new Promise((resolve, reject) => {
+    foreign.once("open", resolve);
+    foreign.once("unexpected-response", (_request, response) => reject(Object.assign(new Error("origin"), { statusCode: response.statusCode })));
+  })).rejects.toMatchObject({ statusCode: 401 });
+});
+
+test("WebSocket terminates deterministic stalled and idle clients", async () => {
+  for (const webSocket of [
+    { maxBufferedBytes: -1, stallTimeoutMs: 0, idleTimeoutMs: 10_000 },
+    { idleTimeoutMs: 0 },
+  ]) {
+    const db = openDatabase(":memory:");
+    databases.push(db);
+    const server = await startBrokerHttpServer({ service: new BrokerService(db), token: "secret", port: 0, webSocket });
+    servers.push(server);
+    const client = new BrokerClient(server.url, "secret");
+    const socket = new WebSocket(server.url.replace("http", "ws") + "/v1/events/ws", { headers: { authorization: await client.actorAuthorization() } });
+    await new Promise<void>((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
+    await new Promise<void>((resolve) => socket.once("close", () => resolve()));
+  }
 });
 test("fake adapter drives a full lifecycle through loopback across a broker restart", async () => {
   const db = openDatabase(":memory:");

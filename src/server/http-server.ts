@@ -15,7 +15,7 @@ import {
   verifyActorCredential,
   type ActorSession,
 } from "./auth.js";
-import { attachEventWebSocket } from "./ws-events.js";
+import { attachEventWebSocket, type EventWebSocketOptions } from "./ws-events.js";
 import {
   adminMethods,
   rpcResultSchemas,
@@ -35,6 +35,11 @@ export interface BrokerHttpOptions {
   readonly port?: number;
   readonly maxJsonBytes?: number;
   readonly sessionSecret?: string;
+  readonly headersTimeoutMs?: number;
+  readonly requestTimeoutMs?: number;
+  readonly keepAliveTimeoutMs?: number;
+  readonly requestDeadlineMs?: number;
+  readonly webSocket?: EventWebSocketOptions;
 }
 export interface ApiError {
   readonly code: string;
@@ -59,7 +64,10 @@ export async function startBrokerHttpServer(
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
   });
-  const events = attachEventWebSocket(server, options.service, sessionSecret);
+  server.headersTimeout = options.headersTimeoutMs ?? 10_000;
+  server.requestTimeout = options.requestTimeoutMs ?? 30_000;
+  server.keepAliveTimeout = options.keepAliveTimeoutMs ?? 5_000;
+  const events = attachEventWebSocket(server, options.service, sessionSecret, options.webSocket);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(options.port ?? 0, host, () => {
@@ -88,6 +96,12 @@ async function handle(
   response: ServerResponse,
   options: BrokerHttpOptions & { sessionSecret: string },
 ): Promise<void> {
+  const deadline = setTimeout(() => {
+    if (!response.headersSent)
+      reply(response, 408, { ok: false, error: { code: "REQUEST_TIMEOUT", message: "Request deadline exceeded" } });
+    request.destroy();
+  }, options.requestDeadlineMs ?? 30_000);
+  deadline.unref();
   try {
     const url = new URL(request.url ?? "/", "http://localhost");
     if (request.method === "GET" && url.pathname === "/v1/health") {
@@ -97,6 +111,7 @@ async function handle(
     }
     if (request.method === "POST" && url.pathname === "/v1/session/admin") {
       requireDiscovery(request, options.token);
+      requireJsonContentTypeWhenPresent(request);
       const session = createAdminSession();
       reply(response, 200, {
         ok: true,
@@ -137,6 +152,7 @@ async function handle(
       });
       return;
     }
+    requireJsonContentType(request);
     const body = (await readJson(
       request,
       options.maxJsonBytes ?? 1_048_576,
@@ -212,13 +228,29 @@ async function handle(
         ? 401
         : mapped.code === "PAYLOAD_TOO_LARGE"
           ? 413
-          : 400,
+          : mapped.code === "UNSUPPORTED_MEDIA_TYPE"
+            ? 415
+            : mapped.code === "INTERNAL_ERROR"
+              ? 500
+              : 400,
       {
         ok: false,
         error: mapped,
       },
     );
+  } finally {
+    clearTimeout(deadline);
   }
+}
+function requireJsonContentType(request: IncomingMessage): void {
+  const value = request.headers["content-type"];
+  if (typeof value !== "string" || !/^application\/json(?:\s*;|$)/iu.test(value))
+    throw typed("UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json");
+}
+function requireJsonContentTypeWhenPresent(request: IncomingMessage): void {
+  const contentLength = Number(request.headers["content-length"] ?? 0);
+  if (contentLength > 0 || request.headers["transfer-encoding"] !== undefined)
+    requireJsonContentType(request);
 }
 function requireDiscovery(request: IncomingMessage, token: string): void {
   if (!isAuthorized(request.headers.authorization, token))
@@ -290,6 +322,8 @@ function mapError(error: unknown): ApiError {
     typeof candidate.code === "string" ? candidate.code : undefined;
   const name =
     typeof candidate.name === "string" ? candidate.name : "BROKER_ERROR";
+  if (explicit === undefined && (candidate.name === "Error" || candidate.name === "SqliteError"))
+    return { code: "INTERNAL_ERROR", message: "Internal broker error" };
   return {
     code:
       explicit ??
