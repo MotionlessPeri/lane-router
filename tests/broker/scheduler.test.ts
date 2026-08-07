@@ -657,3 +657,113 @@ test("stored_pending suppresses repeated delivery until an availability signal",
   await x.scheduler.runOnce();
   expect(x.adapter.requests).toHaveLength(2);
 });
+
+test("overlapping runOnce calls acquire the lane before awaiting runtime state", async () => {
+  const x = setup("stored_pending");
+  x.service.send({
+    operationId: "overlap",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "once",
+    metadata: {},
+  });
+  let releaseProbe!: () => void;
+  const probeBlocked = new Promise<void>((resolve) => {
+    releaseProbe = resolve;
+  });
+  let enteredProbe!: () => void;
+  const probeEntered = new Promise<void>((resolve) => {
+    enteredProbe = resolve;
+  });
+  let probes = 0;
+  let deliveries = 0;
+  const adapter: DeliveryAdapter = {
+    getRuntimeState: async () => {
+      probes += 1;
+      enteredProbe();
+      await probeBlocked;
+      return { availability: "online", turn: "idle" };
+    },
+    deliver: async () => {
+      deliveries += 1;
+      return "stored_pending";
+    },
+  };
+  const scheduler = new Scheduler(
+    x.db,
+    { codex: adapter, claude: adapter },
+    x.service.config,
+    { now: () => 100, random: () => 0.5 },
+  );
+  const first = scheduler.runOnce();
+  await probeEntered;
+  const second = scheduler.runOnce();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  releaseProbe();
+  const results = await Promise.allSettled([first, second]);
+  expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+  expect(probes).toBe(1);
+  expect(deliveries).toBe(1);
+});
+
+test("turn-ended persistence rolls back with its event while other lanes continue", async () => {
+  const x = setup("started_new_turn");
+  const first = x.service.send({
+    operationId: "atomic-turn-ended",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "first",
+    metadata: {},
+  });
+  await x.scheduler.runOnce();
+  x.db.exec(`
+    INSERT INTO lane(id,project_id,name,role_document,communication_entry)
+      VALUES('p/c','p','c','c',0);
+    INSERT INTO binding(
+      id,lane_id,workspace_id,adapter,conversation_id,generation,active_at,
+      inactive_at,inactive_reason,is_current,state,state_changed_at,state_reason
+    ) VALUES('bc','p/c','w','codex','c',1,100,NULL,NULL,1,'bound',NULL,NULL);
+    CREATE TRIGGER fail_turn_ended_event
+    BEFORE INSERT ON event
+    WHEN NEW.event_type='turn_ended_before_claim'
+    BEGIN
+      SELECT RAISE(ABORT, 'injected turn-ended event failure');
+    END;
+  `);
+  x.service.send({
+    operationId: "unrelated-lane",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/c",
+    kind: "normal",
+    body: "unrelated",
+    metadata: {},
+  });
+  const deliveredLanes: string[] = [];
+  const adapter: DeliveryAdapter = {
+    getRuntimeState: async () => ({ availability: "online", turn: "idle" }),
+    deliver: async (request) => {
+      deliveredLanes.push(request.targetLaneId);
+      return "stored_pending";
+    },
+  };
+  const scheduler = new Scheduler(
+    x.db,
+    { codex: adapter, claude: adapter },
+    x.service.config,
+    { now: () => 100, random: () => 0.5 },
+  );
+  await expect(scheduler.runOnce()).resolves.toBe(2);
+  expect(deliveredLanes).toEqual(["p/c"]);
+  expect(
+    x.db
+      .prepare("SELECT state,failure_count FROM delivery WHERE id=?")
+      .get(first.deliveryId),
+  ).toEqual({ state: "notified", failure_count: 0 });
+  expect(
+    x.service
+      .events()
+      .filter((event) => event.type === "turn_ended_before_claim"),
+  ).toHaveLength(0);
+});

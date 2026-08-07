@@ -68,15 +68,17 @@ export class Scheduler {
       nextAttemptAt:
         this.now() + retryDelay(this.config, current.failureCount, this.random),
     });
-    this.persist(failed, "started turn ended before claim");
+    inTransaction(this.database, () => {
+      this.persist(failed, "started turn ended before claim");
+      appendEvent(
+        this.database,
+        "turn_ended_before_claim",
+        this.now(),
+        { status: failed.status, failureCount: failed.failureCount },
+        { deliveryId },
+      );
+    });
     this.busy.delete(current.targetLaneId);
-    appendEvent(
-      this.database,
-      "turn_ended_before_claim",
-      this.now(),
-      { status: failed.status, failureCount: failed.failureCount },
-      { deliveryId },
-    );
     return failed;
   }
 
@@ -100,57 +102,60 @@ export class Scheduler {
     await Promise.all(
       [...groups.entries()].map(async ([laneId, candidates]) => {
         if (this.running.has(laneId)) return;
-        const adapter = this.adapters[candidates[0]!.adapter];
-        let runtime: Awaited<ReturnType<DeliveryAdapter["getRuntimeState"]>>;
-        try {
-          runtime = await adapter.getRuntimeState({
-            targetLaneId: laneId,
-            bindingGeneration: candidates[0]!.generation,
-          });
-        } catch {
-          this.unavailable.add(laneId);
-          appendEvent(
-            this.database,
-            "adapter_runtime_state_failed",
-            this.now(),
-            { availability: "degraded" },
-          );
-          return;
-        }
-        if (runtime.availability !== "online") {
-          this.unavailable.add(laneId);
-          return;
-        }
-        this.unavailable.delete(laneId);
-        if (this.unavailable.has(laneId) || this.storedPending.has(laneId))
-          return;
-        const durableTurn = candidates.some(
-          (row) => row.state === "notified" || row.state === "claimed",
-        );
-        const ended =
-          runtime.turn === "idle" &&
-          candidates.find(
-            (row) => row.state === "notified" && row.deadline_kind === "claim",
-          );
-        if (ended) {
-          this.turnEndedBeforeClaim(ended.id);
-          return;
-        }
-        const busy =
-          this.busy.has(laneId) || runtime.turn === "busy" || durableTurn;
-        const corrections = candidates.filter(
-          (row) => row.kind === "correction",
-        );
-        const normals = candidates.filter((row) => row.kind === "normal");
-        const selected = this.eligiblePrefix(corrections).length
-          ? this.eligiblePrefix(corrections)
-          : busy
-            ? []
-            : this.eligiblePrefix(normals);
-        if (!selected.length) return;
         this.running.add(laneId);
         try {
+          const adapter = this.adapters[candidates[0]!.adapter];
+          let runtime: Awaited<ReturnType<DeliveryAdapter["getRuntimeState"]>>;
+          try {
+            runtime = await adapter.getRuntimeState({
+              targetLaneId: laneId,
+              bindingGeneration: candidates[0]!.generation,
+            });
+          } catch {
+            this.unavailable.add(laneId);
+            appendEvent(
+              this.database,
+              "adapter_runtime_state_failed",
+              this.now(),
+              { availability: "degraded" },
+            );
+            return;
+          }
+          if (runtime.availability !== "online") {
+            this.unavailable.add(laneId);
+            return;
+          }
+          this.unavailable.delete(laneId);
+          if (this.unavailable.has(laneId) || this.storedPending.has(laneId))
+            return;
+          const durableTurn = candidates.some(
+            (row) => row.state === "notified" || row.state === "claimed",
+          );
+          const ended =
+            runtime.turn === "idle" &&
+            candidates.find(
+              (row) =>
+                row.state === "notified" && row.deadline_kind === "claim",
+            );
+          if (ended) {
+            this.turnEndedBeforeClaim(ended.id);
+            return;
+          }
+          const busy =
+            this.busy.has(laneId) || runtime.turn === "busy" || durableTurn;
+          const corrections = candidates.filter(
+            (row) => row.kind === "correction",
+          );
+          const normals = candidates.filter((row) => row.kind === "normal");
+          const selected = this.eligiblePrefix(corrections).length
+            ? this.eligiblePrefix(corrections)
+            : busy
+              ? []
+              : this.eligiblePrefix(normals);
+          if (!selected.length) return;
           await this.deliverBatch(selected);
+        } catch {
+          /* A lane-local failure cannot stop unrelated lanes or the scheduler tick. */
         } finally {
           this.running.delete(laneId);
         }
