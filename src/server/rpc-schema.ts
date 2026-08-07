@@ -5,7 +5,7 @@ const safeInteger = z.number().int().safe();
 const safePositive = z.number().int().safe().positive();
 const adapterResult = z.enum([
   "started_new_turn", "applied_current_turn", "queued_next_turn",
-  "stored_pending", "binding_not_found", "adapter_failed",
+  "stored_pending", "binding_not_found", "binding_changed_retry", "adapter_failed",
 ]);
 const operation = { operationId: text };
 const identityFields = {

@@ -88,6 +88,7 @@ export function applyAdapterResult(
       return notified(delivery, result, "queue", context.queueDeadlineAt);
     case "stored_pending":
     case "binding_not_found":
+    case "binding_changed_retry":
       return toPending(delivery, delivery.failureCount, null);
     case "adapter_failed":
       return recordFailure(delivery, context);

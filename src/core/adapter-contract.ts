@@ -6,6 +6,7 @@ export type AdapterResult =
   | "queued_next_turn"
   | "stored_pending"
   | "binding_not_found"
+  | "binding_changed_retry"
   | "adapter_failed";
 
 export interface AdapterDeliveryRequest {

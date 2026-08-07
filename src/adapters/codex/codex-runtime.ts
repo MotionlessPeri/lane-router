@@ -30,6 +30,10 @@ export class CodexRuntime {
   private readonly byThread = new Map<string, CodexBindingRegistration>();
   private readonly byLaneGeneration = new Map<string, CodexBindingRegistration>();
   private reconnectSequence = 0;
+  private unsubscribers: Array<() => void> = [];
+  private running = false;
+  private startTask?: Promise<string>;
+  private stopTask?: Promise<void>;
 
   constructor(private readonly options: { broker: BrokerService; process: CodexProcessControl; adminId: string; beforeClaim?: (request: AdapterDeliveryRequest, turnId: string) => void | Promise<void> }) {
     this.client = options.process.client;
@@ -38,27 +42,41 @@ export class CodexRuntime {
       resolveThread: (threadId) => this.resolveThread(threadId),
       call: (name, args, context) => this.callTool(name, args, context),
     });
-    this.client.onServerRequest((request) => this.dispatcher.dispatch(request.params));
     this.adapter = new CodexAdapter({
       client: this.client,
       resolveBinding: (laneId, generation) => this.byLaneGeneration.get(laneKey(laneId, generation)),
+      maxBatchCount: options.broker.config.maxBatchCount,
+      maxBatchEncodedBytes: options.broker.config.maxBatchEncodedBytes,
       ...(options.beforeClaim ? { beforeClaim: options.beforeClaim } : {}),
     });
-    options.process.onReconnect(() => this.notifyReconnect());
   }
 
-  start(): Promise<string> { return this.options.process.start(); }
-  stop(): Promise<void> { return this.options.process.shutdown(); }
+  start(): Promise<string> {
+    if (this.startTask) return this.startTask;
+    if (this.running) return this.options.process.start();
+    this.attach();
+    let tracked: Promise<string>;
+    tracked = this.options.process.start().then((endpoint) => { this.running = true; return endpoint; }, (error: unknown) => { this.detach(); throw error; }).finally(() => { if (this.startTask === tracked) this.startTask = undefined; });
+    this.startTask = tracked; return tracked;
+  }
+  stop(): Promise<void> {
+    if (this.stopTask) return this.stopTask;
+    if (!this.running && !this.startTask && this.unsubscribers.length === 0) return Promise.resolve();
+    let tracked: Promise<void>;
+    tracked = this.stopRuntime().finally(() => { if (this.stopTask === tracked) this.stopTask = undefined; });
+    this.stopTask = tracked; return tracked;
+  }
 
   registerBinding(registration: CodexBindingRegistration): void {
     const identity = this.options.broker.whoami({ bindingId: registration.bindingId, generation: registration.generation });
     if (identity.adapter !== "codex" || identity.laneAddress !== registration.laneId) throw new Error("Codex thread registration does not match the current broker binding");
     const previousThread = this.byLaneGeneration.get(laneKey(registration.laneId, registration.generation));
-    if (previousThread) this.byThread.delete(previousThread.threadId);
     const previousBinding = this.byThread.get(registration.threadId);
     if (previousBinding && (previousBinding.bindingId !== registration.bindingId || previousBinding.generation !== registration.generation)) throw new Error("Codex thread is already registered to another binding");
-    this.byThread.set(registration.threadId, Object.freeze({ ...registration }));
-    this.byLaneGeneration.set(laneKey(registration.laneId, registration.generation), Object.freeze({ ...registration }));
+    const stored = Object.freeze({ ...registration });
+    if (previousThread && previousThread.threadId !== registration.threadId) this.byThread.delete(previousThread.threadId);
+    this.byThread.set(registration.threadId, stored);
+    this.byLaneGeneration.set(laneKey(registration.laneId, registration.generation), stored);
   }
 
   unregisterBinding(laneId: string, generation: number): void {
@@ -102,6 +120,20 @@ export class CodexRuntime {
   private notifyReconnect(): void {
     const lanes = new Set([...this.byThread.values()].map((registration) => registration.laneId));
     for (const laneId of lanes) this.options.broker.notifyAdapterAvailable({ operationId: `codex-reconnect:${++this.reconnectSequence}:${laneId}`, adminId: this.options.adminId, laneId });
+  }
+  private attach(): void {
+    if (this.unsubscribers.length) return;
+    this.unsubscribers = [
+      this.client.onServerRequest((request) => this.dispatcher.dispatch(request.params)),
+      this.client.onTransportLoss(() => this.dispatcher.clear()),
+      this.options.process.onReconnect(() => this.notifyReconnect()),
+    ];
+  }
+  private detach(): void { for (const unsubscribe of this.unsubscribers.splice(0)) unsubscribe(); }
+  private async stopRuntime(): Promise<void> {
+    await this.startTask?.catch(() => undefined);
+    try { if (this.running) await this.options.process.shutdown(); }
+    finally { this.running = false; this.detach(); this.byThread.clear(); this.byLaneGeneration.clear(); this.dispatcher.clear(); }
   }
 }
 

@@ -93,3 +93,26 @@ test("starts new and resumes persisted threads", async () => {
   x.request.mockResolvedValueOnce({ thread: { id: "persisted", status: { type: "idle" }, turns: [] } });
   expect(await x.adapter.resumeThread("persisted")).toBe("persisted");
 });
+
+test("binding rotation during a delayed probe never starts the stale thread", async () => {
+  let releaseProbe: ((value: unknown) => void) | undefined;
+  const probe = new Promise((resolve) => { releaseProbe = resolve; });
+  let binding: { threadId: string } | undefined = { threadId: "old-thread" };
+  const request = vi.fn(async (method: string) => method === "thread/read" ? probe : { turn: { id: "turn", status: "inProgress", items: [] } });
+  const adapter = new CodexAdapter({ client: { request, isConnected: () => true }, resolveBinding: () => binding });
+  const deliveryTask = adapter.deliver(delivery);
+  await vi.waitFor(() => expect(request).toHaveBeenCalledWith("thread/read", expect.objectContaining({ threadId: "old-thread" })));
+  binding = { threadId: "new-thread" };
+  releaseProbe?.({ thread: { id: "old-thread", status: { type: "idle" }, turns: [] } });
+  await expect(deliveryTask).resolves.toBe("binding_changed_retry");
+  expect(request).not.toHaveBeenCalledWith("turn/start", expect.anything());
+  expect(request).not.toHaveBeenCalledWith("turn/steer", expect.anything());
+});
+
+test("adapter rejects a wake envelope beyond its defensive count bound", async () => {
+  const x = setup("idle");
+  const ids = Array.from({ length: 65 }, (_, index) => `d-${index}`);
+  const messages = Array.from({ length: 65 }, (_, index) => `m-${index}`);
+  await expect(x.adapter.deliver({ ...delivery, deliveryId: ids[0]!, messageId: messages[0]!, deliveryIds: ids, messageIds: messages })).rejects.toThrow(/maximum count/i);
+  expect(x.request).toHaveBeenCalledTimes(1);
+});

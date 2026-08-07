@@ -44,8 +44,12 @@ describe("runtime configuration", () => {
       retryBaseMs: 1_000,
       retryCapMs: 60_000,
       retryJitterRatio: 0.2,
+      maxBatchCount: 64,
+      maxBatchEncodedBytes: 16_384,
     });
     expect(() => validateRuntimeConfig({ retryBaseMs: 0 })).toThrow(/positive/);
+    expect(() => validateRuntimeConfig({ maxBatchCount: 1.5 })).toThrow(/safe integer/);
+    expect(() => validateRuntimeConfig({ maxBatchEncodedBytes: Number.MAX_SAFE_INTEGER + 1 })).toThrow(/safe integer/);
     expect(() =>
       validateRuntimeConfig({ retryBaseMs: 2_000, retryCapMs: 1_000 }),
     ).toThrow(/cap/);

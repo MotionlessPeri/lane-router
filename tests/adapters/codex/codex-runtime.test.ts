@@ -28,6 +28,8 @@ test("production runtime composes one client/dispatcher across lanes, tools, bat
   expect(runtime.client).toBe(clientBeforeStart);
   expect(runtime.dynamicTools).toHaveLength(8);
 
+  expect(() => runtime.registerBinding({ laneId: "p/a", bindingId: "ba", generation: 1, threadId: "th-b" })).toThrow(/another binding/i);
+
   for (let index = 1; index <= 3; index += 1) broker.send({ operationId: `batch-${index}`, actor: { bindingId: "ba", generation: 1 }, target: "p/b", kind: "normal", body: `SECRET-BODY-${index}`, metadata: {} });
   const scheduler = new Scheduler(db, { codex: runtime.adapter, claude: runtime.adapter }, broker.config, { now: () => 100, random: () => 0.5 });
   await scheduler.runOnce();
@@ -40,6 +42,8 @@ test("production runtime composes one client/dispatcher across lanes, tools, bat
 
   const whoami = await server.toolCall({ threadId: "th-a", turnId: "turn-tools", callId: "who", tool: "lane_whoami", arguments: {} });
   expect(toolResult(whoami)).toMatchObject({ laneAddress: "p/a", bindingId: "ba" });
+  const whoamiB = await server.toolCall({ threadId: "th-b", turnId: "turn-tools", callId: "who-b", tool: "lane_whoami", arguments: {} });
+  expect(toolResult(whoamiB)).toMatchObject({ laneAddress: "p/b", bindingId: "bb" });
   const sendParams = { threadId: "th-a", turnId: "turn-tools", callId: "send-once", tool: "lane_send", arguments: { operation_id: "spoof", target: "p/b", kind: "normal", body: "dynamic", metadata: {}, actor: { bindingId: "bb" } } };
   const [sentA, sentB] = await Promise.all([server.toolCall(sendParams), server.toolCall(sendParams)]);
   expect(toolResult(sentA)).toEqual(toolResult(sentB));
@@ -56,14 +60,53 @@ test("production runtime composes one client/dispatcher across lanes, tools, bat
   expect(process.stops).toBe(1);
 });
 
+test("runtime stop detaches handlers, clears registrations, and start reattaches once", async () => {
+  const server = await ScriptedAppServer.create(); servers.push(server);
+  const process = new ScriptedProcess(server.url);
+  const db = openDatabase(":memory:"); databases.push(db);
+  const broker = brokerFixture(db);
+  const runtime = new CodexRuntime({ broker, process, adminId: "runtime-admin" });
+  await runtime.start();
+  runtime.registerBinding({ laneId: "p/a", bindingId: "ba", generation: 1, threadId: "th-a" });
+  expect(process.activeReconnectSubscriptions).toBe(1);
+  await runtime.stop();
+  await runtime.stop();
+  expect(process.stops).toBe(1);
+  expect(process.activeReconnectSubscriptions).toBe(0);
+  await runtime.start();
+  expect(process.activeReconnectSubscriptions).toBe(1);
+  await expect(server.toolCall({ threadId: "th-a", turnId: "after-stop", callId: "cleared", tool: "lane_whoami", arguments: {} })).rejects.toThrow(/stale|unbound/i);
+  runtime.registerBinding({ laneId: "p/a", bindingId: "ba", generation: 1, threadId: "th-a" });
+  expect(toolResult(await server.toolCall({ threadId: "th-a", turnId: "after-start", callId: "once", tool: "lane_whoami", arguments: {} }))).toMatchObject({ laneAddress: "p/a" });
+  await runtime.stop();
+});
+
+test("runtime detaches and clears state even when process shutdown rejects", async () => {
+  const server = await ScriptedAppServer.create(); servers.push(server);
+  const process = new ScriptedProcess(server.url);
+  const db = openDatabase(":memory:"); databases.push(db);
+  const runtime = new CodexRuntime({ broker: brokerFixture(db), process, adminId: "runtime-admin" });
+  await runtime.start();
+  runtime.registerBinding({ laneId: "p/a", bindingId: "ba", generation: 1, threadId: "th-a" });
+  process.shutdownError = new Error("shutdown failed");
+  await expect(runtime.stop()).rejects.toThrow("shutdown failed");
+  expect(process.activeReconnectSubscriptions).toBe(0);
+  process.shutdownError = undefined;
+  await runtime.start();
+  await expect(server.toolCall({ threadId: "th-a", turnId: "cleared-after-error", callId: "cleared-after-error", tool: "lane_whoami", arguments: {} })).rejects.toThrow(/stale|unbound/i);
+  await runtime.stop();
+});
+
 class ScriptedProcess implements CodexProcessControl {
   readonly client: AppServerClient;
   starts = 0; stops = 0;
   private reconnect?: () => void;
+  activeReconnectSubscriptions = 0;
+  shutdownError?: Error;
   constructor(url: string) { this.client = new AppServerClient({ url, requestTimeoutMs: 1_000 }); }
   async start(): Promise<string> { this.starts += 1; await this.client.connect(); return "ws://127.0.0.1:fixture"; }
-  async shutdown(): Promise<void> { this.stops += 1; await this.client.close(); }
-  onReconnect(handler: () => void): () => void { this.reconnect = handler; return () => { this.reconnect = undefined; }; }
+  async shutdown(): Promise<void> { this.stops += 1; await this.client.close(); if (this.shutdownError) throw this.shutdownError; }
+  onReconnect(handler: () => void): () => void { this.reconnect = handler; this.activeReconnectSubscriptions += 1; return () => { if (this.reconnect === handler) { this.reconnect = undefined; this.activeReconnectSubscriptions -= 1; } }; }
   signalReconnect(): void { this.reconnect?.(); }
 }
 

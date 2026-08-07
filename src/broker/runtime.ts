@@ -1,3 +1,5 @@
+import { DEFAULT_MAX_BATCH_COUNT, DEFAULT_MAX_BATCH_ENCODED_BYTES } from "../core/batch-limits.js";
+
 export interface RuntimeConfig {
   readonly failureLimit: number;
   readonly claimDeadlineMs: number;
@@ -6,6 +8,8 @@ export interface RuntimeConfig {
   readonly retryBaseMs: number;
   readonly retryCapMs: number;
   readonly retryJitterRatio: number;
+  readonly maxBatchCount: number;
+  readonly maxBatchEncodedBytes: number;
 }
 
 export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = Object.freeze({
@@ -16,6 +20,8 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = Object.freeze({
   retryBaseMs: 1_000,
   retryCapMs: 60_000,
   retryJitterRatio: 0.2,
+  maxBatchCount: DEFAULT_MAX_BATCH_COUNT,
+  maxBatchEncodedBytes: DEFAULT_MAX_BATCH_ENCODED_BYTES,
 });
 
 export function validateRuntimeConfig(

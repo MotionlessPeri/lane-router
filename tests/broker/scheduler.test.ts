@@ -105,6 +105,52 @@ function setup(result: AdapterResult) {
   };
 }
 
+test("binding-change retry leaves work pending without suppression or failure", async () => {
+  const x = setup("binding_changed_retry");
+  const sent = x.service.send({ operationId: "binding-retry", actor: { bindingId: "ba", generation: 1 }, target: "p/b", kind: "normal", body: "retry", metadata: {} });
+  await x.scheduler.runOnce();
+  expect(x.db.prepare("SELECT state,failure_count FROM delivery WHERE id=?").get(sent.deliveryId)).toEqual({ state: "pending", failure_count: 0 });
+  expect(x.db.prepare("SELECT COUNT(*) AS count FROM adapter_suppression").get()).toEqual({ count: 0 });
+});
+
+test("scheduler bounds ordered batches and leaves the suffix pending", async () => {
+  const db = openDatabase(":memory:"); databases.push(db);
+  const service = new BrokerService(db, { now: () => 100, randomId: (prefix) => `${prefix}-${Math.random()}`, config: { maxBatchCount: 3, maxBatchEncodedBytes: 16_384 } });
+  service.syncProject({ operationId: "s", adminId: "x", workspaceId: "w", rootPath: "C:/r", manifest: { projectId: "p", projectKey: "p", displayName: "P", manifestHash: "h", manifestVersion: 1, lanes: [{ name: "a", roleFile: "a", communicationEntry: true }, { name: "b", roleFile: "b", communicationEntry: false }] } });
+  service.bind({ operationId: "a", adminId: "x", bindingId: "ba", laneAddress: "p/a", workspaceId: "w", adapter: "codex", conversationId: "a" });
+  service.bind({ operationId: "b", adminId: "x", bindingId: "bb", laneAddress: "p/b", workspaceId: "w", adapter: "codex", conversationId: "b" });
+  const sent = Array.from({ length: 7 }, (_, index) => service.send({ operationId: `batch-limit-${index}`, actor: { bindingId: "ba", generation: 1 }, target: "p/b", kind: "normal", body: `${index}`, metadata: {} }));
+  const adapter = new FakeAdapter("started_new_turn", "idle");
+  const scheduler = new Scheduler(db, { codex: adapter, claude: adapter }, service.config, { now: () => 100, random: () => 0.5 });
+  for (const expected of [sent.slice(0, 3), sent.slice(3, 6), sent.slice(6)]) {
+    await scheduler.runOnce();
+    expect(adapter.requests.at(-1)?.deliveryIds).toEqual(expected.map((item) => item.deliveryId));
+    db.prepare(`UPDATE delivery SET state='acknowledged',deadline_kind=NULL,deadline_at=NULL,adapter_result=NULL,next_attempt_at=NULL,park_reason=NULL WHERE id IN (${expected.map(() => "?").join(",")})`).run(...expected.map((item) => item.deliveryId));
+    scheduler.setLaneBusy("p/b", false); adapter.setTurn("idle");
+  }
+  expect(adapter.requests).toHaveLength(3);
+});
+
+test("scheduler enforces the encoded-byte limit without omitting FIFO order", async () => {
+  const x = setup("started_new_turn");
+  const sent = [0, 1, 2].map((index) => x.service.send({ operationId: `byte-limit-${index}`, actor: { bindingId: "ba", generation: 1 }, target: "p/b", kind: "normal", body: `${index}`, metadata: {} }));
+  const twoBytes = Buffer.byteLength(JSON.stringify({ deliveryIds: sent.slice(0, 2).map((item) => item.deliveryId), messageIds: sent.slice(0, 2).map((item) => item.messageId) }), "utf8");
+  const scheduler = new Scheduler(x.db, { codex: x.adapter, claude: x.adapter }, { ...x.service.config, maxBatchCount: 10, maxBatchEncodedBytes: twoBytes });
+  await scheduler.runOnce();
+  expect(x.adapter.requests[0]?.deliveryIds).toEqual(sent.slice(0, 2).map((item) => item.deliveryId));
+  expect(x.db.prepare("SELECT state FROM delivery WHERE id=?").get(sent[2]!.deliveryId)).toEqual({ state: "pending" });
+});
+
+test("an individually oversized frame is failed closed without poisoning its suffix", async () => {
+  const x = setup("started_new_turn");
+  const sent = [0, 1].map((index) => x.service.send({ operationId: `oversized-${index}`, actor: { bindingId: "ba", generation: 1 }, target: "p/b", kind: "normal", body: `${index}`, metadata: {} }));
+  const scheduler = new Scheduler(x.db, { codex: x.adapter, claude: x.adapter }, { ...x.service.config, failureLimit: 1, maxBatchCount: 10, maxBatchEncodedBytes: 1 });
+  await scheduler.runOnce();
+  await scheduler.runOnce();
+  expect(x.adapter.requests).toHaveLength(0);
+  expect(x.db.prepare("SELECT id,state FROM delivery ORDER BY sequence").all()).toEqual(sent.map((item) => ({ id: item.deliveryId, state: "parked" })));
+});
+
 test("idle lane batches ordered ids and persists a claim deadline", async () => {
   const x = setup("started_new_turn");
   x.service.send({

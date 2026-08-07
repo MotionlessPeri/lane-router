@@ -15,6 +15,7 @@ import {
   persistAdapterSuppression,
 } from "./adapter-result-persistence.js";
 import { retryDelay, type RuntimeConfig } from "./runtime.js";
+import { wakeEnvelopeBytes } from "../core/batch-limits.js";
 
 export type AdapterRegistry = Readonly<{
   claude: DeliveryAdapter;
@@ -182,11 +183,17 @@ export class Scheduler {
             (row) => row.kind === "correction",
           );
           const normals = candidates.filter((row) => row.kind === "normal");
-          const selected = this.eligiblePrefix(corrections).length
-            ? this.eligiblePrefix(corrections)
+          const eligibleCorrections = this.eligiblePrefix(corrections);
+          const eligible = eligibleCorrections.length
+            ? eligibleCorrections
             : busy
               ? []
               : this.eligiblePrefix(normals);
+          const selected = this.boundedPrefix(eligible);
+          if (!selected.length && eligible.length) {
+            this.rejectOversized(eligible[0]!);
+            return;
+          }
           if (!selected.length) return;
           await this.deliverBatch(selected);
         } finally {
@@ -232,6 +239,7 @@ export class Scheduler {
     } catch {
       result = "adapter_failed";
     }
+    if (result === "binding_changed_retry") return;
     try {
       persistAdapterResult({
         database: this.database,
@@ -250,6 +258,19 @@ export class Scheduler {
       throw persistenceError;
     }
     if (result === "started_new_turn") this.busy.add(first.target_lane_id);
+  }
+  private boundedPrefix(rows: EligibleRow[]): EligibleRow[] {
+    const selected: EligibleRow[] = [];
+    for (const row of rows) {
+      if (selected.length >= this.config.maxBatchCount) break;
+      const candidate = [...selected, row];
+      if (wakeEnvelopeBytes(candidate.map((item) => item.id), candidate.map((item) => item.message_id)) > this.config.maxBatchEncodedBytes) break;
+      selected.push(row);
+    }
+    return selected;
+  }
+  private rejectOversized(row: EligibleRow): void {
+    persistAdapterResult({ database: this.database, deliveryIds: [row.id], result: "adapter_failed", now: this.now, random: this.random, config: this.config });
   }
   private persistDispatchFences(rows: EligibleRow[], result: AdapterResult): void {
     inTransaction(this.database, () => {
