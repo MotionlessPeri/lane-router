@@ -19,6 +19,12 @@ export async function connectFakeClaude(server) {
     { capabilities: { experimental: { "claude/channel": {} } } },
   );
   client.setNotificationHandler(ChannelNotificationSchema, async (notification) => {
+    let content;
+    try { content = JSON.parse(notification.params.content); } catch { content = undefined; }
+    if (content?.kind === "lane_router_readiness") {
+      await client.callTool({ name: "lane_whoami", arguments: {} });
+      return;
+    }
     const waiter = waiters.shift();
     if (waiter) waiter(notification);
     else notifications.push(notification);

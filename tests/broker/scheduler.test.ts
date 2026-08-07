@@ -131,6 +131,17 @@ test("scheduler bounds ordered batches and leaves the suffix pending", async () 
   expect(adapter.requests).toHaveLength(3);
 });
 
+test("authoritative adapter idle releases stale in-memory busy state after acknowledgement", async () => {
+  const x = setup("started_new_turn");
+  const first = x.service.send({ operationId: "idle-release-first", actor: { bindingId: "ba", generation: 1 }, target: "p/b", kind: "normal", body: "first", metadata: {} });
+  await x.scheduler.runOnce();
+  x.db.prepare("UPDATE delivery SET state='acknowledged',deadline_kind=NULL,deadline_at=NULL,adapter_result=NULL,next_attempt_at=NULL,park_reason=NULL WHERE id=?").run(first.deliveryId);
+  x.adapter.setTurn("idle");
+  const second = x.service.send({ operationId: "idle-release-second", actor: { bindingId: "ba", generation: 1 }, target: "p/b", kind: "normal", body: "second", metadata: {} });
+  await x.scheduler.runOnce();
+  expect(x.adapter.requests.map((request) => request.deliveryId)).toEqual([first.deliveryId, second.deliveryId]);
+});
+
 test("scheduler enforces the encoded-byte limit without omitting FIFO order", async () => {
   const x = setup("started_new_turn");
   const sent = [0, 1, 2].map((index) => x.service.send({ operationId: `byte-limit-${index}`, actor: { bindingId: "ba", generation: 1 }, target: "p/b", kind: "normal", body: `${index}`, metadata: {} }));

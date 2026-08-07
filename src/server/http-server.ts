@@ -75,9 +75,10 @@ export async function startBrokerHttpServer(
     options.sessionSecret ??
     createHash("sha256").update(options.token).digest("hex");
   const effective = { ...options, sessionSecret };
+  let claudeChannels: ClaudeChannelRegistry;
   const sockets = new Set<Socket>();
   const server = createServer(
-    (request, response) => void handle(request, response, effective),
+    (request, response) => void handle(request, response, effective, () => claudeChannels),
   );
   server.on("connection", (socket) => {
     sockets.add(socket);
@@ -87,7 +88,7 @@ export async function startBrokerHttpServer(
   server.requestTimeout = options.requestTimeoutMs ?? 30_000;
   server.keepAliveTimeout = options.keepAliveTimeoutMs ?? 5_000;
   const events = attachEventWebSocket(server, options.service, sessionSecret, options.webSocket);
-  const claudeChannels = attachClaudeChannelWebSocket(server, options.service, sessionSecret, options.claudeWebSocket);
+  claudeChannels = attachClaudeChannelWebSocket(server, options.service, sessionSecret, options.claudeWebSocket);
   do {
     await listen(server, options.port ?? 0, host);
     const selected = (server.address() as AddressInfo).port;
@@ -133,6 +134,7 @@ async function handle(
   request: IncomingMessage,
   response: ServerResponse,
   options: BrokerHttpOptions & { sessionSecret: string },
+  getClaudeChannels: () => ClaudeChannelRegistry,
 ): Promise<void> {
   const deadline = setTimeout(() => {
     if (!response.headersSent)
@@ -169,6 +171,15 @@ async function handle(
         "UNAUTHORIZED",
         "Actor session credential is missing or invalid",
       );
+    if (request.method === "POST" && url.pathname === "/v1/adapters/claude/state") {
+      if (session.kind !== "binding") throw typed("FORBIDDEN", "Claude lifecycle state requires a binding actor session");
+      requireJsonContentType(request);
+      const body = await readJson(request, Math.min(options.maxJsonBytes ?? 1_048_576, 4_096));
+      if (!isClaudeLifecycleBody(body)) throw typed("INVALID_REQUEST", "Claude lifecycle state is invalid");
+      const accepted = getClaudeChannels().reportLifecycle(session.id, session.generation, body.connectionEpoch, body.event);
+      reply(response, 200, { ok: true, data: { accepted } });
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/v1/status") {
       requireCurrentReadActor(options.service, session);
       reply(response, 200, { ok: true, data: options.service.status() });
@@ -286,6 +297,11 @@ async function handle(
   } finally {
     clearTimeout(deadline);
   }
+}
+function isClaudeLifecycleBody(value: unknown): value is { connectionEpoch: string; event: "Stop" | "UserPromptSubmit" } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const body = value as Record<string, unknown>;
+  return Object.keys(body).length === 2 && typeof body.connectionEpoch === "string" && body.connectionEpoch.length > 0 && body.connectionEpoch.length <= 128 && (body.event === "Stop" || body.event === "UserPromptSubmit");
 }
 function parseInternalResult(
   schema: { parse(value: unknown): unknown },

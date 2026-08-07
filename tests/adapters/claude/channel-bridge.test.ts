@@ -7,10 +7,11 @@ function delivery(messageId = "message-1", deliveryId = "delivery-1"): AdapterDe
 }
 
 function sink(send = vi.fn(async (_notification: ClaudeChannelNotification) => undefined)) { return { notification: send }; }
+function readyBridge(options: ConstructorParameters<typeof ChannelBridge>[0] = {}) { return new ChannelBridge({ ...options, requireReadinessProbe: false }); }
 
 test("idle Channel wake emits only a minimal ID envelope and deduplicates replay", async () => {
   const send = vi.fn(async (_notification: ClaudeChannelNotification) => undefined);
-  const bridge = new ChannelBridge();
+  const bridge = readyBridge();
   bridge.attach(sink(send));
   expect(await bridge.wake(delivery())).toBe("started_new_turn");
   expect(await bridge.wake(delivery())).toBe("started_new_turn");
@@ -24,7 +25,7 @@ test("idle Channel wake emits only a minimal ID envelope and deduplicates replay
 
 test("a partially replayed batch notifies only unseen message IDs", async () => {
   const send = vi.fn(async (_notification: ClaudeChannelNotification) => undefined);
-  const bridge = new ChannelBridge();
+  const bridge = readyBridge();
   bridge.attach(sink(send));
   await bridge.wake(delivery("message-1", "delivery-1"));
   const overlapping = { ...delivery("message-1", "delivery-1"), deliveryIds: ["delivery-1", "delivery-2"], messageIds: ["message-1", "message-2"] };
@@ -32,9 +33,28 @@ test("a partially replayed batch notifies only unseen message IDs", async () => 
   expect(JSON.parse(send.mock.calls[1]![0].params.content)).toMatchObject({ deliveryIds: ["delivery-2"], messageIds: ["message-2"] });
 });
 
+test("concurrent overlapping batches reserve each message ID exactly once", async () => {
+  const sent: ClaudeChannelNotification[] = [];
+  let releaseFirst: (() => void) | undefined;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const bridge = readyBridge();
+  bridge.attach(sink(vi.fn(async (notification) => {
+    sent.push(notification);
+    if (sent.length === 1) await firstBlocked;
+  })));
+  const first = bridge.wake({ ...delivery("m1", "d1"), deliveryIds: ["d1", "d2"], messageIds: ["m1", "m2"] });
+  await vi.waitFor(() => expect(sent).toHaveLength(1));
+  const second = bridge.wake({ ...delivery("m2", "d2"), deliveryIds: ["d2", "d3"], messageIds: ["m2", "m3"] });
+  await Promise.resolve();
+  expect(sent).toHaveLength(1);
+  releaseFirst?.();
+  await expect(Promise.all([first, second])).resolves.toEqual(["started_new_turn", "queued_next_turn"]);
+  expect(sent.map((item) => JSON.parse(item.params.content).messageIds)).toEqual([["m1", "m2"], ["m3"]]);
+});
+
 test("busy Channel delivery is sent for the next turn and disconnected delivery stays pending", async () => {
   const send = vi.fn(async (_notification: ClaudeChannelNotification) => undefined);
-  const bridge = new ChannelBridge();
+  const bridge = readyBridge();
   expect(await bridge.wake(delivery())).toBe("stored_pending");
   bridge.attach(sink(send));
   bridge.setBusy(true);
@@ -50,7 +70,7 @@ test("Channel wake coalesces concurrency and retries with injected bounded jitte
   let release: (() => void) | undefined;
   const blocked = new Promise<void>((resolve) => { release = resolve; });
   const send = vi.fn(async () => { attempts += 1; if (attempts < 3) throw new Error("temporary write failure"); await blocked; });
-  const bridge = new ChannelBridge({ maxNotifyAttempts: 3, retryBaseMs: 100, retryCapMs: 150, random: () => 0.5, sleep: async (ms) => { delays.push(ms); } });
+  const bridge = readyBridge({ maxNotifyAttempts: 3, retryBaseMs: 100, retryCapMs: 150, random: () => 0.5, sleep: async (ms) => { delays.push(ms); } });
   bridge.attach(sink(send));
   const first = bridge.wake(delivery());
   const second = bridge.wake(delivery());
@@ -65,7 +85,7 @@ test("Channel reconnect callback restores availability and seen-ID cache stays b
   let now = 0;
   const reconnected = vi.fn(async () => undefined);
   const send = vi.fn(async (_notification: ClaudeChannelNotification) => undefined);
-  const bridge = new ChannelBridge({ onReconnect: reconnected, now: () => now, completedTtlMs: 10, maxSeenMessageIds: 2 });
+  const bridge = readyBridge({ onReconnect: reconnected, now: () => now, completedTtlMs: 10, maxSeenMessageIds: 2 });
   bridge.attach(sink(send));
   await bridge.wake(delivery("m1", "d1"));
   bridge.setBusy(false); await bridge.wake(delivery("m2", "d2"));

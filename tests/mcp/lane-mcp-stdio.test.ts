@@ -34,10 +34,13 @@ test("production stdio entrypoint joins the authenticated bridge and emits a bod
       LANE_ROUTER_BINDING_CREDENTIAL: bound.bindingCredential,
       LANE_ROUTER_BINDING_ID: "binding-a",
       LANE_ROUTER_BINDING_GENERATION: "1",
+      LANE_ROUTER_CLAUDE_CONNECTION_EPOCH: "stdio-test-epoch",
     },
   });
   clients.push(fake);
-  await expect.poll(() => server.claudeChannels.getRuntimeState("binding-a", 1)).toEqual({ availability: "online", turn: "idle" });
+  await expect.poll(() => server.claudeChannels.getRuntimeState("binding-a", 1)).toEqual({ availability: "online", turn: "busy" });
+  const stopped = await fetch(`${server.url}/v1/adapters/claude/state`, { method: "POST", headers: { authorization: `Session ${bound.bindingCredential}`, "content-type": "application/json" }, body: JSON.stringify({ connectionEpoch: "stdio-test-epoch", event: "Stop" }) });
+  expect(await stopped.json()).toEqual({ ok: true, data: { accepted: true } });
 
   const accepted = server.claudeChannels.deliver("binding-a", 1, { deliveryId: "delivery-1", messageId: "message-1", targetLaneId: "p/a", sequence: 1, kind: "normal", bindingGeneration: 1 });
   const notification = await fake.nextNotification();

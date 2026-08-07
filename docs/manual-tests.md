@@ -1,6 +1,6 @@
 # Manual integration tests
 
-These cases verify the experimental Codex App Server boundary that deterministic unit tests cannot cover. They use disposable state and record identifiers only; prompt bodies, model responses, credentials, and authentication-file contents must not be captured.
+These cases verify the installed Codex App Server and Claude Channel boundaries that deterministic tests cannot cover. They use disposable state and record identifiers only; prompt bodies, hook input, model responses, credentials, and authentication-file contents must not be captured.
 
 ## TC-CODEX-001: Installed capability gate
 
@@ -48,7 +48,7 @@ These cases verify the experimental Codex App Server boundary that deterministic
 
 ## TC-CLAUDE-001: Fixed-identity stdio and Channel transport
 
-**Goal**: Verify that the production stdio MCP server exposes all eight lane tools under one server-issued binding identity and forwards body-free Channel wakes through the authenticated broker bridge.
+**Goal**: Verify that the production stdio MCP server exposes all eight lane tools under one server-issued binding identity, proves scheduling capability, reports authenticated lifecycle state, and forwards body-free Channel wakes through the broker bridge.
 
 **Fixture**: `tests/fixtures/claude/fake-channel-client.mjs` and `tests/mcp/lane-mcp-stdio.test.ts`.
 
@@ -59,7 +59,7 @@ sequenceDiagram
     participant C as Fake Claude client
     B->>S: ID-only wake over authenticated WebSocket
     S->>C: notifications/claude/channel
-    C-->>S: Transport acceptance
+    C-->>S: Transport acceptance only
     S-->>B: started_new_turn or queued_next_turn
 ```
 
@@ -67,10 +67,11 @@ sequenceDiagram
 
 1. Run `npm run build`.
 2. Run `npm test -- --run tests/mcp/lane-mcp-stdio.test.ts tests/mcp/lane-mcp-server.test.ts tests/adapters/claude`.
-3. Confirm the child joins with its binding credential, the server rejects caller-supplied identity fields, and every notification contains only ordered delivery and message IDs plus lane, sequence, and kind.
-4. Confirm duplicate IDs are suppressed, including overlap between a completed notification and a later batch.
+3. Confirm the child joins with its binding credential and connection epoch, the readiness wake requires `lane_whoami`, and only an authenticated current-epoch `Stop` hook makes the lane idle.
+4. Confirm the server rejects caller-supplied identity fields and stale epochs, and every delivery notification contains only ordered delivery and message IDs plus lane, sequence, and kind.
+5. Confirm duplicate IDs are suppressed, including concurrent overlap and overlap between a completed notification and a later batch.
 
-**Expected**: The MCP server advertises `claude/channel` and exactly eight strict tools. The broker revalidates binding generation, duplicate current connections fail, stale credentials fail, and disconnects return `stored_pending`. Notification bodies never contain mailbox message text.
+**Expected**: The MCP server advertises `claude/channel` and exactly eight strict tools. A transport-only connection remains degraded; readiness begins busy; `Stop` reports idle; wake marks busy before transport acceptance. The broker revalidates binding generation and connection epoch, duplicate current connections fail, stale credentials fail, and disconnects return `stored_pending`. Notification bodies and lifecycle reports never contain mailbox or prompt text.
 
 **Last verified**: 2026-08-07. The deterministic process fixture, focused adapter/MCP tests, TypeScript check, and build passed on the Milestone 5 working tree.
 
@@ -82,7 +83,7 @@ sequenceDiagram
 
 **Steps**:
 
-1. Set `CLAUDE_EXE`, `CLAUDE_VERSION`, and `CLAUDE_SETTINGS_FILE` for the installed home harness.
+1. From a clean committed revision, set `EXPECTED_RUNTIME_SHA`, `CLAUDE_EXE`, `CLAUDE_VERSION`, `CLAUDE_SETTINGS_FILE`, `CLAUDE_APPROVAL_STATE_FILE`, and `CLAUDE_APPROVED_PROJECT` for the installed home harness and pre-approved disposable project.
 2. Run `npm run build` and then `node tests/fixtures/claude/real-channel-smoke.mjs`.
 3. Accept only a sanitized `stage: complete` result. A preview confirmation, organization-policy block, missing Channel capability, missing model acknowledgment, or cleanup error is a failed run.
 

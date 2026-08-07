@@ -77,7 +77,7 @@ test("lane MCP refuses a stale fixed generation before exposing tools", async ()
   await server.close();
 });
 
-test("lane MCP advertises Channel capability, forwards wakes, and tracks disconnect", async () => {
+test("lane MCP advertises Channel capability without treating ack as platform turn completion", async () => {
   const x = broker();
   const channel = new ChannelBridge();
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -87,10 +87,14 @@ test("lane MCP advertises Channel capability, forwards wakes, and tracks disconn
   client.setNotificationHandler(z.object({ method: z.literal("notifications/claude/channel"), params: z.object({ content: z.string(), meta: z.record(z.string(), z.unknown()) }) }), async (notification) => { notifications.push(notification); });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   expect(client.getServerCapabilities()?.experimental).toEqual({ "claude/channel": {} });
-  expect(await channel.wake({ deliveryId: "d", messageId: "m", targetLaneId: "p/a", sequence: 1, kind: "normal", bindingGeneration: 4 })).toBe("started_new_turn");
   await vi.waitFor(() => expect(notifications).toHaveLength(1));
+  expect(channel.getRuntimeState()).toEqual({ availability: "degraded", turn: "unknown" });
+  await client.callTool({ name: "lane_whoami", arguments: {} });
+  await vi.waitFor(() => expect(channel.getRuntimeState()).toEqual({ availability: "online", turn: "busy" }));
+  expect(await channel.wake({ deliveryId: "d", messageId: "m", targetLaneId: "p/a", sequence: 1, kind: "normal", bindingGeneration: 4 })).toBe("queued_next_turn");
+  await vi.waitFor(() => expect(notifications).toHaveLength(2));
   await client.callTool({ name: "lane_message_ack", arguments: { operation_id: "ack", delivery_id: "d", claim_id: "c", outcome: { kind: "rejected", reason: "fixture" } } });
-  expect(channel.getRuntimeState()).toEqual({ availability: "online", turn: "idle" });
+  expect(channel.getRuntimeState()).toEqual({ availability: "online", turn: "busy" });
   await client.close();
   await vi.waitFor(() => expect(channel.getRuntimeState()).toEqual({ availability: "offline", turn: "unknown" }));
   await server.close();

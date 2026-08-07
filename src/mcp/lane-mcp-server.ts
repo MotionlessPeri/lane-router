@@ -20,10 +20,13 @@ export class LaneMcpServer {
   constructor(private readonly options: { broker: LaneBrokerClient; identity: LaneMcpIdentity; channel?: ChannelBridge; onClose?: () => void | Promise<void> }) {
     this.protocol = new Server(
       { name: "lane-router", version: "0.1.0" },
-      { capabilities: { tools: {}, experimental: { "claude/channel": {} } }, instructions: "For every Lane Router Channel wake, fetch each message ID with lane_message_get, claim its delivery before acting, and acknowledge the claim with the actual outcome when work finishes." },
+      { capabilities: { tools: {}, experimental: { "claude/channel": {} } }, instructions: "When a Lane Router readiness notification arrives, call lane_whoami once. For every delivery wake, fetch each message ID with lane_message_get, claim its delivery before acting, and acknowledge the claim with the actual outcome when work finishes." },
     );
     this.channelSink = { notification: (value) => this.protocol.notification(value as never) };
-    this.protocol.oninitialized = () => this.options.channel?.attach(this.channelSink);
+    this.protocol.oninitialized = () => {
+      this.options.channel?.attach(this.channelSink);
+      void this.options.channel?.beginReadinessProbe();
+    };
     this.protocol.onclose = () => { this.options.channel?.detach(this.channelSink); this.connected = false; void Promise.resolve(this.options.onClose?.()).catch(() => undefined); };
     this.protocol.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...LANE_MCP_TOOLS] }));
     this.protocol.setRequestHandler(CallToolRequestSchema, async (request) => this.callTool(request.params.name, request.params.arguments));
@@ -49,7 +52,7 @@ export class LaneMcpServer {
     try {
       const args = parseLaneToolArguments(tool, input ?? {});
       const result = await dispatch(this.options.broker, tool, args);
-      if (tool === "lane_message_ack") this.options.channel?.setBusy(false);
+      if (tool === "lane_whoami") this.options.channel?.confirmReadiness();
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
     } catch (error) {
       return toolError(error instanceof Error ? error.message : "Lane Router tool call failed");
@@ -63,6 +66,7 @@ export interface LaneMcpStdioEnvironment {
   readonly url: string;
   readonly discoveryToken: string;
   readonly credential: string;
+  readonly connectionEpoch: string;
   readonly identity: LaneMcpIdentity;
 }
 
@@ -71,16 +75,17 @@ export function parseLaneMcpStdioEnvironment(env: NodeJS.ProcessEnv): LaneMcpStd
   const credential = requiredEnvironment(env, "LANE_ROUTER_BINDING_CREDENTIAL");
   const bindingId = requiredEnvironment(env, "LANE_ROUTER_BINDING_ID");
   const generationText = requiredEnvironment(env, "LANE_ROUTER_BINDING_GENERATION");
+  const connectionEpoch = requiredEnvironment(env, "LANE_ROUTER_CLAUDE_CONNECTION_EPOCH");
   const generation = Number(generationText);
   if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("LANE_ROUTER_BINDING_GENERATION must be a positive integer");
-  return { url, discoveryToken: env.LANE_ROUTER_DISCOVERY_TOKEN ?? "", credential, identity: { bindingId, generation } };
+  return { url, discoveryToken: env.LANE_ROUTER_DISCOVERY_TOKEN ?? "", credential, connectionEpoch, identity: { bindingId, generation } };
 }
 
 export async function runLaneMcpStdio(env: NodeJS.ProcessEnv = process.env): Promise<{ close(): Promise<void> }> {
   const config = parseLaneMcpStdioEnvironment(env);
   const broker = new BrokerClient(config.url, config.discoveryToken, config.credential);
-  const channel = new ChannelBridge();
-  const bridge = new ClaudeChannelBridgeClient({ url: config.url, credential: config.credential, channel });
+  const channel = new ChannelBridge({ requireReadinessProbe: true });
+  const bridge = new ClaudeChannelBridgeClient({ url: config.url, credential: config.credential, connectionEpoch: config.connectionEpoch, channel });
   let closing: Promise<void> | undefined;
   const server = createLaneMcpServer({ broker, identity: config.identity, channel, onClose: () => close() });
   const close = (): Promise<void> => closing ??= (async () => {

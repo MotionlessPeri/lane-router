@@ -167,6 +167,8 @@ export class Scheduler {
           const durableTurn = candidates.some(
             (row) => row.state === "notified" || row.state === "claimed",
           );
+          if (runtime.turn === "idle" && !durableTurn)
+            this.busy.delete(laneId);
           const ended =
             runtime.turn === "idle" &&
             candidates.find(
