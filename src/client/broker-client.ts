@@ -1,15 +1,25 @@
-import type { BootstrapEnvelope } from "../broker/broker-service.js";
-import type { AckOutcome, Delivery } from "../core/model.js";
-import type { CurrentBinding } from "../storage/repositories.js";
-import type { BrokerEvent } from "../broker/events.js";
-import type { RpcMethod } from "../server/rpc-schema.js";
+import type { ProjectManifest } from "../broker/broker-service.js";
+import type { AckOutcome } from "../core/model.js";
+import type { JsonValue } from "../core/json.js";
+import { z } from "zod";
+import {
+  adminSessionSchema,
+  brokerEventSchema,
+  brokerStatusSchema,
+  healthSchema,
+  rpcResultSchemas,
+  type BrokerEventResponse,
+  type BrokerStatus,
+  type RpcMethod,
+  type RpcResultMap,
+} from "../server/rpc-schema.js";
 
 type Operation = { operationId: string };
 export interface RpcRequestMap {
   syncProject: Operation & {
     workspaceId: string;
     rootPath: string;
-    manifest: unknown;
+    manifest: ProjectManifest;
   };
   previewRelink: {
     workspaceId: string;
@@ -37,7 +47,7 @@ export interface RpcRequestMap {
     target: string;
     kind: "normal" | "correction";
     body: string;
-    metadata: unknown;
+    metadata: JsonValue;
     replyTo?: string | null;
   };
   claim: Operation & { deliveryId: string; claimId?: string };
@@ -47,47 +57,6 @@ export interface RpcRequestMap {
   inbox: Record<string, never>;
   message: { messageId: string };
 }
-export interface RpcResultMap {
-  syncProject: {
-    projectId: string;
-    workspaceId: string;
-    laneAddresses: string[];
-  };
-  previewRelink: {
-    workspaceId: string;
-    oldRootPath: string;
-    newRootPath: string;
-    affectedBindings: string[];
-    digest: string;
-  };
-  relinkWorkspace: {
-    workspaceId: string;
-    rootPath: string;
-    affectedBindings: string[];
-  };
-  bind: {
-    binding: CurrentBinding;
-    bootstrap: BootstrapEnvelope;
-    bindingCredential: string;
-  };
-  unbind: CurrentBinding;
-  rebuild: RpcResultMap["bind"];
-  rotate: RpcResultMap["bind"];
-  unpark: Delivery;
-  send: { messageId: string; deliveryId: string; sequence: number };
-  claim: { claimId: string; deadline: number };
-  ack: Delivery;
-  park: Delivery;
-  whoami: {
-    bindingId: string;
-    generation: number;
-    laneAddress: string;
-    adapter: "claude" | "codex";
-  };
-  inbox: unknown[];
-  message: unknown;
-}
-
 const ADMIN_METHODS = new Set<RpcMethod>([
   "syncProject",
   "previewRelink",
@@ -127,25 +96,28 @@ export class BrokerClient {
       ? `Session ${this.credential}`
       : this.ensureAdminAuthorization();
   }
-  health(): Promise<{ status: string }> {
+  health(): Promise<z.infer<typeof healthSchema>> {
     return this.request(
       "/v1/health",
       { method: "GET" },
       `Bearer ${this.discoveryToken}`,
+      healthSchema,
     );
   }
-  async status(): Promise<unknown> {
+  async status(): Promise<BrokerStatus> {
     return this.request(
       "/v1/status",
       { method: "GET" },
       await this.ensureAdminAuthorization(),
+      brokerStatusSchema,
     );
   }
-  async events(after = 0): Promise<BrokerEvent[]> {
+  async events(after = 0): Promise<BrokerEventResponse[]> {
     return this.request(
       `/v1/events?after=${after}`,
       { method: "GET" },
       await this.ensureAdminAuthorization(),
+      z.array(brokerEventSchema),
     );
   }
   async call<K extends RpcMethod>(
@@ -159,14 +131,16 @@ export class BrokerClient {
       "/v1/rpc",
       { method: "POST", body: JSON.stringify({ method, params }) },
       authorization,
+      rpcResultSchemas[method] as unknown as z.ZodType<RpcResultMap[K]>,
     );
   }
   private async ensureAdminAuthorization(): Promise<string> {
     if (!this.credential) {
-      const result = await this.request<{ credential: string }>(
+      const result = await this.request(
         "/v1/session/admin",
         { method: "POST" },
         `Bearer ${this.discoveryToken}`,
+        adminSessionSchema,
       );
       this.credential = result.credential;
     }
@@ -184,6 +158,7 @@ export class BrokerClient {
     path: string,
     init: RequestInit,
     authorization: string,
+    schema: z.ZodType<T>,
   ): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...init,
@@ -204,6 +179,13 @@ export class BrokerClient {
         envelope.error.message,
         envelope.error.details,
       );
-    return envelope.data;
+    const parsed = schema.safeParse(envelope.data);
+    if (!parsed.success)
+      throw new BrokerClientError(
+        "INVALID_RESPONSE",
+        "Broker response validation failed",
+        parsed.error.issues,
+      );
+    return parsed.data;
   }
 }

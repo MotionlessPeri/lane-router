@@ -6,7 +6,11 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { openDatabase } from "../../src/storage/database.js";
-import { MIGRATION_V1_SQL, MIGRATION_V2_SQL } from "../../src/storage/migrations.js";
+import {
+  LATEST_MIGRATION_VERSION,
+  MIGRATION_V1_SQL,
+  MIGRATION_V2_SQL,
+} from "../../src/storage/migrations.js";
 import { StorageRepositories } from "../../src/storage/repositories.js";
 import { seedStorage } from "../fixtures/storage/seed.js";
 
@@ -43,7 +47,9 @@ describe("SQLite schema", () => {
 
     const upgraded = openDatabase(path);
     try {
-      expect(upgraded.pragma("user_version", { simple: true })).toBe(3);
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(
+        LATEST_MIGRATION_VERSION,
+      );
       expect(upgraded.prepare(`
         SELECT state, state_changed_at, state_reason FROM binding WHERE id = 'binding-legacy'
       `).get()).toEqual({ state: "bound", state_changed_at: null, state_reason: null });
@@ -171,12 +177,79 @@ describe("SQLite schema", () => {
 
     const upgraded = openDatabase(path);
     try {
-      expect(upgraded.pragma("user_version", { simple: true })).toBe(3);
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(
+        LATEST_MIGRATION_VERSION,
+      );
       expect(upgraded.prepare(`
         SELECT name FROM sqlite_master WHERE type='trigger' AND name='ack_insert_must_match_claim_and_payload'
       `).get()).toEqual({ name: "ack_insert_must_match_claim_and_payload" });
     } finally {
       upgraded.close();
+    }
+  });
+
+  it("upgrades migration v3 with durable manifest ownership backfill", () => {
+    const path = temporaryDatabasePath();
+    const v3 = openDatabase(path);
+    seedStorage(v3);
+    v3.exec(`
+      DROP TABLE project_declaration;
+      DROP TABLE workspace_manifest;
+      PRAGMA user_version = 3;
+    `);
+    v3.close();
+
+    const upgraded = openDatabase(path);
+    try {
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(4);
+      expect(
+        upgraded
+          .prepare(
+            "SELECT project_id,owner_workspace_id FROM project_declaration",
+          )
+          .get(),
+      ).toEqual({ project_id: "project-1", owner_workspace_id: "workspace-1" });
+      expect(
+        upgraded
+          .prepare(
+            "SELECT workspace_id,manifest_identity,LENGTH(declaration_digest) AS digest_length FROM workspace_manifest",
+          )
+          .get(),
+      ).toEqual({
+        workspace_id: "workspace-1",
+        manifest_identity: "manifest-1",
+        digest_length: 64,
+      });
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("rolls back v4 when a v3 project declaration has no workspace owner", () => {
+    const path = temporaryDatabasePath();
+    const dirty = openDatabase(path);
+    dirty.exec(`
+      DROP TABLE project_declaration;
+      DROP TABLE workspace_manifest;
+      INSERT INTO project VALUES ('orphan', 'orphan', 'Orphan', 'hash', 1, 1);
+      INSERT INTO lane VALUES ('orphan/a', 'orphan', 'a', 'a.md', 1);
+      PRAGMA user_version = 3;
+    `);
+    dirty.close();
+
+    expect(() => openDatabase(path)).toThrow(/no workspace owner/i);
+    const repair = new Database(path);
+    try {
+      expect(repair.pragma("user_version", { simple: true })).toBe(3);
+      expect(
+        repair
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='project_declaration'",
+          )
+          .get(),
+      ).toBeUndefined();
+    } finally {
+      repair.close();
     }
   });
 
@@ -221,7 +294,9 @@ describe("SQLite schema", () => {
 
       const upgraded = openDatabase(path);
       try {
-        expect(upgraded.pragma("user_version", { simple: true })).toBe(3);
+        expect(upgraded.pragma("user_version", { simple: true })).toBe(
+          LATEST_MIGRATION_VERSION,
+        );
         expect(upgraded.prepare("SELECT generation, lease_deadline_at FROM claim WHERE id='claim-1'").get()).toEqual({
           generation: 1, lease_deadline_at: 100,
         });
@@ -231,13 +306,15 @@ describe("SQLite schema", () => {
     },
   );
 
-  it("creates the durable broker model at migration v3 with foreign keys and WAL", () => {
+  it("creates the durable broker model with manifest ownership and WAL", () => {
     const path = temporaryDatabasePath();
     const connection = openDatabase(path);
 
     expect(connection.pragma("foreign_keys", { simple: true })).toBe(1);
     expect(connection.pragma("journal_mode", { simple: true })).toBe("wal");
-    expect(connection.pragma("user_version", { simple: true })).toBe(3);
+    expect(connection.pragma("user_version", { simple: true })).toBe(
+      LATEST_MIGRATION_VERSION,
+    );
 
     const tables = connection
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -255,7 +332,14 @@ describe("SQLite schema", () => {
       "ack",
       "operation",
       "event",
+      "workspace_manifest",
+      "project_declaration",
     ]));
+    expect(
+      connection
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workspace_manifest'")
+        .get(),
+    ).toEqual({ name: "workspace_manifest" });
 
     const persisted = new Database(path);
     try {

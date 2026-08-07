@@ -1,5 +1,6 @@
 import type { RouterDatabase } from "../storage/database.js";
 import { canonicalJson } from "../storage/operation-store.js";
+import type { JsonValue } from "../core/json.js";
 
 export interface BrokerEvent {
   readonly id: number;
@@ -8,7 +9,7 @@ export interface BrokerEvent {
   readonly deliveryId: string | null;
   readonly claimId: string | null;
   readonly occurredAt: number;
-  readonly details: unknown;
+  readonly details: JsonValue;
 }
 
 export function appendEvent(
@@ -55,6 +56,6 @@ export function listEvents(
     deliveryId: row.delivery_id as string | null,
     claimId: row.claim_id as string | null,
     occurredAt: row.occurred_at as number,
-    details: JSON.parse(row.details_json as string) as unknown,
+    details: JSON.parse(row.details_json as string) as JsonValue,
   }));
 }

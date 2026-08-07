@@ -1,14 +1,34 @@
 import type { BrokerService, BindingActor } from "../broker/broker-service.js";
 import type { AckOutcome } from "../core/model.js";
 import type { LaneToolName, ToolBindingContext } from "./tool-contract.js";
+import type {
+  BrokerStatus,
+  RpcResultMap,
+} from "../server/rpc-schema.js";
+
+export interface ToolResultMap {
+  lane_whoami: RpcResultMap["whoami"];
+  lane_status: BrokerStatus;
+  lane_send: RpcResultMap["send"];
+  lane_inbox_list: RpcResultMap["inbox"];
+  lane_message_get: RpcResultMap["message"];
+  lane_message_claim: RpcResultMap["claim"];
+  lane_message_ack: RpcResultMap["ack"];
+  lane_message_park: RpcResultMap["park"];
+}
 
 export class ToolService {
   constructor(private readonly broker: BrokerService) {}
+  call<K extends LaneToolName>(
+    name: K,
+    args: Record<string, unknown>,
+    context: ToolBindingContext,
+  ): ToolResultMap[K];
   call(
     name: LaneToolName,
     args: Record<string, unknown>,
     context: ToolBindingContext,
-  ): unknown {
+  ): ToolResultMap[LaneToolName] {
     const actor: BindingActor = {
       bindingId: context.bindingId,
       generation: context.generation,

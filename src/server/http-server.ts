@@ -19,6 +19,7 @@ import { attachEventWebSocket } from "./ws-events.js";
 import {
   adminMethods,
   rpcResultSchemas,
+  serviceRpcResultSchemas,
   rpcSchemas,
   type RpcMethod,
 } from "./rpc-schema.js";
@@ -115,10 +116,12 @@ async function handle(
         "Actor session credential is missing or invalid",
       );
     if (request.method === "GET" && url.pathname === "/v1/status") {
+      requireCurrentReadActor(options.service, session);
       reply(response, 200, { ok: true, data: options.service.status() });
       return;
     }
     if (request.method === "GET" && url.pathname === "/v1/events") {
+      requireCurrentReadActor(options.service, session);
       reply(response, 200, {
         ok: true,
         data: options.service.events(
@@ -154,6 +157,8 @@ async function handle(
       unknown
     >;
     assertActorKind(rpcMethod, session);
+    if (["whoami", "inbox", "message"].includes(rpcMethod))
+      requireCurrentReadActor(options.service, session);
     const input = adminMethods.has(rpcMethod)
       ? { ...parsed, adminId: session.id }
       : {
@@ -185,7 +190,7 @@ async function handle(
               parsed.messageId as string,
             )
           : await method.call(options.service, input as never);
-    data = rpcResultSchemas[rpcMethod].parse(data);
+    data = serviceRpcResultSchemas[rpcMethod].parse(data);
     if (["bind", "rebuild", "rotate"].includes(rpcMethod)) {
       const binding = (data as { binding: { id: string; generation: number } })
         .binding;
@@ -197,6 +202,7 @@ async function handle(
         ),
       };
     }
+    data = rpcResultSchemas[rpcMethod].parse(data);
     reply(response, 200, { ok: true, data });
   } catch (error) {
     const mapped = mapError(error);
@@ -222,6 +228,20 @@ function assertActorKind(method: RpcMethod, session: ActorSession): void {
   const required = adminMethods.has(method) ? "admin" : "binding";
   if (session.kind !== required)
     throw typed("FORBIDDEN", `${method} requires a ${required} actor session`);
+}
+function requireCurrentReadActor(
+  service: BrokerService,
+  session: ActorSession,
+): void {
+  if (session.kind === "admin") return;
+  try {
+    service.whoami({ bindingId: session.id, generation: session.generation });
+  } catch {
+    throw typed(
+      "UNAUTHORIZED",
+      "Read access requires the current bound binding generation",
+    );
+  }
 }
 function readJson(request: IncomingMessage, limit: number): Promise<unknown> {
   return new Promise((resolve, reject) => {

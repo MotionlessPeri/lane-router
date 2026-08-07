@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { declarationDigest } from "../core/manifest.js";
 
 export const MIGRATION_V1_SQL = `
 CREATE TABLE project (
@@ -226,7 +227,7 @@ const SAFE_INTEGER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   event: ["occurred_at"],
 };
 
-const MIGRATION_V3 = `
+export const MIGRATION_V3_SQL = `
 CREATE TRIGGER binding_workspace_must_match_lane_project
 BEFORE INSERT ON binding
 WHEN (SELECT project_id FROM workspace WHERE id = NEW.workspace_id)
@@ -291,7 +292,37 @@ END;
 ${safeIntegerTriggerSql()}
 `;
 
-export const LATEST_MIGRATION_VERSION = 3;
+export const MIGRATION_V4_SQL = `
+CREATE TABLE workspace_manifest (
+  workspace_id TEXT PRIMARY KEY REFERENCES workspace(id) ON DELETE RESTRICT,
+  manifest_identity TEXT NOT NULL,
+  declaration_digest TEXT NOT NULL
+);
+
+CREATE TABLE project_declaration (
+  project_id TEXT PRIMARY KEY REFERENCES project(id) ON DELETE RESTRICT,
+  owner_workspace_id TEXT NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+  declaration_digest TEXT NOT NULL
+);
+
+CREATE TRIGGER project_declaration_owner_must_match_project
+BEFORE INSERT ON project_declaration
+WHEN (SELECT project_id FROM workspace WHERE id=NEW.owner_workspace_id)
+  IS NOT NEW.project_id
+BEGIN
+  SELECT RAISE(ABORT, 'declaration owner workspace must belong to project');
+END;
+
+CREATE TRIGGER project_declaration_update_owner_must_match_project
+BEFORE UPDATE ON project_declaration
+WHEN (SELECT project_id FROM workspace WHERE id=NEW.owner_workspace_id)
+  IS NOT NEW.project_id
+BEGIN
+  SELECT RAISE(ABORT, 'declaration owner workspace must belong to project');
+END;
+`;
+
+export const LATEST_MIGRATION_VERSION = 4;
 
 export class DatabaseIntegrityError extends Error {
   constructor(message: string) {
@@ -324,11 +355,71 @@ export function migrateDatabase(database: Database.Database): void {
     if (versionAfterV2 === 2) {
       assertV2Integrity(database);
       database.transaction(() => {
-        database.exec(MIGRATION_V3);
+        database.exec(MIGRATION_V3_SQL);
         database.pragma("user_version = 3");
       })();
     }
+    const versionAfterV3 = database.pragma("user_version", { simple: true }) as number;
+    if (versionAfterV3 === 3) {
+      assertV3Integrity(database);
+      database.transaction(() => {
+        database.exec(MIGRATION_V4_SQL);
+        backfillManifestOwnership(database);
+        database.pragma("user_version = 4");
+      })();
+    }
   })();
+}
+
+function assertV3Integrity(database: Database.Database): void {
+  assertSafeIntegerIntegrity(database);
+  const orphaned = database.prepare(`
+    SELECT p.id FROM project p
+    WHERE EXISTS (SELECT 1 FROM lane l WHERE l.project_id=p.id)
+      AND NOT EXISTS (SELECT 1 FROM workspace w WHERE w.project_id=p.id)
+    LIMIT 1
+  `).get() as { id: string } | undefined;
+  if (orphaned)
+    throw new DatabaseIntegrityError(
+      `Project ${orphaned.id} has declarations but no workspace owner`,
+    );
+}
+
+function backfillManifestOwnership(database: Database.Database): void {
+  const projects = database.prepare(
+    "SELECT id,manifest_identity FROM project ORDER BY id",
+  ).all() as Array<{ id: string; manifest_identity: string }>;
+  for (const project of projects) {
+    const lanes = database.prepare(`
+      SELECT name,role_document,communication_entry
+      FROM lane WHERE project_id=? ORDER BY name
+    `).all(project.id) as Array<{
+      name: string;
+      role_document: string;
+      communication_entry: number;
+    }>;
+    const digest = declarationDigest(
+      lanes.map((lane) => ({
+        name: lane.name,
+        roleFile: lane.role_document,
+        communicationEntry: lane.communication_entry === 1,
+      })),
+    );
+    const workspaces = database.prepare(`
+      SELECT id FROM workspace WHERE project_id=? ORDER BY created_at,id
+    `).all(project.id) as Array<{ id: string }>;
+    for (const workspace of workspaces)
+      database.prepare(`
+        INSERT INTO workspace_manifest(workspace_id,manifest_identity,declaration_digest)
+        VALUES(?,?,?)
+      `).run(workspace.id, project.manifest_identity, digest);
+    const owner = workspaces[0];
+    if (owner)
+      database.prepare(`
+        INSERT INTO project_declaration(project_id,owner_workspace_id,declaration_digest)
+        VALUES(?,?,?)
+      `).run(project.id, owner.id, digest);
+  }
 }
 
 function safeIntegerTriggerSql(): string {

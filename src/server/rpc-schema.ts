@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const text = z.string().trim().min(1);
+const safeInteger = z.number().int().safe();
 const safePositive = z.number().int().safe().positive();
 const operation = { operationId: text };
 const identityFields = {
@@ -168,23 +169,124 @@ const binding = z
     state: z.enum(["bound", "unbound"]),
   })
   .strict();
-const delivery = z
+const deliveryIdentity = {
+  id: text,
+  targetLaneId: text,
+  sequence: safePositive,
+  kind: z.enum(["normal", "correction"]),
+  failureCount: z.number().int().safe().nonnegative(),
+};
+const delivery = z.discriminatedUnion("status", [
+  z
+    .object({
+      ...deliveryIdentity,
+      status: z.literal("pending"),
+      nextAttemptAt: safeInteger.nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      ...deliveryIdentity,
+      status: z.literal("notified"),
+      notificationKind: z.enum(["claim", "queue"]),
+      deadlineAt: safeInteger,
+      adapterResult: z.enum([
+        "started_new_turn",
+        "applied_current_turn",
+        "queued_next_turn",
+      ]),
+    })
+    .strict(),
+  z
+    .object({
+      ...deliveryIdentity,
+      status: z.literal("claimed"),
+      claimId: text,
+      bindingGeneration: safePositive,
+      leaseDeadlineAt: safeInteger,
+    })
+    .strict(),
+  z
+    .object({
+      ...deliveryIdentity,
+      status: z.literal("acknowledged"),
+      claimId: text,
+      bindingGeneration: safePositive,
+      outcome,
+      acknowledgedAt: safeInteger,
+    })
+    .strict(),
+  z
+    .object({
+      ...deliveryIdentity,
+      status: z.literal("parked"),
+      reason: text,
+    })
+    .strict(),
+]);
+const bootstrap = z
   .object({
-    id: text,
-    targetLaneId: text,
+    laneAddress: text,
+    generation: safePositive,
+    roleFile: text,
+    projectDocuments: z.array(text),
+    pending: z.array(
+      z
+        .object({
+          messageId: text,
+          sequence: safePositive,
+          kind: z.enum(["normal", "correction"]),
+        })
+        .strict(),
+    ),
+    previousBindingId: text.nullable(),
+    reason: text,
+  })
+  .strict();
+const bindResult = z.object({ binding, bootstrap }).strict();
+
+export const brokerStatusSchema = z
+  .object({
+    projects: z.object({ count: z.number().int().safe().nonnegative() }).strict(),
+    lanes: z.object({ count: z.number().int().safe().nonnegative() }).strict(),
+    pending: z.object({ count: z.number().int().safe().nonnegative() }).strict(),
+  })
+  .strict();
+export const brokerEventSchema = z
+  .object({
+    id: safePositive,
+    type: text,
+    bindingId: text.nullable(),
+    deliveryId: text.nullable(),
+    claimId: text.nullable(),
+    occurredAt: safeInteger,
+    details: z.json(),
+  })
+  .strict();
+export const inboxEntrySchema = z
+  .object({
+    deliveryId: text,
+    messageId: text,
     sequence: safePositive,
     kind: z.enum(["normal", "correction"]),
-    failureCount: z.number().int().safe().nonnegative(),
-    status: z.enum([
-      "pending",
-      "notified",
-      "claimed",
-      "acknowledged",
-      "parked",
-    ]),
+    createdAt: safeInteger,
+    status: z.enum(["pending", "notified", "claimed"]),
   })
-  .passthrough();
-export const rpcResultSchemas: Record<RpcMethod, z.ZodType> = {
+  .strict();
+export const messageViewSchema = z
+  .object({
+    id: text,
+    kind: z.enum(["normal", "correction"]),
+    body: z.string(),
+    metadata: z.json(),
+    replyTo: text.nullable(),
+    createdAt: safeInteger,
+  })
+  .strict();
+export const healthSchema = z.object({ status: z.literal("ok") }).strict();
+export const adminSessionSchema = z.object({ credential: text }).strict();
+
+export const serviceRpcResultSchemas = {
   syncProject: z
     .object({
       projectId: text,
@@ -208,31 +310,10 @@ export const rpcResultSchemas: Record<RpcMethod, z.ZodType> = {
       affectedBindings: z.array(text),
     })
     .strict(),
-  bind: z
-    .object({
-      binding,
-      bootstrap: z
-        .object({ laneAddress: text, generation: safePositive })
-        .passthrough(),
-    })
-    .strict(),
+  bind: bindResult,
   unbind: binding,
-  rebuild: z
-    .object({
-      binding,
-      bootstrap: z
-        .object({ laneAddress: text, generation: safePositive })
-        .passthrough(),
-    })
-    .strict(),
-  rotate: z
-    .object({
-      binding,
-      bootstrap: z
-        .object({ laneAddress: text, generation: safePositive })
-        .passthrough(),
-    })
-    .strict(),
+  rebuild: bindResult,
+  rotate: bindResult,
   unpark: delivery,
   send: z
     .object({ messageId: text, deliveryId: text, sequence: safePositive })
@@ -241,8 +322,28 @@ export const rpcResultSchemas: Record<RpcMethod, z.ZodType> = {
   ack: delivery,
   park: delivery,
   whoami: z
-    .object({ bindingId: text, generation: safePositive, laneAddress: text })
-    .passthrough(),
-  inbox: z.array(z.unknown()),
-  message: z.unknown(),
+    .object({
+      bindingId: text,
+      generation: safePositive,
+      laneAddress: text,
+      adapter: z.enum(["claude", "codex"]),
+    })
+    .strict(),
+  inbox: z.array(inboxEntrySchema),
+  message: messageViewSchema,
+} satisfies Record<RpcMethod, z.ZodType>;
+
+export const rpcResultSchemas = {
+  ...serviceRpcResultSchemas,
+  bind: bindResult.extend({ bindingCredential: text }),
+  rebuild: bindResult.extend({ bindingCredential: text }),
+  rotate: bindResult.extend({ bindingCredential: text }),
+} satisfies Record<RpcMethod, z.ZodType>;
+
+export type BrokerStatus = z.infer<typeof brokerStatusSchema>;
+export type BrokerEventResponse = z.infer<typeof brokerEventSchema>;
+export type InboxEntry = z.infer<typeof inboxEntrySchema>;
+export type MessageView = z.infer<typeof messageViewSchema>;
+export type RpcResultMap = {
+  [K in RpcMethod]: z.infer<(typeof rpcResultSchemas)[K]>;
 };

@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "vitest";
 import { createConnection } from "node:net";
+import WebSocket from "ws";
 import { BrokerClient } from "../../src/client/broker-client.js";
 import {
   BrokerService,
@@ -13,6 +14,7 @@ import {
   startBrokerHttpServer,
   type RunningBrokerServer,
 } from "../../src/server/http-server.js";
+import { issueActorCredential } from "../../src/server/auth.js";
 
 const servers: RunningBrokerServer[] = [];
 const databases: RouterDatabase[] = [];
@@ -71,7 +73,7 @@ async function setup() {
     port: 0,
   });
   servers.push(server);
-  return { server };
+  return { server, service };
 }
 
 async function rawRpc(url: string, params: unknown) {
@@ -188,4 +190,120 @@ test("shutdown closes a partial POST within a bounded timeout", async () => {
     ]),
   ).resolves.toBe("closed");
   servers.splice(servers.indexOf(server), 1);
+});
+
+test("historical sessions can only exact-replay mutations, never read or open WebSockets", async () => {
+  const { server, service } = await setup();
+  const historicalCredential = issueActorCredential(
+    { kind: "binding", id: "ba", generation: 1 },
+    "session-secret",
+  );
+  const historicalAuthorization = `Session ${historicalCredential}`;
+  const sendBody = {
+    method: "send",
+    params: {
+      operationId: "historical-send",
+      target: "p/b",
+      kind: "normal",
+      body: "persisted",
+      metadata: {},
+    },
+  };
+  const first = await fetch(`${server.url}/v1/rpc`, {
+    method: "POST",
+    headers: {
+      authorization: historicalAuthorization,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(sendBody),
+  });
+  expect(first.status).toBe(200);
+  const firstEnvelope = (await first.json()) as {
+    data: { messageId: string };
+  };
+
+  service.unbind({
+    operationId: "unbind-a",
+    adminId: "trusted",
+    laneAddress: "p/a",
+    reason: "rotate",
+  });
+  service.rebuild({
+    operationId: "rebuild-a",
+    adminId: "trusted",
+    bindingId: "ba2",
+    laneAddress: "p/a",
+    workspaceId: "w",
+    adapter: "codex",
+    conversationId: "a2",
+    reason: "rotate",
+  });
+
+  const replay = await fetch(`${server.url}/v1/rpc`, {
+    method: "POST",
+    headers: {
+      authorization: historicalAuthorization,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(sendBody),
+  });
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toEqual(firstEnvelope);
+
+  const newEffect = await fetch(`${server.url}/v1/rpc`, {
+    method: "POST",
+    headers: {
+      authorization: historicalAuthorization,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      ...sendBody,
+      params: { ...sendBody.params, operationId: "historical-new-effect" },
+    }),
+  });
+  expect(newEffect.status).toBe(400);
+
+  for (const path of ["/v1/status", "/v1/events"]) {
+    const response = await fetch(`${server.url}${path}`, {
+      headers: { authorization: historicalAuthorization },
+    });
+    expect(response.status).toBe(401);
+  }
+  for (const method of ["whoami", "inbox"] as const) {
+    const response = await fetch(`${server.url}/v1/rpc`, {
+      method: "POST",
+      headers: {
+        authorization: historicalAuthorization,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ method, params: {} }),
+    });
+    expect(response.status).toBe(401);
+  }
+  const messageRead = await fetch(`${server.url}/v1/rpc`, {
+    method: "POST",
+    headers: {
+      authorization: historicalAuthorization,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      method: "message",
+      params: { messageId: firstEnvelope.data.messageId },
+    }),
+  });
+  expect(messageRead.status).toBe(401);
+
+  const socket = new WebSocket(
+    server.url.replace("http", "ws") + "/v1/events/ws",
+    { headers: { authorization: historicalAuthorization } },
+  );
+  await expect(
+    new Promise<number>((resolve, reject) => {
+      socket.once("unexpected-response", (_request, response) =>
+        resolve(response.statusCode ?? 0),
+      );
+      socket.once("open", () => reject(new Error("historical socket opened")));
+      socket.once("error", () => undefined);
+    }),
+  ).resolves.toBe(401);
 });

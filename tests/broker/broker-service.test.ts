@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import {
@@ -11,6 +14,7 @@ import {
 import { OperationConflictError } from "../../src/storage/operation-store.js";
 
 const databases: RouterDatabase[] = [];
+const temporaryDirectories: string[] = [];
 
 function createService(now = 100): BrokerService {
   const database = openDatabase(":memory:");
@@ -23,7 +27,12 @@ function createService(now = 100): BrokerService {
   });
 }
 
-afterEach(() => databases.splice(0).forEach((database) => database.close()));
+afterEach(() => {
+  databases.splice(0).forEach((database) => database.close());
+  temporaryDirectories.splice(0).forEach((directory) =>
+    rmSync(directory, { recursive: true, force: true, maxRetries: 3 }),
+  );
+});
 
 describe("runtime configuration", () => {
   test("validates locked defaults before storage is used", () => {
@@ -813,6 +822,146 @@ test("clone sync rejects conflicting lane declarations without mutation", () => 
         .get() as { role_document: string }
     ).role_document,
   ).toBe("a.md");
+});
+
+test("the declaration-owning workspace may update its lane roles", () => {
+  const service = createTwoLaneService();
+  expect(
+    service.syncProject({
+      operationId: "owner-update",
+      adminId: "admin",
+      workspaceId: "w",
+      rootPath: "C:/repo",
+      manifest: {
+        projectId: "p",
+        projectKey: "project",
+        displayName: "Project",
+        manifestHash: "h2",
+        manifestVersion: 2,
+        lanes: [
+          { name: "a", roleFile: "a-v2.md", communicationEntry: true },
+          { name: "b", roleFile: "b.md", communicationEntry: false },
+        ],
+      },
+    }),
+  ).toMatchObject({ workspaceId: "w" });
+  expect(
+    service.database
+      .prepare("SELECT role_document FROM lane WHERE id='p/a'")
+      .get(),
+  ).toEqual({ role_document: "a-v2.md" });
+});
+
+test("an identical clone is accepted without taking declaration ownership", () => {
+  const service = createTwoLaneService();
+  expect(
+    service.syncProject({
+      operationId: "identical-clone",
+      adminId: "admin",
+      workspaceId: "clone",
+      rootPath: "C:/clone",
+      manifest: {
+        projectId: "p",
+        projectKey: "project",
+        displayName: "Clone",
+        manifestHash: "clone-hash",
+        manifestVersion: 1,
+        lanes: [
+          { name: "a", roleFile: "a.md", communicationEntry: true },
+          { name: "b", roleFile: "b.md", communicationEntry: false },
+        ],
+      },
+    }),
+  ).toMatchObject({ workspaceId: "clone" });
+  expect(() =>
+    service.syncProject({
+      operationId: "clone-cannot-update",
+      adminId: "admin",
+      workspaceId: "clone",
+      rootPath: "C:/clone",
+      manifest: {
+        projectId: "p",
+        projectKey: "project",
+        displayName: "Clone",
+        manifestHash: "clone-v2",
+        manifestVersion: 2,
+        lanes: [
+          { name: "a", roleFile: "clone-change.md", communicationEntry: true },
+          { name: "b", roleFile: "b.md", communicationEntry: false },
+        ],
+      },
+    }),
+  ).toThrow(/declaration.*conflict/i);
+});
+
+test("a reopened database preserves which workspace may author declaration changes", () => {
+  const directory = mkdtempSync(join(tmpdir(), "lane-router-manifest-owner-"));
+  temporaryDirectories.push(directory);
+  const path = join(directory, "router.sqlite");
+  let database = openDatabase(path);
+  let service = new BrokerService(database, {
+    now: () => 100,
+    randomId: (prefix) => `${prefix}-id`,
+  });
+  const manifest = {
+    projectId: "p",
+    projectKey: "project",
+    displayName: "Project",
+    manifestHash: "h",
+    manifestVersion: 1,
+    lanes: [{ name: "a", roleFile: "a.md", communicationEntry: true }],
+  };
+  service.syncProject({
+    operationId: "disk-owner",
+    adminId: "admin",
+    workspaceId: "owner",
+    rootPath: "C:/owner",
+    manifest,
+  });
+  service.syncProject({
+    operationId: "disk-clone",
+    adminId: "admin",
+    workspaceId: "clone",
+    rootPath: "C:/clone",
+    manifest,
+  });
+  database.close();
+
+  database = openDatabase(path);
+  databases.push(database);
+  service = new BrokerService(database, { now: () => 200 });
+  expect(() =>
+    service.syncProject({
+      operationId: "disk-clone-change",
+      adminId: "admin",
+      workspaceId: "clone",
+      rootPath: "C:/clone",
+      manifest: {
+        ...manifest,
+        manifestHash: "clone-v2",
+        manifestVersion: 2,
+        lanes: [
+          { name: "a", roleFile: "clone-change.md", communicationEntry: true },
+        ],
+      },
+    }),
+  ).toThrow(/declaration.*conflict/i);
+  expect(
+    service.syncProject({
+      operationId: "disk-owner-change",
+      adminId: "admin",
+      workspaceId: "owner",
+      rootPath: "C:/owner",
+      manifest: {
+        ...manifest,
+        manifestHash: "owner-v2",
+        manifestVersion: 2,
+        lanes: [
+          { name: "a", roleFile: "owner-change.md", communicationEntry: true },
+        ],
+      },
+    }),
+  ).toMatchObject({ workspaceId: "owner" });
 });
 
 test("relink requires acknowledgement of an exact preflight digest", () => {

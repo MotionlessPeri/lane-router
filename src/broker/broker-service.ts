@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { parse } from "smol-toml";
+import { declarationDigest } from "../core/manifest.js";
+import type { JsonValue } from "../core/json.js";
 
 import type { AckOutcome, Delivery } from "../core/model.js";
 import {
@@ -24,7 +26,7 @@ import {
   StorageRepositories,
   type CurrentBinding,
 } from "../storage/repositories.js";
-import { appendEvent, listEvents } from "./events.js";
+import { appendEvent, listEvents, type BrokerEvent } from "./events.js";
 import { validateRuntimeConfig, type RuntimeConfig } from "./runtime.js";
 
 export { validateRuntimeConfig } from "./runtime.js";
@@ -53,6 +55,27 @@ export interface BootstrapEnvelope {
   }[];
   readonly previousBindingId: string | null;
   readonly reason: string;
+}
+export interface BrokerStatus {
+  readonly projects: { readonly count: number };
+  readonly lanes: { readonly count: number };
+  readonly pending: { readonly count: number };
+}
+export interface InboxEntry {
+  readonly deliveryId: string;
+  readonly messageId: string;
+  readonly sequence: number;
+  readonly kind: "normal" | "correction";
+  readonly createdAt: number;
+  readonly status: "pending" | "notified" | "claimed";
+}
+export interface MessageView {
+  readonly id: string;
+  readonly kind: "normal" | "correction";
+  readonly body: string;
+  readonly metadata: JsonValue;
+  readonly replyTo: string | null;
+  readonly createdAt: number;
 }
 export interface BrokerDependencies {
   readonly now?: () => number;
@@ -133,52 +156,13 @@ export class BrokerService {
       () =>
         inTransaction(this.database, () => {
           const m = input.manifest;
+          const incomingDigest = declarationDigest(m.lanes);
           const existing = this.database
             .prepare("SELECT project_key FROM project WHERE id=?")
             .get(m.projectId) as { project_key: string } | undefined;
           if (existing && existing.project_key !== m.projectKey)
             throw new Error(
               "Project key conflicts with existing project identity",
-            );
-          if (existing) {
-            const declared = (
-              this.database
-                .prepare(
-                  "SELECT name,role_document,communication_entry FROM lane WHERE project_id=? ORDER BY name",
-                )
-                .all(m.projectId) as Array<{
-                name: string;
-                role_document: string;
-                communication_entry: number;
-              }>
-            ).map((lane) => ({
-              name: lane.name,
-              roleFile: lane.role_document,
-              communicationEntry: lane.communication_entry === 1,
-            }));
-            const incoming = [...m.lanes]
-              .map((lane) => ({
-                name: lane.name,
-                roleFile: lane.roleFile,
-                communicationEntry: lane.communicationEntry,
-              }))
-              .sort((left, right) => left.name.localeCompare(right.name));
-            if (canonicalJson(declared) !== canonicalJson(incoming))
-              throw new BrokerContractError(
-                "Project lane declaration conflict across workspaces",
-              );
-          }
-          this.database
-            .prepare(
-              "INSERT INTO project(id,project_key,display_name,manifest_identity,manifest_version,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,manifest_identity=excluded.manifest_identity,manifest_version=excluded.manifest_version",
-            )
-            .run(
-              m.projectId,
-              m.projectKey,
-              m.displayName,
-              m.manifestHash,
-              m.manifestVersion,
-              this.now(),
             );
           const knownWorkspace = this.database
             .prepare("SELECT project_id,local_root FROM workspace WHERE id=?")
@@ -193,6 +177,47 @@ export class BrokerService {
             throw new Error(
               "Existing workspace identity or root differs; use explicit relink for moves",
             );
+          const declaration = this.database
+            .prepare(
+              "SELECT owner_workspace_id,declaration_digest FROM project_declaration WHERE project_id=?",
+            )
+            .get(m.projectId) as
+            | { owner_workspace_id: string; declaration_digest: string }
+            | undefined;
+          if (
+            declaration &&
+            declaration.declaration_digest !== incomingDigest &&
+            declaration.owner_workspace_id !== input.workspaceId
+          )
+            throw new BrokerContractError(
+              "Project lane declaration conflict across workspaces",
+            );
+          const authorsDeclaration =
+            !declaration || declaration.owner_workspace_id === input.workspaceId;
+          if (!existing)
+            this.database
+              .prepare(
+                "INSERT INTO project(id,project_key,display_name,manifest_identity,manifest_version,created_at) VALUES(?,?,?,?,?,?)",
+              )
+              .run(
+                m.projectId,
+                m.projectKey,
+                m.displayName,
+                m.manifestHash,
+                m.manifestVersion,
+                this.now(),
+              );
+          else if (authorsDeclaration)
+            this.database
+              .prepare(
+                "UPDATE project SET display_name=?,manifest_identity=?,manifest_version=? WHERE id=?",
+              )
+              .run(
+                m.displayName,
+                m.manifestHash,
+                m.manifestVersion,
+                m.projectId,
+              );
           if (!knownWorkspace)
             this.database
               .prepare(
@@ -205,18 +230,36 @@ export class BrokerService {
                 1,
                 this.now(),
               );
-          for (const lane of m.lanes)
+          this.database
+            .prepare(
+              "INSERT INTO workspace_manifest(workspace_id,manifest_identity,declaration_digest) VALUES(?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET manifest_identity=excluded.manifest_identity,declaration_digest=excluded.declaration_digest",
+            )
+            .run(input.workspaceId, m.manifestHash, incomingDigest);
+          if (!declaration)
             this.database
               .prepare(
-                "INSERT INTO lane(id,project_id,name,role_document,communication_entry) VALUES(?,?,?,?,?) ON CONFLICT(project_id,name) DO UPDATE SET role_document=excluded.role_document,communication_entry=excluded.communication_entry",
+                "INSERT INTO project_declaration(project_id,owner_workspace_id,declaration_digest) VALUES(?,?,?)",
               )
-              .run(
-                `${m.projectId}/${lane.name}`,
-                m.projectId,
-                lane.name,
-                lane.roleFile,
-                Number(lane.communicationEntry),
-              );
+              .run(m.projectId, input.workspaceId, incomingDigest);
+          else if (authorsDeclaration)
+            this.database
+              .prepare(
+                "UPDATE project_declaration SET declaration_digest=? WHERE project_id=?",
+              )
+              .run(incomingDigest, m.projectId);
+          if (authorsDeclaration)
+            for (const lane of m.lanes)
+              this.database
+                .prepare(
+                  "INSERT INTO lane(id,project_id,name,role_document,communication_entry) VALUES(?,?,?,?,?) ON CONFLICT(project_id,name) DO UPDATE SET role_document=excluded.role_document,communication_entry=excluded.communication_entry",
+                )
+                .run(
+                  `${m.projectId}/${lane.name}`,
+                  m.projectId,
+                  lane.name,
+                  lane.roleFile,
+                  Number(lane.communicationEntry),
+                );
           return {
             projectId: m.projectId,
             workspaceId: input.workspaceId,
@@ -724,29 +767,31 @@ export class BrokerService {
       adapter: binding.adapter,
     };
   }
-  status(): unknown {
+  status(): BrokerStatus {
     return {
       projects: this.database
         .prepare("SELECT COUNT(*) AS count FROM project")
-        .get(),
-      lanes: this.database.prepare("SELECT COUNT(*) AS count FROM lane").get(),
+        .get() as { count: number },
+      lanes: this.database.prepare("SELECT COUNT(*) AS count FROM lane").get() as {
+        count: number;
+      },
       pending: this.database
         .prepare("SELECT COUNT(*) AS count FROM delivery WHERE state='pending'")
-        .get(),
+        .get() as { count: number },
     };
   }
-  events(afterId = 0, limit = 100): unknown {
+  events(afterId = 0, limit = 100): BrokerEvent[] {
     return listEvents(this.database, afterId, limit);
   }
-  inbox(actor: BindingActor): unknown[] {
+  inbox(actor: BindingActor): InboxEntry[] {
     const binding = this.authenticate(actor);
     return this.database
       .prepare(
         "SELECT d.id AS deliveryId,m.id AS messageId,d.sequence,m.kind,m.created_at AS createdAt,d.state AS status FROM delivery d JOIN message m ON m.id=d.message_id WHERE d.target_lane_id=? AND d.state NOT IN ('acknowledged','parked') ORDER BY CASE m.kind WHEN 'correction' THEN 0 ELSE 1 END,d.sequence",
       )
-      .all(binding.laneId) as unknown[];
+      .all(binding.laneId) as InboxEntry[];
   }
-  message(actor: BindingActor, messageId: string): unknown {
+  message(actor: BindingActor, messageId: string): MessageView {
     const binding = this.authenticate(actor);
     const row = this.database
       .prepare(
@@ -754,7 +799,14 @@ export class BrokerService {
       )
       .get(messageId, binding.laneId) as Record<string, unknown> | undefined;
     if (!row) throw new Error("Message not found or not authorized");
-    return { ...row, metadata: JSON.parse(row.metadata as string) };
+    return {
+      id: row.id as string,
+      kind: row.kind as "normal" | "correction",
+      body: row.body as string,
+      metadata: JSON.parse(row.metadata as string) as JsonValue,
+      replyTo: row.replyTo as string | null,
+      createdAt: row.createdAt as number,
+    };
   }
 
   private authenticate(actor: BindingActor): CurrentBinding {

@@ -1,7 +1,7 @@
 import type { Server as HttpServer, IncomingMessage } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
 import type { BrokerService } from "../broker/broker-service.js";
-import { verifyActorCredential } from "./auth.js";
+import { verifyActorCredential, type ActorSession } from "./auth.js";
 
 export function attachEventWebSocket(
   server: HttpServer,
@@ -12,9 +12,14 @@ export function attachEventWebSocket(
   const cursors = new WeakMap<WebSocket, number>();
   server.on("upgrade", (request, socket, head) => {
     const url = new URL(request.url ?? "/", "http://localhost");
+    const session = verifyActorCredential(
+      request.headers.authorization,
+      sessionSecret,
+    );
     if (
       url.pathname !== "/v1/events/ws" ||
-      !verifyActorCredential(request.headers.authorization, sessionSecret)
+      !session ||
+      !canReadEvents(service, session)
     ) {
       socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
       socket.destroy();
@@ -56,4 +61,17 @@ export function attachEventWebSocket(
         websocket.close(() => resolve());
       }),
   };
+}
+
+function canReadEvents(
+  service: BrokerService,
+  session: ActorSession,
+): boolean {
+  if (session.kind === "admin") return true;
+  try {
+    service.whoami({ bindingId: session.id, generation: session.generation });
+    return true;
+  } catch {
+    return false;
+  }
 }
