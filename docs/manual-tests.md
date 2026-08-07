@@ -45,3 +45,47 @@ These cases verify the experimental Codex App Server boundary that deterministic
 **Evidence**: A pre-fix run of commit `b0f5e7a4b6f8d080044c54e9858a83d32f5b6993` failed closed after 8.4 seconds at `thread_start` with `CODEX_APP_SERVER_TIMEOUT`; it demonstrated that the 5-second readiness deadline had incorrectly been reused as the normal RPC deadline. That run left no fixture temporary directory or child process. After separating the production defaults to a 5-second readiness deadline and a 30-second RPC deadline, the changed-code validation completed in 163.6 seconds. Thread `019fdb7c-6072-7a43-8302-ae92839a883e`; turn `019fdb7c-60d4-7702-ba89-b9e685b43bdb`; dynamic calls `exec-cf6f43a1-2f6e-440d-8f71-7bc83f56b1f5`, `exec-ec478604-ce44-40fc-ba02-f2b23d6cba74`, and `exec-08219aed-1cc1-467b-9ffb-9274bbf9e9a2`; advertised tool count `8`; observed tool count `3`; verified broker effect count `1`; resumed turn count `1`; TUI attached `false`. The model-turn completion remained independently bounded by the fixture's single 300-second deadline.
 
 **Optional observer**: A remote Codex TUI subscription remains unverified; it was not automated and no TUI was attached during the broker-driven turn. Controller ownership of `item/tool/call` responses is enforced by the production runtime's single dispatcher and deterministic duplicate-call operation key.
+
+## TC-CLAUDE-001: Fixed-identity stdio and Channel transport
+
+**Goal**: Verify that the production stdio MCP server exposes all eight lane tools under one server-issued binding identity and forwards body-free Channel wakes through the authenticated broker bridge.
+
+**Fixture**: `tests/fixtures/claude/fake-channel-client.mjs` and `tests/mcp/lane-mcp-stdio.test.ts`.
+
+```mermaid
+sequenceDiagram
+    participant B as Broker
+    participant S as Lane stdio server
+    participant C as Fake Claude client
+    B->>S: ID-only wake over authenticated WebSocket
+    S->>C: notifications/claude/channel
+    C-->>S: Transport acceptance
+    S-->>B: started_new_turn or queued_next_turn
+```
+
+**Steps**:
+
+1. Run `npm run build`.
+2. Run `npm test -- --run tests/mcp/lane-mcp-stdio.test.ts tests/mcp/lane-mcp-server.test.ts tests/adapters/claude`.
+3. Confirm the child joins with its binding credential, the server rejects caller-supplied identity fields, and every notification contains only ordered delivery and message IDs plus lane, sequence, and kind.
+4. Confirm duplicate IDs are suppressed, including overlap between a completed notification and a later batch.
+
+**Expected**: The MCP server advertises `claude/channel` and exactly eight strict tools. The broker revalidates binding generation, duplicate current connections fail, stale credentials fail, and disconnects return `stored_pending`. Notification bodies never contain mailbox message text.
+
+**Last verified**: 2026-08-07. The deterministic process fixture, focused adapter/MCP tests, TypeScript check, and build passed on the Milestone 5 working tree.
+
+## TC-CLAUDE-002: Disposable installed Claude Channel session
+
+**Goal**: Verify automatic model turns for idle wake, busy next-turn delivery, disconnect, and reconnect against an installed Claude CLI using the home Kimi settings without account interaction.
+
+**Fixture**: `tests/fixtures/claude/real-channel-smoke.mjs` and `tests/fixtures/claude/pty-host.py`.
+
+**Steps**:
+
+1. Set `CLAUDE_EXE`, `CLAUDE_VERSION`, and `CLAUDE_SETTINGS_FILE` for the installed home harness.
+2. Run `npm run build` and then `node tests/fixtures/claude/real-channel-smoke.mjs`.
+3. Accept only a sanitized `stage: complete` result. A preview confirmation, organization-policy block, missing Channel capability, missing model acknowledgment, or cleanup error is a failed run.
+
+**Expected**: The first wake reports `started_new_turn`; a correction accepted while the session is busy reports `queued_next_turn` and is observed on the next model turn; a disconnected wake reports `stored_pending`; reconnect clears suppression and all three deliveries become acknowledged.
+
+**Last attempted**: 2026-08-07 on Claude Code 2.1.220. Headless `stream-json` mode connected the production MCP and authenticated Channel bridge and accepted the idle and busy notifications, but did not schedule them into model tool calls. The ConPTY variant then failed closed at Claude's interactive development-channel confirmation before MCP startup. No company account was used, no credential or model text was captured, every child was stopped, and the one transient Windows `EBUSY` directory was verified and removed. Automatic real-model wake, disconnect, and reconnect therefore remain unverified; the deterministic transport suite is the current gate.

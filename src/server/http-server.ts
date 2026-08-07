@@ -17,6 +17,7 @@ import {
   type ActorSession,
 } from "./auth.js";
 import { attachEventWebSocket, type EventWebSocketOptions } from "./ws-events.js";
+import { attachClaudeChannelWebSocket, type ClaudeChannelRegistry, type ClaudeChannelWebSocketOptions } from "../adapters/claude/channel-bridge.js";
 import {
   adminMethods,
   rpcResultSchemas,
@@ -27,6 +28,7 @@ import {
 
 export interface RunningBrokerServer {
   readonly url: string;
+  readonly claudeChannels: ClaudeChannelRegistry;
   assertAvailable(): void;
   close(): Promise<void>;
 }
@@ -42,6 +44,7 @@ export interface BrokerHttpOptions {
   readonly keepAliveTimeoutMs?: number;
   readonly requestDeadlineMs?: number;
   readonly webSocket?: EventWebSocketOptions;
+  readonly claudeWebSocket?: ClaudeChannelWebSocketOptions;
   readonly runtimeLock?: BrokerRuntimeLock;
 }
 export interface ApiError {
@@ -84,6 +87,7 @@ export async function startBrokerHttpServer(
   server.requestTimeout = options.requestTimeoutMs ?? 30_000;
   server.keepAliveTimeout = options.keepAliveTimeoutMs ?? 5_000;
   const events = attachEventWebSocket(server, options.service, sessionSecret, options.webSocket);
+  const claudeChannels = attachClaudeChannelWebSocket(server, options.service, sessionSecret, options.claudeWebSocket);
   do {
     await listen(server, options.port ?? 0, host);
     const selected = (server.address() as AddressInfo).port;
@@ -98,6 +102,7 @@ export async function startBrokerHttpServer(
   let closePromise: Promise<void> | undefined;
   const running: RunningBrokerServer = {
     url: `http://${displayHost}:${address.port}`,
+    claudeChannels,
     assertAvailable() {
       options.runtimeLock?.assertHealthy();
       if (!server.listening) throw new Error("Broker HTTP server is unavailable");
@@ -106,6 +111,7 @@ export async function startBrokerHttpServer(
       const closed = new Promise<void>((resolve) => server.close(() => resolve()));
       for (const socket of sockets) socket.destroy();
       await events.close();
+      await claudeChannels.close();
       await closed;
     })(),
   };

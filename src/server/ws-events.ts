@@ -31,12 +31,12 @@ export function attachEventWebSocket(
   const stallTimeoutMs = options.stallTimeoutMs ?? 5_000;
   server.on("upgrade", (request, socket, head) => {
     const url = new URL(request.url ?? "/", "http://localhost");
+    if (url.pathname !== "/v1/events/ws") return;
     const session = verifyActorCredential(
       request.headers.authorization,
       sessionSecret,
     );
     if (
-      url.pathname !== "/v1/events/ws" ||
       !session ||
       !originAllowed(request.headers.origin, options.allowedOrigins ?? []) ||
       !canReadEvents(service, session)
