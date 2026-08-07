@@ -22,8 +22,8 @@ export class CodexAppServerProcess {
   private readonly _client: AppServerClient;
   get client(): AppServerClient { return this._client; }
   get state(): CodexProcessState { return this.processState; }
-  constructor(private readonly options: { command: CodexCommand; gate: CodexCapabilityGate; readinessTimeoutMs?: number; restartLimit?: number; sameEndpointReconnectLimit?: number; restartBackoffMs?: number; restartBackoffCapMs?: number; random?: () => number; sleep?: (ms: number, signal: AbortSignal) => Promise<void>; spawnProcess?: typeof spawn; onReconnect?: (event: CodexRecoveryEvent) => void }) {
-    this._client = new AppServerClient({ url: "ws://127.0.0.1:0", requestTimeoutMs: options.readinessTimeoutMs ?? 5_000 });
+  constructor(private readonly options: { command: CodexCommand; gate: CodexCapabilityGate; readinessTimeoutMs?: number; requestTimeoutMs?: number; restartLimit?: number; sameEndpointReconnectLimit?: number; restartBackoffMs?: number; restartBackoffCapMs?: number; random?: () => number; sleep?: (ms: number, signal: AbortSignal) => Promise<void>; spawnProcess?: typeof spawn; onReconnect?: (event: CodexRecoveryEvent) => void }) {
+    this._client = new AppServerClient({ url: "ws://127.0.0.1:0", requestTimeoutMs: options.requestTimeoutMs ?? 30_000 });
     this._client.onTransportLoss((event) => this.handleTransportLoss(event));
   }
   onReconnect(handler: (event: CodexRecoveryEvent) => void): () => void { this.reconnectHandlers.add(handler); return () => this.reconnectHandlers.delete(handler); }

@@ -319,6 +319,42 @@ test("process manager selects loopback, waits for readiness, and shuts down clea
   expect(manager.client.isConnected()).toBe(false);
 });
 
+test("process manager keeps request latency independent from readiness latency", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lane-router-process-latency-")); dirs.push(root);
+  const url = await server((message, socket) => {
+    if (message.method === "initialize") socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
+    if (message.method === "thread/start") setTimeout(() => socket.send(JSON.stringify({ id: message.id, result: {} })), 50);
+  });
+  const manager = new CodexAppServerProcess({
+    command: fakeCommand(),
+    gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }),
+    readinessTimeoutMs: 20,
+    requestTimeoutMs: 100,
+  });
+  try {
+    manager.client.setUrl(url); await manager.client.connect();
+    await expect(manager.client.request("thread/start", {})).resolves.toEqual({});
+  } finally { await manager.shutdown(); }
+});
+
+test("process manager still bounds requests above the configured request timeout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lane-router-process-request-timeout-")); dirs.push(root);
+  const url = await server((message, socket) => {
+    if (message.method === "initialize") socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
+    if (message.method === "thread/start") setTimeout(() => socket.readyState === socket.OPEN && socket.send(JSON.stringify({ id: message.id, result: {} })), 150);
+  });
+  const manager = new CodexAppServerProcess({
+    command: fakeCommand(),
+    gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }),
+    readinessTimeoutMs: 20,
+    requestTimeoutMs: 100,
+  });
+  try {
+    manager.client.setUrl(url); await manager.client.connect();
+    await expect(manager.client.request("thread/start", {})).rejects.toBeInstanceOf(AppServerRequestTimeoutError);
+  } finally { await manager.shutdown(); }
+});
+
 test("process manager coalesces sequential starts and can start again after shutdown", async () => {
   const root = await mkdtemp(join(tmpdir(), "lane-router-process-idempotent-")); dirs.push(root);
   const children: ReturnType<typeof spawn>[] = [];
