@@ -182,7 +182,7 @@ describe("acknowledgement outcome immutability", () => {
     const recorded = {
       kind: "recorded" as const,
       summary: "initial summary",
-      reference: "docs/result.md",
+      documentPath: "docs/result.md",
     };
     const rejected = { kind: "rejected" as const, reason: "initial reason" };
 
@@ -198,7 +198,7 @@ describe("acknowledgement outcome immutability", () => {
 
     replied.replyMessageId = "mutated-reply";
     recorded.summary = "mutated summary";
-    recorded.reference = "mutated-reference";
+    recorded.documentPath = "mutated-reference";
     rejected.reason = "mutated reason";
 
     expect(acknowledged.map((delivery) => delivery.outcome)).toEqual([
@@ -206,7 +206,7 @@ describe("acknowledgement outcome immutability", () => {
       {
         kind: "recorded",
         summary: "initial summary",
-        reference: "docs/result.md",
+        documentPath: "docs/result.md",
       },
       { kind: "rejected", reason: "initial reason" },
     ]);

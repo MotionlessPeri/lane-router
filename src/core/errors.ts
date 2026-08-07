@@ -6,7 +6,9 @@ export type DeliveryOperation =
   | "establish_binding_connection"
   | "expire_claim"
   | "expire_notification"
+  | "mark_binding_unbound"
   | "park_delivery"
+  | "rebuild_binding"
   | "record_started_turn_ended_before_claim"
   | "renew_claim"
   | "unpark_delivery";

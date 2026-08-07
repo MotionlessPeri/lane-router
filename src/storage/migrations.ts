@@ -149,7 +149,68 @@ BEGIN
 END;
 `;
 
-export const LATEST_MIGRATION_VERSION = 1;
+const MIGRATION_V2 = `
+ALTER TABLE binding ADD COLUMN state TEXT NOT NULL DEFAULT 'bound'
+  CHECK (state IN ('bound', 'unbound'));
+ALTER TABLE binding ADD COLUMN state_changed_at INTEGER;
+ALTER TABLE binding ADD COLUMN state_reason TEXT;
+
+CREATE TRIGGER binding_insert_lifecycle_is_coherent
+BEFORE INSERT ON binding
+WHEN NOT (
+  (NEW.is_current = 1 AND NEW.state = 'bound' AND NEW.inactive_at IS NULL
+    AND NEW.inactive_reason IS NULL AND NEW.state_changed_at IS NULL AND NEW.state_reason IS NULL) OR
+  (NEW.is_current = 1 AND NEW.state = 'unbound' AND NEW.inactive_at IS NULL
+    AND NEW.inactive_reason IS NULL AND NEW.state_changed_at IS NOT NULL
+    AND LENGTH(TRIM(NEW.state_reason)) > 0) OR
+  (NEW.is_current = 0 AND NEW.inactive_at IS NOT NULL
+    AND LENGTH(TRIM(NEW.inactive_reason)) > 0
+    AND (
+      (NEW.state = 'bound' AND NEW.state_changed_at IS NULL AND NEW.state_reason IS NULL) OR
+      (NEW.state = 'unbound' AND NEW.state_changed_at IS NOT NULL AND LENGTH(TRIM(NEW.state_reason)) > 0)
+    ))
+)
+BEGIN
+  SELECT RAISE(ABORT, 'binding lifecycle fields are incoherent');
+END;
+
+CREATE TRIGGER binding_identity_is_immutable
+BEFORE UPDATE ON binding
+WHEN NEW.id IS NOT OLD.id
+  OR NEW.lane_id IS NOT OLD.lane_id
+  OR NEW.workspace_id IS NOT OLD.workspace_id
+  OR NEW.adapter IS NOT OLD.adapter
+  OR NEW.conversation_id IS NOT OLD.conversation_id
+  OR NEW.generation IS NOT OLD.generation
+  OR NEW.active_at IS NOT OLD.active_at
+BEGIN
+  SELECT RAISE(ABORT, 'binding identity is immutable');
+END;
+
+CREATE TRIGGER historical_binding_is_immutable
+BEFORE UPDATE ON binding
+WHEN OLD.is_current = 0
+BEGIN
+  SELECT RAISE(ABORT, 'historical bindings are immutable');
+END;
+
+CREATE TRIGGER binding_update_must_be_lifecycle_transition
+BEFORE UPDATE ON binding
+WHEN OLD.is_current = 1 AND NOT (
+  (OLD.state = 'bound' AND NEW.state = 'unbound' AND NEW.is_current = 1
+    AND NEW.inactive_at IS NULL AND NEW.inactive_reason IS NULL
+    AND NEW.state_changed_at IS NOT NULL AND LENGTH(TRIM(NEW.state_reason)) > 0) OR
+  (NEW.is_current = 0 AND NEW.state = OLD.state
+    AND NEW.state_changed_at IS OLD.state_changed_at
+    AND NEW.state_reason IS OLD.state_reason
+    AND NEW.inactive_at IS NOT NULL AND LENGTH(TRIM(NEW.inactive_reason)) > 0)
+)
+BEGIN
+  SELECT RAISE(ABORT, 'binding update is not an allowed lifecycle transition');
+END;
+`;
+
+export const LATEST_MIGRATION_VERSION = 2;
 
 export function migrateDatabase(database: Database.Database): void {
   const currentVersion = database.pragma("user_version", { simple: true }) as number;
@@ -160,6 +221,13 @@ export function migrateDatabase(database: Database.Database): void {
     database.transaction(() => {
       database.exec(MIGRATION_V1);
       database.pragma("user_version = 1");
+    })();
+  }
+  const versionAfterV1 = database.pragma("user_version", { simple: true }) as number;
+  if (versionAfterV1 === 1) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V2);
+      database.pragma("user_version = 2");
     })();
   }
 }

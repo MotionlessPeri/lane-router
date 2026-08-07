@@ -18,7 +18,12 @@ export function seedStorage(database: RouterDatabase): void {
     database.prepare("INSERT INTO lane VALUES (?, ?, ?, ?, ?)").run(
       STORAGE_IDS.laneId, STORAGE_IDS.projectId, "communication", "docs/role.md", 1,
     );
-    database.prepare("INSERT INTO binding VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+    database.prepare(`
+      INSERT INTO binding (
+        id, lane_id, workspace_id, adapter, conversation_id, generation,
+        active_at, inactive_at, inactive_reason, is_current
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
       STORAGE_IDS.bindingId, STORAGE_IDS.laneId, STORAGE_IDS.workspaceId,
       "codex", "thread-1", 1, 1, null, null, 1,
     );

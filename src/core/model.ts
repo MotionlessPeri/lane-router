@@ -39,7 +39,12 @@ export interface ClaimedDelivery extends DeliveryIdentity {
 
 export type AckOutcome =
   | Readonly<{ kind: "replied"; replyMessageId: string }>
-  | Readonly<{ kind: "recorded"; summary: string; reference?: string }>
+  | Readonly<{
+      kind: "recorded";
+      summary: string;
+      documentPath?: string;
+      externalTaskId?: string;
+    }>
   | Readonly<{ kind: "rejected"; reason: string }>;
 
 export interface AcknowledgedDelivery extends DeliveryIdentity {

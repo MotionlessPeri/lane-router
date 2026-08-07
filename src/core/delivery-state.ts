@@ -394,13 +394,12 @@ function copyAckOutcome(outcome: AckOutcome): AckOutcome {
     case "replied":
       return { kind: "replied", replyMessageId: outcome.replyMessageId };
     case "recorded":
-      return outcome.reference === undefined
-        ? { kind: "recorded", summary: outcome.summary }
-        : {
-            kind: "recorded",
-            summary: outcome.summary,
-            reference: outcome.reference,
-          };
+      return {
+        kind: "recorded",
+        summary: outcome.summary,
+        ...(outcome.documentPath === undefined ? {} : { documentPath: outcome.documentPath }),
+        ...(outcome.externalTaskId === undefined ? {} : { externalTaskId: outcome.externalTaskId }),
+      };
     case "rejected":
       return { kind: "rejected", reason: outcome.reason };
   }

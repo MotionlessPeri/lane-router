@@ -115,4 +115,69 @@ describe("restart recovery", () => {
       reopened.close();
     }
   });
+
+  it("persists unbound current state, fences work, and rebuilds at the next generation", () => {
+    const path = createDatabasePath();
+    const setup = openDatabase(path);
+    try {
+      seedStorage(setup);
+      const repositories = new StorageRepositories(setup);
+      addDelivery(repositories, "unbound-claim", 10);
+      addDelivery(repositories, "unbound-ack", 11);
+      repositories.createClaim({
+        claimId: "claim-before-unbound", deliveryId: "unbound-ack", generation: 1,
+        createdAt: 100, leaseDeadlineAt: 500,
+      });
+      repositories.markCurrentBindingUnbound({
+        laneId: STORAGE_IDS.laneId, generation: 1, occurredAt: 200,
+        reason: "binding_not_found",
+      });
+    } finally {
+      setup.close();
+    }
+
+    const reopened = openDatabase(path);
+    try {
+      const afterRestart = new StorageRepositories(reopened);
+      expect(afterRestart.getCurrentBinding(STORAGE_IDS.laneId)).toMatchObject({
+        id: STORAGE_IDS.bindingId, generation: 1, state: "unbound",
+      });
+      expect(reopened.prepare(`
+        SELECT state_changed_at, state_reason FROM binding WHERE id = 'binding-1'
+      `).get()).toEqual({ state_changed_at: 200, state_reason: "binding_not_found" });
+      expect(reopened.prepare("SELECT state FROM delivery WHERE id='unbound-claim'").get()).toEqual({ state: "pending" });
+      expect(() => afterRestart.createClaim({
+        claimId: "claim-unbound", deliveryId: "unbound-claim", generation: 1,
+        createdAt: 250, leaseDeadlineAt: 600,
+      })).toThrow();
+      expect(() => afterRestart.acknowledge({
+        deliveryId: "unbound-ack", claimId: "claim-before-unbound", generation: 1,
+        outcome: { kind: "recorded", summary: "done" }, acknowledgedAt: 250,
+      })).toThrow();
+
+      const rebuilt = afterRestart.rebuildBinding({
+        bindingId: "binding-2", laneId: STORAGE_IDS.laneId,
+        workspaceId: STORAGE_IDS.workspaceId, adapter: "codex",
+        conversationId: "thread-2", activatedAt: 300, reason: "rebuilt",
+      });
+      expect(rebuilt).toMatchObject({ generation: 2, state: "bound" });
+      expect(reopened.prepare("SELECT is_current FROM binding WHERE id='binding-1'").get()).toEqual({ is_current: 0 });
+      expect(reopened.prepare(`
+        SELECT inactive_at, inactive_reason FROM binding WHERE id='binding-1'
+      `).get()).toEqual({ inactive_at: 300, inactive_reason: "rebuilt" });
+      expect(() => reopened.prepare("UPDATE binding SET generation=20 WHERE id='binding-1'").run()).toThrow();
+      expect(afterRestart.getCurrentBinding(STORAGE_IDS.laneId)).toMatchObject({ id: "binding-2", generation: 2 });
+      afterRestart.markCurrentBindingUnbound({
+        laneId: STORAGE_IDS.laneId, generation: 2, occurredAt: 400,
+        reason: "binding_not_found",
+      });
+      expect(afterRestart.rebuildBinding({
+        bindingId: "binding-3", laneId: STORAGE_IDS.laneId,
+        workspaceId: STORAGE_IDS.workspaceId, adapter: "codex",
+        conversationId: "thread-3", activatedAt: 500, reason: "rebuilt again",
+      })).toMatchObject({ generation: 3, state: "bound" });
+    } finally {
+      reopened.close();
+    }
+  });
 });

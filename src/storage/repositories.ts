@@ -1,9 +1,15 @@
+import { posix, win32 } from "node:path";
+
 import {
   acknowledgeDelivery,
   claimDelivery,
   type Delivery,
 } from "../core/delivery-state.js";
 import type { AckOutcome, PendingDelivery } from "../core/model.js";
+import {
+  InvalidDeliveryOperationError,
+  StaleBindingGenerationError,
+} from "../core/errors.js";
 import { inTransaction, type RouterDatabase } from "./database.js";
 import { canonicalJson } from "./operation-store.js";
 
@@ -38,6 +44,50 @@ export interface AcknowledgeInput {
   readonly generation: number;
   readonly outcome: AckOutcome;
   readonly acknowledgedAt: number;
+}
+
+export interface CurrentBinding {
+  readonly id: string;
+  readonly laneId: string;
+  readonly workspaceId: string;
+  readonly adapter: "claude" | "codex";
+  readonly conversationId: string;
+  readonly generation: number;
+  readonly state: "bound" | "unbound";
+}
+
+export interface MarkBindingUnboundInput {
+  readonly laneId: string;
+  readonly generation: number;
+  readonly occurredAt: number;
+  readonly reason: string;
+}
+
+export interface RebuildBindingInput {
+  readonly bindingId: string;
+  readonly laneId: string;
+  readonly workspaceId: string;
+  readonly adapter: "claude" | "codex";
+  readonly conversationId: string;
+  readonly activatedAt: number;
+  readonly reason: string;
+}
+
+interface CurrentBindingRow {
+  readonly id: string;
+  readonly lane_id: string;
+  readonly workspace_id: string;
+  readonly adapter: "claude" | "codex";
+  readonly conversation_id: string;
+  readonly generation: number;
+  readonly state: "bound" | "unbound";
+}
+
+export class InvalidAckOutcomeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
 }
 
 interface DeliveryRow {
@@ -111,10 +161,15 @@ export class StorageRepositories {
   createClaim(input: CreateClaimInput): Delivery {
     return inTransaction(this.database, () => {
       const current = this.readDelivery(input.deliveryId);
+      const binding = this.requireCurrentBoundBindingForDelivery(
+        input.deliveryId,
+        input.generation,
+        "claim_delivery",
+      );
       const claimed = claimDelivery(current, {
         claimId: input.claimId,
         bindingGeneration: input.generation,
-        currentGeneration: input.generation,
+        currentGeneration: binding.generation,
         now: input.createdAt,
         leaseDeadlineAt: input.leaseDeadlineAt,
       });
@@ -140,12 +195,21 @@ export class StorageRepositories {
   acknowledge(input: AcknowledgeInput): Delivery {
     return inTransaction(this.database, () => {
       const current = this.readDelivery(input.deliveryId);
+      const binding = this.requireCurrentBoundBindingForDelivery(
+        input.deliveryId,
+        input.generation,
+        "acknowledge_delivery",
+      );
+      const normalizedOutcome = this.validateAndNormalizeAckOutcome(
+        input.deliveryId,
+        input.outcome,
+      );
       const acknowledged = acknowledgeDelivery(current, {
         claimId: input.claimId,
         bindingGeneration: input.generation,
-        currentGeneration: input.generation,
+        currentGeneration: binding.generation,
         now: input.acknowledgedAt,
-        outcome: input.outcome,
+        outcome: normalizedOutcome,
       });
       this.database.prepare(`
         INSERT INTO ack (
@@ -156,8 +220,8 @@ export class StorageRepositories {
         input.deliveryId,
         input.claimId,
         input.generation,
-        input.outcome.kind,
-        canonicalJson(input.outcome),
+        normalizedOutcome.kind,
+        canonicalJson(normalizedOutcome),
         input.acknowledgedAt,
       );
       this.faults.afterAckInsert?.();
@@ -168,7 +232,7 @@ export class StorageRepositories {
       this.persistDelivery(acknowledged, input.acknowledgedAt);
       this.recordEvent("delivery_acknowledged", input.deliveryId, input.claimId, input.acknowledgedAt, {
         generation: input.generation,
-        outcomeKind: input.outcome.kind,
+        outcomeKind: normalizedOutcome.kind,
       });
       return acknowledged;
     });
@@ -184,6 +248,87 @@ export class StorageRepositories {
       throw new Error(`Delivery ${deliveryId} does not exist`);
     }
     return deliveryFromRow(row, this.database);
+  }
+
+  getCurrentBinding(laneId: string): CurrentBinding | null {
+    const row = this.database.prepare(`
+      SELECT id, lane_id, workspace_id, adapter, conversation_id, generation, state
+      FROM binding WHERE lane_id = ? AND is_current = 1
+    `).get(laneId) as CurrentBindingRow | undefined;
+    return row === undefined ? null : bindingFromRow(row);
+  }
+
+  markCurrentBindingUnbound(input: MarkBindingUnboundInput): CurrentBinding {
+    return inTransaction(this.database, () => {
+      const current = this.requireCurrentBinding(input.laneId);
+      this.assertBindingGeneration("mark_binding_unbound", input.generation, current.generation);
+      if (current.state !== "bound") {
+        throw new InvalidDeliveryOperationError(
+          "mark_binding_unbound",
+          `Current binding for lane ${input.laneId} is already ${current.state}`,
+        );
+      }
+      const reason = normalizeBindingReason(input.reason, "mark_binding_unbound");
+      this.database.prepare(`
+        UPDATE binding SET state = 'unbound', state_changed_at = ?, state_reason = ?
+        WHERE id = ?
+      `).run(input.occurredAt, reason, current.id);
+      this.recordBindingEvent("binding_unbound", current.id, input.occurredAt, {
+        generation: current.generation,
+        reason,
+      });
+      return { ...current, state: "unbound" };
+    });
+  }
+
+  rebuildBinding(input: RebuildBindingInput): CurrentBinding {
+    return inTransaction(this.database, () => {
+      const current = this.requireCurrentBinding(input.laneId);
+      if (current.state !== "unbound") {
+        throw new InvalidDeliveryOperationError(
+          "rebuild_binding",
+          "A binding can only be rebuilt after it becomes unbound",
+        );
+      }
+      const reason = normalizeBindingReason(input.reason, "rebuild_binding");
+      const generation = (this.database.prepare(`
+        SELECT COALESCE(MAX(generation), 0) + 1 AS generation
+        FROM binding WHERE lane_id = ?
+      `).get(input.laneId) as { generation: number }).generation;
+      this.database.prepare(`
+        UPDATE binding SET is_current = 0, inactive_at = ?, inactive_reason = ?
+        WHERE id = ?
+      `).run(input.activatedAt, reason, current.id);
+      this.database.prepare(`
+        INSERT INTO binding (
+          id, lane_id, workspace_id, adapter, conversation_id, generation,
+          active_at, inactive_at, inactive_reason, is_current,
+          state, state_changed_at, state_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1, 'bound', NULL, NULL)
+      `).run(
+        input.bindingId,
+        input.laneId,
+        input.workspaceId,
+        input.adapter,
+        input.conversationId,
+        generation,
+        input.activatedAt,
+      );
+      this.recordBindingEvent("binding_rebuilt", input.bindingId, input.activatedAt, {
+        previousBindingId: current.id,
+        generation,
+        reason,
+      });
+      return {
+        id: input.bindingId,
+        laneId: input.laneId,
+        workspaceId: input.workspaceId,
+        adapter: input.adapter,
+        conversationId: input.conversationId,
+        generation,
+        state: "bound",
+      };
+    });
   }
 
   private persistDelivery(delivery: Delivery, updatedAt: number): void {
@@ -222,6 +367,145 @@ export class StorageRepositories {
       VALUES (?, NULL, ?, ?, ?, ?)
     `).run(eventType, deliveryId, claimId, occurredAt, canonicalJson(details));
   }
+
+  private requireCurrentBoundBindingForDelivery(
+    deliveryId: string,
+    generation: number,
+    operation: "claim_delivery" | "acknowledge_delivery",
+  ): CurrentBinding {
+    const row = this.database.prepare(`
+      SELECT b.id, b.lane_id, b.workspace_id, b.adapter, b.conversation_id,
+        b.generation, b.state
+      FROM delivery d
+      JOIN binding b ON b.lane_id = d.target_lane_id AND b.is_current = 1
+      WHERE d.id = ?
+    `).get(deliveryId) as CurrentBindingRow | undefined;
+    if (row === undefined) {
+      throw new InvalidDeliveryOperationError(operation, `Delivery ${deliveryId} has no current binding`);
+    }
+    this.assertBindingGeneration(operation, generation, row.generation);
+    if (row.state !== "bound") {
+      throw new InvalidDeliveryOperationError(operation, `Current binding ${row.id} is unbound`);
+    }
+    return bindingFromRow(row);
+  }
+
+  private requireCurrentBinding(laneId: string): CurrentBinding {
+    const current = this.getCurrentBinding(laneId);
+    if (current === null) {
+      throw new InvalidDeliveryOperationError(
+        "rebuild_binding",
+        `Lane ${laneId} has no current binding`,
+      );
+    }
+    return current;
+  }
+
+  private assertBindingGeneration(
+    operation: "claim_delivery" | "acknowledge_delivery" | "mark_binding_unbound",
+    provided: number,
+    current: number,
+  ): void {
+    if (provided !== current) {
+      throw new StaleBindingGenerationError(operation, provided, current);
+    }
+  }
+
+  private validateAndNormalizeAckOutcome(
+    deliveryId: string,
+    outcome: AckOutcome,
+  ): AckOutcome {
+    switch (outcome.kind) {
+      case "replied": {
+        const relation = this.database.prepare(`
+          SELECT reply.reply_to, original.message_id AS original_message_id
+          FROM delivery original
+          LEFT JOIN message reply ON reply.id = ?
+          WHERE original.id = ?
+        `).get(outcome.replyMessageId, deliveryId) as {
+          reply_to: string | null;
+          original_message_id: string;
+        } | undefined;
+        if (relation === undefined || relation.reply_to !== relation.original_message_id) {
+          throw new InvalidAckOutcomeError("Reply message must exist and reply to the acknowledged message");
+        }
+        return { kind: "replied", replyMessageId: outcome.replyMessageId };
+      }
+      case "recorded": {
+        const summary = requireNonEmpty(outcome.summary, "Recorded summary");
+        const documentPath = outcome.documentPath === undefined
+          ? undefined
+          : normalizeProjectRelativePath(outcome.documentPath);
+        const externalTaskId = outcome.externalTaskId === undefined
+          ? undefined
+          : requireNonEmpty(outcome.externalTaskId, "External task ID");
+        return {
+          kind: "recorded",
+          summary,
+          ...(documentPath === undefined ? {} : { documentPath }),
+          ...(externalTaskId === undefined ? {} : { externalTaskId }),
+        };
+      }
+      case "rejected":
+        return { kind: "rejected", reason: requireNonEmpty(outcome.reason, "Rejection reason") };
+    }
+  }
+
+  private recordBindingEvent(
+    eventType: string,
+    bindingId: string,
+    occurredAt: number,
+    details: unknown,
+  ): void {
+    this.database.prepare(`
+      INSERT INTO event (event_type, binding_id, delivery_id, claim_id, occurred_at, details_json)
+      VALUES (?, ?, NULL, NULL, ?, ?)
+    `).run(eventType, bindingId, occurredAt, canonicalJson(details));
+  }
+}
+
+function bindingFromRow(row: CurrentBindingRow): CurrentBinding {
+  return {
+    id: row.id,
+    laneId: row.lane_id,
+    workspaceId: row.workspace_id,
+    adapter: row.adapter,
+    conversationId: row.conversation_id,
+    generation: row.generation,
+    state: row.state,
+  };
+}
+
+function requireNonEmpty(value: string, label: string): string {
+  const normalized = value.trim();
+  if (normalized.length === 0) throw new InvalidAckOutcomeError(`${label} must not be empty`);
+  return normalized;
+}
+
+function normalizeBindingReason(
+  value: string,
+  operation: "mark_binding_unbound" | "rebuild_binding",
+): string {
+  const normalized = value.trim();
+  if (normalized.length === 0) {
+    throw new InvalidDeliveryOperationError(operation, "Binding lifecycle reason must not be empty");
+  }
+  return normalized;
+}
+
+function normalizeProjectRelativePath(value: string): string {
+  const normalized = requireNonEmpty(value, "Document path");
+  if (
+    win32.isAbsolute(normalized) ||
+    posix.isAbsolute(normalized) ||
+    /^[A-Za-z]:/u.test(normalized)
+  ) {
+    throw new InvalidAckOutcomeError("Document path must be project-relative");
+  }
+  if (normalized.split(/[\\/]/u).includes("..")) {
+    throw new InvalidAckOutcomeError("Document path must not traverse outside the project");
+  }
+  return normalized;
 }
 
 function deliveryFromRow(row: DeliveryRow, database: RouterDatabase): Delivery {
