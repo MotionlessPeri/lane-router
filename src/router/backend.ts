@@ -14,6 +14,7 @@ export interface PlatformBackend {
   notifyNormal(binding: BindingRecord, notification: Notification): Promise<NotificationOutcome>;
   notifyCorrection(binding: BindingRecord, notification: Notification): Promise<NotificationOutcome>;
   waitUntilReplaceable(binding: BindingRecord): Promise<void>;
+  onAttentionOpportunity(handler: (laneAddress: string) => void): () => void;
 }
 
 export class BackendRegistry {

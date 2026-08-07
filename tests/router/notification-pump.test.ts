@@ -28,6 +28,7 @@ class RecordingBackend implements PlatformBackend {
   async notifyCorrection(_binding: BindingRecord, notification: Notification): Promise<NotificationOutcome> {
     this.corrections.push(notification); return this.outcome;
   }
+  onAttentionOpportunity(): () => void { return () => undefined; }
   async waitUntilReplaceable(): Promise<void> {}
 }
 

@@ -25,6 +25,7 @@ class FakeBackend implements PlatformBackend {
 
   async notifyNormal(): Promise<"delivered"> { return "delivered"; }
   async notifyCorrection(): Promise<"delivered"> { return "delivered"; }
+  onAttentionOpportunity(): () => void { return () => undefined; }
   async waitUntilReplaceable(binding: BindingRecord): Promise<void> {
     this.waited.push(binding);
     await this.wait?.();
