@@ -6,6 +6,8 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { openDatabase } from "../../src/storage/database.js";
+import { MIGRATION_V1_SQL, MIGRATION_V2_SQL } from "../../src/storage/migrations.js";
+import { StorageRepositories } from "../../src/storage/repositories.js";
 import { seedStorage } from "../fixtures/storage/seed.js";
 
 const temporaryDirectories: string[] = [];
@@ -26,24 +28,11 @@ describe("SQLite schema", () => {
   it("upgrades an existing migration-v1 binding table to durable lifecycle state", () => {
     const path = temporaryDatabasePath();
     const legacy = new Database(path);
+    legacy.exec(MIGRATION_V1_SQL);
     legacy.exec(`
-      CREATE TABLE binding (
-        id TEXT PRIMARY KEY,
-        lane_id TEXT NOT NULL,
-        workspace_id TEXT NOT NULL,
-        adapter TEXT NOT NULL CHECK (adapter IN ('claude', 'codex')),
-        conversation_id TEXT NOT NULL,
-        generation INTEGER NOT NULL CHECK (generation > 0),
-        active_at INTEGER NOT NULL,
-        inactive_at INTEGER,
-        inactive_reason TEXT,
-        is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
-        CHECK (
-          (is_current = 1 AND inactive_at IS NULL AND inactive_reason IS NULL) OR
-          (is_current = 0 AND inactive_at IS NOT NULL AND inactive_reason IS NOT NULL)
-        ),
-        UNIQUE(lane_id, generation)
-      );
+      INSERT INTO project VALUES ('project-1', 'project', 'Project', 'manifest', 1, 1);
+      INSERT INTO workspace VALUES ('workspace-1', 'project-1', 'C:/repo', 1, 1);
+      INSERT INTO lane VALUES ('lane-1', 'project-1', 'lane', 'role.md', 0);
       INSERT INTO binding VALUES (
         'binding-legacy', 'lane-1', 'workspace-1', 'codex', 'thread-1',
         1, 1, NULL, NULL, 1
@@ -54,7 +43,7 @@ describe("SQLite schema", () => {
 
     const upgraded = openDatabase(path);
     try {
-      expect(upgraded.pragma("user_version", { simple: true })).toBe(2);
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(3);
       expect(upgraded.prepare(`
         SELECT state, state_changed_at, state_reason FROM binding WHERE id = 'binding-legacy'
       `).get()).toEqual({ state: "bound", state_changed_at: null, state_reason: null });
@@ -64,13 +53,108 @@ describe("SQLite schema", () => {
     }
   });
 
-  it("creates the durable broker model at migration v2 with foreign keys and WAL", () => {
+  it("leaves a dirty migration-v1 database repairable when lifecycle preflight fails", () => {
+    const path = temporaryDatabasePath();
+    const legacy = new Database(path);
+    legacy.exec(MIGRATION_V1_SQL);
+    legacy.exec(`
+      INSERT INTO project VALUES ('project-1', 'project', 'Project', 'manifest', 1, 1);
+      INSERT INTO workspace VALUES ('workspace-1', 'project-1', 'C:/repo', 1, 1);
+      INSERT INTO lane VALUES ('lane-1', 'project-1', 'lane', 'role.md', 0);
+      INSERT INTO binding VALUES (
+        'binding-dirty', 'lane-1', 'workspace-1', 'codex', 'thread-1',
+        1, 1, 2, '   ', 0
+      );
+      PRAGMA user_version = 1;
+    `);
+    legacy.close();
+
+    expect(() => {
+      const unexpectedlyOpened = openDatabase(path);
+      unexpectedlyOpened.close();
+    }).toThrow(/integrity|lifecycle/iu);
+    const repair = new Database(path);
+    try {
+      expect(repair.pragma("user_version", { simple: true })).toBe(1);
+      expect(repair.prepare("SELECT inactive_reason FROM binding").get()).toEqual({ inactive_reason: "   " });
+      expect(() => repair.prepare("UPDATE binding SET inactive_reason='repaired'").run()).not.toThrow();
+    } finally {
+      repair.close();
+    }
+  });
+
+  it("leaves dirty migration-v2 claim and ack rows repairable when v3 preflight fails", () => {
+    const path = temporaryDatabasePath();
+    const setup = openDatabase(path);
+    seedStorage(setup);
+    const repositories = new StorageRepositories(setup);
+    repositories.createMessageWithInitialDelivery({
+      messageId: "message-dirty", deliveryId: "delivery-dirty",
+      senderBindingId: "binding-1", targetLaneId: "lane-1", kind: "normal",
+      body: "body", metadata: {}, replyTo: null, createdAt: 10,
+    });
+    repositories.createClaim({ claimId: "claim-dirty", deliveryId: "delivery-dirty", generation: 1, createdAt: 20, leaseDeadlineAt: 100 });
+    repositories.acknowledge({
+      deliveryId: "delivery-dirty", claimId: "claim-dirty", generation: 1,
+      outcome: { kind: "recorded", summary: "done" }, acknowledgedAt: 30,
+    });
+    repositories.createMessageWithInitialDelivery({
+      messageId: "message-dirty-claim", deliveryId: "delivery-dirty-claim",
+      senderBindingId: "binding-1", targetLaneId: "lane-1", kind: "normal",
+      body: "body", metadata: {}, replyTo: null, createdAt: 11,
+    });
+    repositories.createClaim({ claimId: "claim-dirty-active", deliveryId: "delivery-dirty-claim", generation: 1, createdAt: 21, leaseDeadlineAt: 100 });
+    setup.exec(`
+      DROP TRIGGER binding_workspace_must_match_lane_project;
+      DROP TRIGGER workspace_project_change_must_preserve_bindings;
+      DROP TRIGGER lane_project_change_must_preserve_bindings;
+      DROP TRIGGER claim_insert_must_match_delivery_context;
+      DROP TRIGGER ack_insert_must_match_claim_and_payload;
+      UPDATE ack SET outcome_kind='rejected' WHERE delivery_id='delivery-dirty';
+      UPDATE delivery SET deadline_at=10 WHERE id='delivery-dirty-claim';
+      PRAGMA user_version=2;
+    `);
+    setup.close();
+
+    expect(() => {
+      const unexpectedlyOpened = openDatabase(path);
+      unexpectedlyOpened.close();
+    }).toThrow(/integrity|ack|claim/iu);
+    const repair = new Database(path);
+    try {
+      expect(repair.pragma("user_version", { simple: true })).toBe(2);
+      expect(() => repair.prepare("UPDATE ack SET outcome_kind='recorded'").run()).not.toThrow();
+    } finally {
+      repair.close();
+    }
+  });
+
+  it("upgrades a clean migration-v2 database to migration v3", () => {
+    const path = temporaryDatabasePath();
+    const legacy = new Database(path);
+    legacy.exec(MIGRATION_V1_SQL);
+    legacy.exec(MIGRATION_V2_SQL);
+    legacy.pragma("user_version = 2");
+    legacy.close();
+
+    const upgraded = openDatabase(path);
+    try {
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(3);
+      expect(upgraded.prepare(`
+        SELECT name FROM sqlite_master WHERE type='trigger' AND name='ack_insert_must_match_claim_and_payload'
+      `).get()).toEqual({ name: "ack_insert_must_match_claim_and_payload" });
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("creates the durable broker model at migration v3 with foreign keys and WAL", () => {
     const path = temporaryDatabasePath();
     const connection = openDatabase(path);
 
     expect(connection.pragma("foreign_keys", { simple: true })).toBe(1);
     expect(connection.pragma("journal_mode", { simple: true })).toBe("wal");
-    expect(connection.pragma("user_version", { simple: true })).toBe(2);
+    expect(connection.pragma("user_version", { simple: true })).toBe(3);
 
     const tables = connection
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -132,6 +216,37 @@ describe("SQLite schema", () => {
         db.close();
       }
     });
+  });
+
+  it("rejects a direct binding whose workspace belongs to another project", () => {
+    const db = openDatabase(temporaryDatabasePath());
+    try {
+      seedStorage(db);
+      db.transaction(() => {
+        db.prepare("INSERT INTO project VALUES (?, ?, ?, ?, ?, ?)").run("project-2", "other-project", "Other", "manifest-2", 1, 2);
+        db.prepare("INSERT INTO workspace VALUES (?, ?, ?, ?, ?)").run("workspace-other", "project-2", "C:/other", 1, 2);
+        db.prepare("UPDATE binding SET is_current=0, inactive_at=2, inactive_reason='rotate' WHERE id='binding-1'").run();
+      })();
+      expect(() => db.prepare(`
+        INSERT INTO binding (
+          id, lane_id, workspace_id, adapter, conversation_id, generation,
+          active_at, inactive_at, inactive_reason, is_current
+        ) VALUES ('binding-wrong', 'lane-1', 'workspace-other', 'codex', 'thread-2', 2, 3, NULL, NULL, 1)
+      `).run()).toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects persisted integers outside the JavaScript safe range", () => {
+    const db = openDatabase(temporaryDatabasePath());
+    try {
+      expect(() => db.prepare("INSERT INTO project VALUES (?, ?, ?, ?, ?, ?)").run(
+        "project-unsafe", "unsafe", "Unsafe", "manifest", 1, Number.MAX_SAFE_INTEGER + 1,
+      )).toThrow();
+    } finally {
+      db.close();
+    }
   });
 
   it("enforces durable identity, generation, state, and initial-delivery constraints", () => {

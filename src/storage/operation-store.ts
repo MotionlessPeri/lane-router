@@ -31,6 +31,13 @@ export class OperationConflictError extends Error {
   }
 }
 
+export class CanonicalJsonError extends TypeError {
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
 export class OperationStore {
   constructor(private readonly database: RouterDatabase) {}
 
@@ -59,6 +66,9 @@ export class OperationStore {
         return JSON.parse(stored.result_json) as TResult;
       }
 
+      if (!Number.isSafeInteger(input.createdAt)) {
+        throw new RangeError("Operation createdAt must be a JavaScript safe integer");
+      }
       const result = perform();
       const resultJson = canonicalJson(result);
       this.database.prepare(`
@@ -82,24 +92,51 @@ export class OperationStore {
 }
 
 export function canonicalJson(value: unknown): string {
-  const serialized = JSON.stringify(sortJsonValue(value));
-  if (serialized === undefined) {
-    throw new TypeError("Operation payloads and results must be JSON values");
-  }
-  return serialized;
+  return JSON.stringify(validateAndSortJson(value, new WeakSet<object>()));
 }
 
-function sortJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(sortJsonValue);
+function validateAndSortJson(value: unknown, ancestors: WeakSet<object>): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return value;
   }
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([, entry]) => entry !== undefined)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, entry]) => [key, sortJsonValue(entry)]),
-    );
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new CanonicalJsonError("JSON numbers must be finite");
+    return Object.is(value, -0) ? 0 : value;
   }
-  return value;
+  if (typeof value !== "object") {
+    throw new CanonicalJsonError(`Unsupported JSON value type: ${typeof value}`);
+  }
+  if (ancestors.has(value)) throw new CanonicalJsonError("Cyclic JSON values are not supported");
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      if (Object.getOwnPropertySymbols(value).length > 0) {
+        throw new CanonicalJsonError("JSON arrays cannot have symbol properties");
+      }
+      const keys = Object.keys(value);
+      if (keys.length !== value.length || keys.some((key, index) => key !== String(index))) {
+        throw new CanonicalJsonError("JSON arrays must be dense and cannot have extra properties");
+      }
+      return value.map((entry) => validateAndSortJson(entry, ancestors));
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new CanonicalJsonError("JSON objects must use Object.prototype or a null prototype");
+    }
+    if (Object.getOwnPropertySymbols(value).length > 0) {
+      throw new CanonicalJsonError("JSON objects cannot have symbol properties");
+    }
+    const result: Record<string, unknown> = {};
+    for (const key of Object.getOwnPropertyNames(value).sort((left, right) => left.localeCompare(right))) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)) {
+        throw new CanonicalJsonError("JSON object properties must be enumerable data properties");
+      }
+      result[key] = validateAndSortJson(descriptor.value, ancestors);
+    }
+    return result;
+  } finally {
+    ancestors.delete(value);
+  }
 }

@@ -90,6 +90,13 @@ export class InvalidAckOutcomeError extends Error {
   }
 }
 
+export class UnsafeIntegerError extends RangeError {
+  constructor(readonly field: string, readonly value: number) {
+    super(`${field} must be a JavaScript safe integer`);
+    this.name = new.target.name;
+  }
+}
+
 interface DeliveryRow {
   readonly id: string;
   readonly target_lane_id: string;
@@ -112,10 +119,12 @@ export class StorageRepositories {
 
   createMessageWithInitialDelivery(input: CreateMessageInput): PendingDelivery {
     return inTransaction(this.database, () => {
+      assertSafeInteger(input.createdAt, "createdAt");
       const sequence = (this.database.prepare(`
         SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence
         FROM delivery WHERE target_lane_id = ?
       `).get(input.targetLaneId) as { sequence: number }).sequence;
+      assertSafeInteger(sequence, "sequence");
 
       this.database.prepare(`
         INSERT INTO message (
@@ -160,6 +169,9 @@ export class StorageRepositories {
 
   createClaim(input: CreateClaimInput): Delivery {
     return inTransaction(this.database, () => {
+      assertSafeInteger(input.generation, "generation");
+      assertSafeInteger(input.createdAt, "createdAt");
+      assertSafeInteger(input.leaseDeadlineAt, "leaseDeadlineAt");
       const current = this.readDelivery(input.deliveryId);
       const binding = this.requireCurrentBoundBindingForDelivery(
         input.deliveryId,
@@ -173,6 +185,7 @@ export class StorageRepositories {
         now: input.createdAt,
         leaseDeadlineAt: input.leaseDeadlineAt,
       });
+      this.persistDelivery(claimed, input.createdAt);
       this.database.prepare(`
         INSERT INTO claim (id, delivery_id, generation, lease_deadline_at, created_at, closed_at, close_reason)
         VALUES (?, ?, ?, ?, ?, NULL, NULL)
@@ -183,7 +196,6 @@ export class StorageRepositories {
         input.leaseDeadlineAt,
         input.createdAt,
       );
-      this.persistDelivery(claimed, input.createdAt);
       this.recordEvent("claim_created", input.deliveryId, input.claimId, input.createdAt, {
         generation: input.generation,
         leaseDeadlineAt: input.leaseDeadlineAt,
@@ -194,6 +206,8 @@ export class StorageRepositories {
 
   acknowledge(input: AcknowledgeInput): Delivery {
     return inTransaction(this.database, () => {
+      assertSafeInteger(input.generation, "generation");
+      assertSafeInteger(input.acknowledgedAt, "acknowledgedAt");
       const current = this.readDelivery(input.deliveryId);
       const binding = this.requireCurrentBoundBindingForDelivery(
         input.deliveryId,
@@ -260,6 +274,8 @@ export class StorageRepositories {
 
   markCurrentBindingUnbound(input: MarkBindingUnboundInput): CurrentBinding {
     return inTransaction(this.database, () => {
+      assertSafeInteger(input.generation, "generation");
+      assertSafeInteger(input.occurredAt, "occurredAt");
       const current = this.requireCurrentBinding(input.laneId);
       this.assertBindingGeneration("mark_binding_unbound", input.generation, current.generation);
       if (current.state !== "bound") {
@@ -283,11 +299,23 @@ export class StorageRepositories {
 
   rebuildBinding(input: RebuildBindingInput): CurrentBinding {
     return inTransaction(this.database, () => {
+      assertSafeInteger(input.activatedAt, "activatedAt");
       const current = this.requireCurrentBinding(input.laneId);
       if (current.state !== "unbound") {
         throw new InvalidDeliveryOperationError(
           "rebuild_binding",
           "A binding can only be rebuilt after it becomes unbound",
+        );
+      }
+      const projectMatch = this.database.prepare(`
+        SELECT 1 AS matches
+        FROM lane l JOIN workspace w ON w.id = ? AND w.project_id = l.project_id
+        WHERE l.id = ?
+      `).get(input.workspaceId, input.laneId) as { matches: 1 } | undefined;
+      if (projectMatch === undefined) {
+        throw new InvalidDeliveryOperationError(
+          "rebuild_binding",
+          "Rebuild workspace must belong to the lane project",
         );
       }
       const reason = normalizeBindingReason(input.reason, "rebuild_binding");
@@ -495,6 +523,9 @@ function normalizeBindingReason(
 
 function normalizeProjectRelativePath(value: string): string {
   const normalized = requireNonEmpty(value, "Document path");
+  if (normalized.includes("\0")) {
+    throw new InvalidAckOutcomeError("Document path must not contain NUL");
+  }
   if (
     win32.isAbsolute(normalized) ||
     posix.isAbsolute(normalized) ||
@@ -502,10 +533,24 @@ function normalizeProjectRelativePath(value: string): string {
   ) {
     throw new InvalidAckOutcomeError("Document path must be project-relative");
   }
-  if (normalized.split(/[\\/]/u).includes("..")) {
-    throw new InvalidAckOutcomeError("Document path must not traverse outside the project");
+  const segments: string[] = [];
+  for (const segment of normalized.replaceAll("\\", "/").split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.length === 0) {
+        throw new InvalidAckOutcomeError("Document path must not traverse outside the project");
+      }
+      segments.pop();
+    } else {
+      segments.push(segment);
+    }
   }
-  return normalized;
+  if (segments.length === 0) throw new InvalidAckOutcomeError("Document path must identify a project-relative entry");
+  return segments.join("/");
+}
+
+function assertSafeInteger(value: number, field: string): void {
+  if (!Number.isSafeInteger(value)) throw new UnsafeIntegerError(field, value);
 }
 
 function deliveryFromRow(row: DeliveryRow, database: RouterDatabase): Delivery {

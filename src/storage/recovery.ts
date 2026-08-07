@@ -40,15 +40,18 @@ export function recoverDatabase(
       FROM delivery d
       JOIN message m ON m.id = d.message_id
       LEFT JOIN claim c ON c.delivery_id = d.id AND c.closed_at IS NULL
-      WHERE d.state IN ('notified', 'claimed') AND d.deadline_at <= ?
+      WHERE (d.state = 'notified' AND d.deadline_at <= ?)
+        OR (d.state = 'claimed' AND c.lease_deadline_at <= ?)
       ORDER BY d.target_lane_id, d.sequence
-    `).all(config.now) as ExpiredRow[];
+    `).all(config.now, config.now) as ExpiredRow[];
 
     let parked = 0;
     for (const row of rows) {
       const current = hydrateExpiredDelivery(row);
       const failureCountAfterExpiry = row.failure_count + 1;
-      const nextAttemptAt = config.now + config.retryDelay(failureCountAfterExpiry);
+      const nextAttemptAt = current.status === "notified" && current.notificationKind === "queue"
+        ? config.now
+        : config.now + config.retryDelay(failureCountAfterExpiry);
       const recovered = current.status === "notified"
         ? expireNotification(current, {
             now: config.now,

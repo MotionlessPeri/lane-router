@@ -180,4 +180,81 @@ describe("restart recovery", () => {
       reopened.close();
     }
   });
+
+  it("rejects cross-project rebuilds but allows another workspace of the lane project", () => {
+    const path = createDatabasePath();
+    const db = openDatabase(path);
+    try {
+      seedStorage(db);
+      db.transaction(() => {
+        db.prepare("INSERT INTO workspace VALUES (?, ?, ?, ?, ?)").run("workspace-clone", STORAGE_IDS.projectId, "C:/clone", 1, 2);
+        db.prepare("INSERT INTO project VALUES (?, ?, ?, ?, ?, ?)").run("project-2", "other-project", "Other", "manifest-2", 1, 2);
+        db.prepare("INSERT INTO workspace VALUES (?, ?, ?, ?, ?)").run("workspace-other", "project-2", "C:/other", 1, 2);
+      })();
+      const repositories = new StorageRepositories(db);
+      repositories.markCurrentBindingUnbound({ laneId: STORAGE_IDS.laneId, generation: 1, occurredAt: 10, reason: "missing" });
+      expect(() => repositories.rebuildBinding({
+        bindingId: "binding-wrong", laneId: STORAGE_IDS.laneId,
+        workspaceId: "workspace-other", adapter: "codex", conversationId: "wrong",
+        activatedAt: 20, reason: "rebuild",
+      })).toThrow();
+      expect(repositories.getCurrentBinding(STORAGE_IDS.laneId)).toMatchObject({ id: STORAGE_IDS.bindingId, state: "unbound" });
+      expect(repositories.rebuildBinding({
+        bindingId: "binding-clone", laneId: STORAGE_IDS.laneId,
+        workspaceId: "workspace-clone", adapter: "codex", conversationId: "clone-thread",
+        activatedAt: 30, reason: "rebuild",
+      })).toMatchObject({ workspaceId: "workspace-clone", generation: 2 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("uses the claim lease as authority and isolates a stale delivery deadline mirror", () => {
+    const path = createDatabasePath();
+    const db = openDatabase(path);
+    try {
+      seedStorage(db);
+      const repositories = new StorageRepositories(db);
+      addDelivery(repositories, "valid-expired", 1);
+      addDelivery(repositories, "mirror-corrupt", 2);
+      repositories.createClaim({ claimId: "claim-valid", deliveryId: "valid-expired", generation: 1, createdAt: 1, leaseDeadlineAt: 10 });
+      repositories.createClaim({ claimId: "claim-future", deliveryId: "mirror-corrupt", generation: 1, createdAt: 1, leaseDeadlineAt: 1_000 });
+      db.prepare("UPDATE delivery SET deadline_at=10 WHERE id='mirror-corrupt'").run();
+
+      expect(() => recoverDatabase(db, {
+        now: 100,
+        failureLimit: 3,
+        retryDelay: () => 5,
+      })).not.toThrow();
+      expect(db.prepare("SELECT state FROM delivery WHERE id='valid-expired'").get()).toEqual({ state: "pending" });
+      expect(db.prepare("SELECT state FROM delivery WHERE id='mirror-corrupt'").get()).toEqual({ state: "claimed" });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("does not call retry delay for an expired queued-next-turn notification", () => {
+    const path = createDatabasePath();
+    const db = openDatabase(path);
+    try {
+      seedStorage(db);
+      const repositories = new StorageRepositories(db);
+      addDelivery(repositories, "queued-no-delay", 1);
+      db.prepare(`
+        UPDATE delivery SET state='notified', deadline_kind='queue', deadline_at=10,
+          adapter_result='queued_next_turn', failure_count=1
+        WHERE id='queued-no-delay'
+      `).run();
+      expect(() => recoverDatabase(db, {
+        now: 10,
+        failureLimit: 3,
+        retryDelay: () => { throw new Error("retry delay must not run"); },
+      })).not.toThrow();
+      expect(db.prepare("SELECT state, failure_count, next_attempt_at FROM delivery WHERE id='queued-no-delay'").get()).toEqual({
+        state: "pending", failure_count: 1, next_attempt_at: null,
+      });
+    } finally {
+      db.close();
+    }
+  });
 });

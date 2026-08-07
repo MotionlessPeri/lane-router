@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-const MIGRATION_V1 = `
+export const MIGRATION_V1_SQL = `
 CREATE TABLE project (
   id TEXT PRIMARY KEY,
   project_key TEXT NOT NULL UNIQUE,
@@ -149,7 +149,7 @@ BEGIN
 END;
 `;
 
-const MIGRATION_V2 = `
+export const MIGRATION_V2_SQL = `
 ALTER TABLE binding ADD COLUMN state TEXT NOT NULL DEFAULT 'bound'
   CHECK (state IN ('bound', 'unbound'));
 ALTER TABLE binding ADD COLUMN state_changed_at INTEGER;
@@ -210,7 +210,95 @@ BEGIN
 END;
 `;
 
-export const LATEST_MIGRATION_VERSION = 2;
+const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
+
+const SAFE_INTEGER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  project: ["manifest_version", "created_at"],
+  workspace: ["created_at"],
+  workspace_relink: ["relinked_at"],
+  lane: [],
+  binding: ["generation", "active_at", "inactive_at?", "state_changed_at?"],
+  message: ["created_at"],
+  delivery: ["sequence", "failure_count", "deadline_at?", "next_attempt_at?", "updated_at?"],
+  claim: ["generation", "lease_deadline_at", "created_at", "closed_at?"],
+  ack: ["generation", "acknowledged_at"],
+  operation: ["created_at"],
+  event: ["occurred_at"],
+};
+
+const MIGRATION_V3 = `
+CREATE TRIGGER binding_workspace_must_match_lane_project
+BEFORE INSERT ON binding
+WHEN (SELECT project_id FROM workspace WHERE id = NEW.workspace_id)
+  IS NOT (SELECT project_id FROM lane WHERE id = NEW.lane_id)
+BEGIN
+  SELECT RAISE(ABORT, 'binding workspace must belong to lane project');
+END;
+
+CREATE TRIGGER workspace_project_change_must_preserve_bindings
+BEFORE UPDATE OF project_id ON workspace
+WHEN EXISTS (
+  SELECT 1 FROM binding b JOIN lane l ON l.id=b.lane_id
+  WHERE b.workspace_id=OLD.id AND l.project_id IS NOT NEW.project_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'workspace project change would invalidate binding');
+END;
+
+CREATE TRIGGER lane_project_change_must_preserve_bindings
+BEFORE UPDATE OF project_id ON lane
+WHEN EXISTS (
+  SELECT 1 FROM binding b JOIN workspace w ON w.id=b.workspace_id
+  WHERE b.lane_id=OLD.id AND w.project_id IS NOT NEW.project_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'lane project change would invalidate binding');
+END;
+
+CREATE TRIGGER claim_insert_must_match_delivery_context
+BEFORE INSERT ON claim
+WHEN NOT EXISTS (
+  SELECT 1 FROM delivery d
+  JOIN binding b ON b.lane_id = d.target_lane_id AND b.is_current = 1
+  WHERE d.id = NEW.delivery_id
+    AND d.state = 'claimed'
+    AND d.deadline_kind = 'lease'
+    AND d.deadline_at = NEW.lease_deadline_at
+    AND b.state = 'bound'
+    AND b.generation = NEW.generation
+)
+BEGIN
+  SELECT RAISE(ABORT, 'claim must match claimed delivery and current binding');
+END;
+
+CREATE TRIGGER ack_insert_must_match_claim_and_payload
+BEFORE INSERT ON ack
+WHEN json_extract(NEW.outcome_payload_json, '$.kind') IS NOT NEW.outcome_kind
+  OR NOT EXISTS (
+    SELECT 1 FROM claim c
+    JOIN delivery d ON d.id = NEW.delivery_id AND d.state = 'claimed'
+    JOIN binding b ON b.lane_id = d.target_lane_id AND b.is_current = 1
+    WHERE c.id = NEW.claim_id
+      AND c.delivery_id = NEW.delivery_id
+      AND c.generation = NEW.generation
+      AND c.closed_at IS NULL
+      AND b.state = 'bound'
+      AND b.generation = NEW.generation
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'ack must match active claim, delivery, generation, and payload');
+END;
+${safeIntegerTriggerSql()}
+`;
+
+export const LATEST_MIGRATION_VERSION = 3;
+
+export class DatabaseIntegrityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
 
 export function migrateDatabase(database: Database.Database): void {
   const currentVersion = database.pragma("user_version", { simple: true }) as number;
@@ -219,15 +307,132 @@ export function migrateDatabase(database: Database.Database): void {
   }
   if (currentVersion === 0) {
     database.transaction(() => {
-      database.exec(MIGRATION_V1);
+      database.exec(MIGRATION_V1_SQL);
       database.pragma("user_version = 1");
     })();
   }
   const versionAfterV1 = database.pragma("user_version", { simple: true }) as number;
   if (versionAfterV1 === 1) {
+    assertV1BindingLifecycleIntegrity(database);
     database.transaction(() => {
-      database.exec(MIGRATION_V2);
+      database.exec(MIGRATION_V2_SQL);
       database.pragma("user_version = 2");
     })();
+  }
+  const versionAfterV2 = database.pragma("user_version", { simple: true }) as number;
+  if (versionAfterV2 === 2) {
+    assertV2Integrity(database);
+    database.transaction(() => {
+      database.exec(MIGRATION_V3);
+      database.pragma("user_version = 3");
+    })();
+  }
+}
+
+function safeIntegerTriggerSql(): string {
+  return Object.entries(SAFE_INTEGER_COLUMNS)
+    .filter(([, columns]) => columns.length > 0)
+    .flatMap(([table, columns]) => {
+      const invalid = columns.map((columnSpec) => {
+        const nullable = columnSpec.endsWith("?");
+        const column = nullable ? columnSpec.slice(0, -1) : columnSpec;
+        const check = `typeof(NEW.${column}) != 'integer' OR NEW.${column} NOT BETWEEN -${MAX_SAFE_INTEGER} AND ${MAX_SAFE_INTEGER}`;
+        return nullable ? `(NEW.${column} IS NOT NULL AND (${check}))` : `(${check})`;
+      }).join(" OR ");
+      return ["INSERT", "UPDATE"].map((operation) => `
+CREATE TRIGGER ${table}_safe_integers_${operation.toLowerCase()}
+BEFORE ${operation} ON ${table}
+WHEN ${invalid}
+BEGIN
+  SELECT RAISE(ABORT, '${table} integer is outside JavaScript safe range');
+END;`);
+    }).join("\n");
+}
+
+function assertV2Integrity(database: Database.Database): void {
+  const bindingInvalid = database.prepare(`
+    SELECT id FROM binding
+    WHERE NOT (
+      (is_current = 1 AND state = 'bound' AND inactive_at IS NULL AND inactive_reason IS NULL
+        AND state_changed_at IS NULL AND state_reason IS NULL) OR
+      (is_current = 1 AND state = 'unbound' AND inactive_at IS NULL AND inactive_reason IS NULL
+        AND state_changed_at IS NOT NULL AND LENGTH(TRIM(state_reason)) > 0) OR
+      (is_current = 0 AND inactive_at IS NOT NULL AND LENGTH(TRIM(inactive_reason)) > 0
+        AND ((state = 'bound' AND state_changed_at IS NULL AND state_reason IS NULL)
+          OR (state = 'unbound' AND state_changed_at IS NOT NULL AND LENGTH(TRIM(state_reason)) > 0)))
+    ) LIMIT 1
+  `).get() as { id: string } | undefined;
+  if (bindingInvalid !== undefined) {
+    throw new DatabaseIntegrityError(`Binding ${bindingInvalid.id} has invalid v2 lifecycle data`);
+  }
+
+  if (tableExists(database, "lane") && tableExists(database, "workspace")) {
+    const crossProject = database.prepare(`
+      SELECT b.id FROM binding b JOIN lane l ON l.id=b.lane_id
+      JOIN workspace w ON w.id=b.workspace_id WHERE l.project_id != w.project_id LIMIT 1
+    `).get() as { id: string } | undefined;
+    if (crossProject !== undefined) throw new DatabaseIntegrityError(`Binding ${crossProject.id} crosses project ownership`);
+  }
+  if (tableExists(database, "delivery") && tableExists(database, "claim")) {
+    const badClaim = database.prepare(`
+      SELECT d.id FROM delivery d WHERE d.state='claimed' AND NOT EXISTS (
+        SELECT 1 FROM claim c JOIN binding b
+          ON b.lane_id=d.target_lane_id AND b.is_current=1
+        WHERE c.delivery_id=d.id AND c.closed_at IS NULL
+          AND c.lease_deadline_at=d.deadline_at
+          AND c.generation=b.generation AND b.state='bound'
+      ) UNION ALL
+      SELECT c.delivery_id FROM claim c JOIN delivery d ON d.id=c.delivery_id
+      WHERE c.closed_at IS NULL AND (d.state!='claimed' OR c.lease_deadline_at!=d.deadline_at)
+      LIMIT 1
+    `).get() as { id: string } | undefined;
+    if (badClaim !== undefined) throw new DatabaseIntegrityError(`Claim integrity failed for delivery ${badClaim.id}`);
+  }
+  if (tableExists(database, "ack")) {
+    const badAck = database.prepare(`
+      SELECT a.delivery_id AS id FROM ack a WHERE
+        json_extract(a.outcome_payload_json, '$.kind') IS NOT a.outcome_kind OR NOT EXISTS (
+          SELECT 1 FROM claim c WHERE c.id=a.claim_id
+            AND c.delivery_id=a.delivery_id AND c.generation=a.generation
+        ) LIMIT 1
+    `).get() as { id: string } | undefined;
+    if (badAck !== undefined) throw new DatabaseIntegrityError(`Ack integrity failed for delivery ${badAck.id}`);
+  }
+  assertSafeIntegerIntegrity(database);
+}
+
+function assertSafeIntegerIntegrity(database: Database.Database): void {
+  for (const [table, columns] of Object.entries(SAFE_INTEGER_COLUMNS)) {
+    if (columns.length === 0 || !tableExists(database, table)) continue;
+    const invalid = columns.map((columnSpec) => {
+      const nullable = columnSpec.endsWith("?");
+      const column = nullable ? columnSpec.slice(0, -1) : columnSpec;
+      const check = `typeof(${column}) != 'integer' OR ${column} NOT BETWEEN -${MAX_SAFE_INTEGER} AND ${MAX_SAFE_INTEGER}`;
+      return nullable ? `(${column} IS NOT NULL AND (${check}))` : `(${check})`;
+    }).join(" OR ");
+    const row = database.prepare(`SELECT rowid FROM ${table} WHERE ${invalid} LIMIT 1`).get();
+    if (row !== undefined) throw new DatabaseIntegrityError(`${table} contains an unsafe integer`);
+  }
+}
+
+function tableExists(database: Database.Database, table: string): boolean {
+  return database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table) !== undefined;
+}
+
+function assertV1BindingLifecycleIntegrity(database: Database.Database): void {
+  const invalid = database.prepare(`
+    SELECT id FROM binding
+    WHERE generation <= 0
+      OR is_current NOT IN (0, 1)
+      OR (is_current = 1 AND (inactive_at IS NOT NULL OR inactive_reason IS NOT NULL))
+      OR (is_current = 0 AND (
+        inactive_at IS NULL OR inactive_reason IS NULL OR LENGTH(TRIM(inactive_reason)) = 0
+      ))
+    LIMIT 1
+  `).get() as { id: string } | undefined;
+  if (invalid !== undefined) {
+    throw new DatabaseIntegrityError(
+      `Binding ${invalid.id} has invalid lifecycle data; repair it before migration`,
+    );
   }
 }
