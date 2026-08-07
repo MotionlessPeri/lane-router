@@ -1,7 +1,7 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { WebSocketServer } from "ws";
-import { join } from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
@@ -282,6 +282,27 @@ test.each(["bad-thread-status", "bad-turn-items", "bad-dynamic-output"])("capabi
   await expect(gate.verify(fakeCommand({ FAKE_CODEX_SCHEMA: schemaMode }))).rejects.toBeInstanceOf(CodexCapabilityError);
 });
 
+test("capability gate resolves a PATH executable before fingerprinting", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lane-router-capability-path-")); dirs.push(root);
+  const gate = new CodexCapabilityGate({ cacheDir: join(root, "cache") });
+  const direct = await gate.verify(fakeCommand());
+  const viaPath = await gate.verify({ executable: basename(process.execPath), prefixArgs: [join(process.cwd(), "tests", "fixtures", "codex", "fake-app-server.mjs")], env: { PATH: `${dirname(process.execPath)}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}` } });
+  expect(viaPath.fingerprint).toBe(direct.fingerprint);
+  expect(viaPath.cached).toBe(true);
+});
+
+test("capability gate rejects excessive schema files and a symlink cache entry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lane-router-capability-bounds-")); dirs.push(root);
+  const gate = new CodexCapabilityGate({ cacheDir: join(root, "cache") });
+  await expect(gate.verify(fakeCommand({ FAKE_CODEX_SCHEMA_MANY_FILES: "1" }))).rejects.toBeInstanceOf(CodexCapabilityError);
+  const cacheDir = join(root, "symlink-cache");
+  await import("node:fs/promises").then(({ mkdir }) => mkdir(cacheDir));
+  const target = join(root, "target-dir");
+  await import("node:fs/promises").then(({ mkdir }) => mkdir(target));
+  await symlink(target, join(cacheDir, "codex-capability.json"), "junction");
+  await expect(new CodexCapabilityGate({ cacheDir }).verify(fakeCommand())).rejects.toBeInstanceOf(CodexCapabilityError);
+});
+
 test("process manager selects loopback, waits for readiness, and shuts down cleanly", async () => {
   const cacheDir = await mkdtemp(join(tmpdir(), "lane-router-process-")); dirs.push(cacheDir);
   const manager = new CodexAppServerProcess({ command: fakeCommand(), gate: new CodexCapabilityGate({ cacheDir }), readinessTimeoutMs: 3_000 });
@@ -348,6 +369,63 @@ test("process manager restarts an unexpected exit with bounded backoff", async (
   expect(manager.client).toBe(originalClient);
   expect(manager.client.isConnected()).toBe(true);
   await manager.shutdown();
+});
+
+test("live-child transport loss reconnects the stable client without spawning", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lane-router-process-transport-")); dirs.push(root);
+  const marker = join(root, "dropped-once");
+  let spawned = 0;
+  let recovered = 0;
+  const spawnProcess = ((...args: Parameters<typeof spawn>) => { spawned += 1; return spawn(...args); }) as typeof spawn;
+  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_DROP_CONNECTION_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, restartBackoffMs: 5, spawnProcess, onReconnect: () => { recovered += 1; } });
+  const client = manager.client;
+  try {
+    await manager.start();
+    await vi.waitFor(() => expect(existsSync(marker)).toBe(true));
+    await vi.waitFor(() => expect(recovered).toBe(1), { timeout: 5_000 });
+    expect(manager.client.isConnected()).toBe(true);
+    expect(manager.client).toBe(client);
+    expect(spawned).toBe(1);
+  } finally { await manager.shutdown(); }
+});
+
+test("throwing reconnect observers cannot turn a ready replacement into an orphan", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lane-router-process-observer-")); dirs.push(root);
+  const marker = join(root, "exited-once");
+  const children: ReturnType<typeof spawn>[] = [];
+  const spawnProcess = ((...args: Parameters<typeof spawn>) => { const child = spawn(...args); children.push(child); return child; }) as typeof spawn;
+  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_EXIT_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, restartBackoffMs: 5, restartLimit: 2, spawnProcess, onReconnect: () => { throw new Error("observer failed"); } });
+  try {
+    await manager.start();
+    await vi.waitFor(() => expect(manager.client.isConnected()).toBe(true), { timeout: 5_000 });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(children).toHaveLength(2);
+  } finally {
+    await manager.shutdown();
+    for (const child of children) if (child.exitCode === null) child.kill();
+  }
+  expect(children.every((child) => child.exitCode !== null || child.signalCode !== null)).toBe(true);
+});
+
+test("recovery exhaustion fails closed and the next start is fresh", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lane-router-process-exhausted-")); dirs.push(root);
+  const marker = join(root, "exited-once");
+  let spawnAttempt = 0;
+  const spawnProcess = ((...args: Parameters<typeof spawn>) => {
+    spawnAttempt += 1;
+    if (spawnAttempt === 2 || spawnAttempt === 3) throw new Error("restart spawn failed");
+    return spawn(...args);
+  }) as typeof spawn;
+  const delays: number[] = [];
+  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_EXIT_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, restartBackoffMs: 100, restartBackoffCapMs: 150, restartLimit: 2, random: () => 0.5, sleep: async (ms) => { delays.push(ms); }, spawnProcess });
+  try {
+    await manager.start();
+    await vi.waitFor(() => expect(manager.state).toBe("failed"), { timeout: 5_000 });
+    expect(delays).toEqual([50, 75]);
+    await manager.start();
+    expect(spawnAttempt).toBe(4);
+    expect(manager.state).toBe("ready");
+  } finally { await manager.shutdown(); }
 });
 
 test("shutdown during restart backoff cannot spawn an orphan", async () => {

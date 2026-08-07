@@ -47,6 +47,7 @@ if (args[0] === "app-server" && args[1] === "generate-json-schema") {
     ? { type: "object", required: ["contentItems", "success"], properties: { contentItems: { type: "array", items: { type: "string" } }, success: { type: "string" } } }
     : { type: "object", required: ["contentItems", "success"], properties: { contentItems: { type: "array", items: toolContentItem }, success: { type: "boolean" } } });
   for (const [name, required] of Object.entries({ ThreadStatusChangedNotification: ["threadId", "status"], TurnStartedNotification: ["threadId", "turn"], TurnCompletedNotification: ["threadId", "turn"], ItemStartedNotification: ["threadId", "turnId", "item"], ItemCompletedNotification: ["threadId", "turnId", "item"] })) await emit(`${out}/v2/${name}.json`, { type: "object", required, properties: Object.fromEntries(required.map((field) => [field, ["threadId", "turnId"].includes(field) ? { type: "string" } : { type: "object" }])) });
+  if (process.env.FAKE_CODEX_SCHEMA_MANY_FILES === "1") for (let index = 0; index < 300; index += 1) await emit(`${out}/extra-${index}.json`, {});
   process.exit(0);
 }
 if (args[0] === "app-server") {
@@ -59,6 +60,10 @@ if (args[0] === "app-server") {
       socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
       const marker = process.env.FAKE_CODEX_EXIT_ONCE_FILE;
       if (marker && !existsSync(marker)) void writeFile(marker, "exited").then(() => setTimeout(() => process.exit(17), 20));
+    }
+    else if (message.method === "initialized") {
+      const marker = process.env.FAKE_CODEX_DROP_CONNECTION_ONCE_FILE;
+      if (marker && !existsSync(marker)) void writeFile(marker, "dropped").then(() => setTimeout(() => socket.close(), 100));
     }
     else if (message.id !== undefined) socket.send(JSON.stringify({ id: message.id, result: {} }));
   }));
