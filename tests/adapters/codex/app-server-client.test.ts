@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { AppServerClient, AppServerDisconnectedError, AppServerRequestTimeoutError } from "../../../src/adapters/codex/app-server-client.js";
-import { decodeServerMessage, ProtocolDecodeError } from "../../../src/adapters/codex/protocol.js";
+import { decodeServerMessage, decodeThreadReadResult, decodeTurnStartResult, ProtocolDecodeError } from "../../../src/adapters/codex/protocol.js";
 import { CodexAppServerProcess, CodexCapabilityError, CodexCapabilityGate } from "../../../src/adapters/codex/app-server-process.js";
 
 const servers: WebSocketServer[] = [];
@@ -29,6 +29,14 @@ test.each([
   { id: 1, method: "item/tool/call", params: { threadId: "th", turnId: "tu", tool: "x", arguments: {} } },
 ])("protocol decoder rejects malformed required fields: %j", (message) => {
   expect(() => decodeServerMessage(message)).toThrow(ProtocolDecodeError);
+});
+
+test("consumed response decoders validate nested thread and turn discriminators", () => {
+  expect(decodeThreadReadResult({ thread: { id: "th", status: { type: "active" }, turns: [{ id: "tu", status: "inProgress", items: [] }] } })).toMatchObject({ thread: { id: "th", status: { type: "active" } } });
+  expect(decodeTurnStartResult({ turn: { id: "tu", status: "inProgress", items: [] } })).toMatchObject({ turn: { id: "tu", status: "inProgress" } });
+  expect(() => decodeThreadReadResult({ thread: { id: "th", status: { renamed: "idle" }, turns: [] } })).toThrow(ProtocolDecodeError);
+  expect(() => decodeThreadReadResult({ thread: { id: "th", status: { type: "idle" }, turns: [{ id: "tu", status: "renamed", items: [] }] } })).toThrow(ProtocolDecodeError);
+  expect(() => decodeTurnStartResult({ turn: { id: 4, status: "inProgress", items: [] } })).toThrow(ProtocolDecodeError);
 });
 
 async function server(handler: (message: Record<string, unknown>, socket: import("ws").WebSocket) => void): Promise<string> {
@@ -155,6 +163,12 @@ test("capability gate rejects thread/start without dynamicTools", async () => {
   await expect(gate.verify(fakeCommand({ FAKE_CODEX_SCHEMA: "missing-dynamic-tools" }))).rejects.toBeInstanceOf(CodexCapabilityError);
 });
 
+test.each(["bad-thread-status", "bad-turn-items", "bad-dynamic-output"])("capability gate rejects structurally invalid consumed response shape: %s", async (schemaMode) => {
+  const cacheDir = await mkdtemp(join(tmpdir(), "lane-router-capability-response-")); dirs.push(cacheDir);
+  const gate = new CodexCapabilityGate({ cacheDir });
+  await expect(gate.verify(fakeCommand({ FAKE_CODEX_SCHEMA: schemaMode }))).rejects.toBeInstanceOf(CodexCapabilityError);
+});
+
 test("process manager selects loopback, waits for readiness, and shuts down cleanly", async () => {
   const cacheDir = await mkdtemp(join(tmpdir(), "lane-router-process-")); dirs.push(cacheDir);
   const manager = new CodexAppServerProcess({ command: fakeCommand(), gate: new CodexCapabilityGate({ cacheDir }), readinessTimeoutMs: 3_000 });
@@ -163,6 +177,51 @@ test("process manager selects loopback, waits for readiness, and shuts down clea
   expect(manager.client.isConnected()).toBe(true);
   await manager.shutdown();
   expect(manager.client.isConnected()).toBe(false);
+});
+
+test("process manager coalesces sequential starts and can start again after shutdown", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lane-router-process-idempotent-")); dirs.push(root);
+  const children: ReturnType<typeof spawn>[] = [];
+  const spawnProcess = ((...args: Parameters<typeof spawn>) => {
+    const child = spawn(...args);
+    children.push(child);
+    return child;
+  }) as typeof spawn;
+  const manager = new CodexAppServerProcess({ command: fakeCommand(), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, spawnProcess });
+  try {
+    const first = await manager.start();
+    const second = await manager.start();
+    expect(second).toBe(first);
+    expect(children).toHaveLength(1);
+    await manager.shutdown();
+    const restarted = await manager.start();
+    expect(restarted).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/);
+    expect(children).toHaveLength(2);
+  } finally {
+    await manager.shutdown();
+    for (const child of children) if (child.exitCode === null) child.kill();
+  }
+  expect(children.every((child) => child.exitCode !== null || child.signalCode !== null)).toBe(true);
+});
+
+test("process manager coalesces concurrent starts without leaking children", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lane-router-process-concurrent-")); dirs.push(root);
+  const children: ReturnType<typeof spawn>[] = [];
+  const spawnProcess = ((...args: Parameters<typeof spawn>) => {
+    const child = spawn(...args);
+    children.push(child);
+    return child;
+  }) as typeof spawn;
+  const manager = new CodexAppServerProcess({ command: fakeCommand(), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, spawnProcess });
+  try {
+    const endpoints = await Promise.all([manager.start(), manager.start(), manager.start()]);
+    expect(new Set(endpoints).size).toBe(1);
+    expect(children).toHaveLength(1);
+  } finally {
+    await manager.shutdown();
+    for (const child of children) if (child.exitCode === null) child.kill();
+  }
+  expect(children.every((child) => child.exitCode !== null || child.signalCode !== null)).toBe(true);
 });
 
 test("process manager restarts an unexpected exit with bounded backoff", async () => {

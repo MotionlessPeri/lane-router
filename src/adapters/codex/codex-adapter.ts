@@ -1,5 +1,6 @@
 import type { AdapterDeliveryRequest, AdapterResult, AdapterRuntimeState, AdapterRuntimeStateRequest, DeliveryAdapter } from "../../core/adapter-contract.js";
 import { codexDynamicTools } from "./dynamic-tools.js";
+import { decodeThreadReadResult, decodeThreadResumeResult, decodeThreadStartResult, decodeTurnStartResult, decodeTurnSteerResult, type ThreadResult } from "./protocol.js";
 
 interface Client { request(method: string, params: unknown): Promise<unknown>; isConnected(): boolean }
 interface Binding { readonly threadId: string }
@@ -8,12 +9,12 @@ export class CodexAdapter implements DeliveryAdapter {
   constructor(private readonly deps: { client: Client; resolveBinding: (laneId: string, generation: number) => Binding | undefined; beforeClaim?: (request: AdapterDeliveryRequest, turnId: string) => void | Promise<void> }) {}
 
   async startThread(options: { cwd: string; developerInstructions?: string }): Promise<string> {
-    const response = record(await this.deps.client.request("thread/start", { cwd: options.cwd, dynamicTools: codexDynamicTools(), ...(options.developerInstructions ? { developerInstructions: options.developerInstructions } : {}) }));
-    return threadId(response);
+    const response = decodeThreadStartResult(await this.deps.client.request("thread/start", { cwd: options.cwd, dynamicTools: codexDynamicTools(), ...(options.developerInstructions ? { developerInstructions: options.developerInstructions } : {}) }));
+    return response.thread.id;
   }
   async resumeThread(persistedThreadId: string): Promise<string> {
-    const response = record(await this.deps.client.request("thread/resume", { threadId: persistedThreadId }));
-    return threadId(response);
+    const response = decodeThreadResumeResult(await this.deps.client.request("thread/resume", { threadId: persistedThreadId }));
+    return response.thread.id;
   }
   async getRuntimeState(request: AdapterRuntimeStateRequest): Promise<AdapterRuntimeState> {
     if (!this.deps.client.isConnected()) return { availability: "offline", turn: "unknown" };
@@ -34,14 +35,13 @@ export class CodexAdapter implements DeliveryAdapter {
     const wake = wakeEnvelope(request);
     try {
       if (state.turn === "busy") {
-        const read = record(await this.deps.client.request("thread/read", { threadId: binding.threadId, includeTurns: true }));
+        const read = decodeThreadReadResult(await this.deps.client.request("thread/read", { threadId: binding.threadId, includeTurns: true }));
         const expectedTurnId = activeTurnId(read);
-        await this.deps.client.request("turn/steer", { threadId: binding.threadId, expectedTurnId, input: [{ type: "text", text: wake }] });
+        decodeTurnSteerResult(await this.deps.client.request("turn/steer", { threadId: binding.threadId, expectedTurnId, input: [{ type: "text", text: wake }] }));
         return "applied_current_turn";
       }
-      const response = record(await this.deps.client.request("turn/start", { threadId: binding.threadId, input: [{ type: "text", text: wake }] }));
-      const turn = record(response.turn); if (typeof turn.id !== "string") throw new Error("turn/start response lacks turn.id");
-      await this.deps.beforeClaim?.(request, turn.id);
+      const response = decodeTurnStartResult(await this.deps.client.request("turn/start", { threadId: binding.threadId, input: [{ type: "text", text: wake }] }));
+      await this.deps.beforeClaim?.(request, response.turn.id);
       return "started_new_turn";
     } catch (error) {
       return isMissingThread(error) ? "binding_not_found" : "adapter_failed";
@@ -49,19 +49,15 @@ export class CodexAdapter implements DeliveryAdapter {
   }
 
   private async probe(binding: Binding): Promise<AdapterRuntimeState> {
-    const response = record(await this.deps.client.request("thread/read", { threadId: binding.threadId, includeTurns: false }));
-    const thread = record(response.thread); const status = record(thread.status);
-    if (status.type === "idle") return { availability: "online", turn: "idle" };
-    if (status.type === "active" || status.type === "busy") return { availability: "online", turn: "busy" };
+    const response = decodeThreadReadResult(await this.deps.client.request("thread/read", { threadId: binding.threadId, includeTurns: false }));
+    if (response.thread.status.type === "idle") return { availability: "online", turn: "idle" };
+    if (response.thread.status.type === "active") return { availability: "online", turn: "busy" };
     return { availability: "degraded", turn: "unknown" };
   }
 }
 
-function record(value: unknown): Record<string, unknown> { if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Codex response must be an object"); return value as Record<string, unknown>; }
-function threadId(response: Record<string, unknown>): string { const thread = record(response.thread); if (typeof thread.id !== "string") throw new Error("Codex response lacks thread.id"); return thread.id; }
-function activeTurnId(response: Record<string, unknown>): string {
-  const thread = record(response.thread);
-  if (Array.isArray(thread.turns)) for (let index = thread.turns.length - 1; index >= 0; index -= 1) { const turn = record(thread.turns[index]); if (turn.status === "inProgress" && typeof turn.id === "string") return turn.id; }
+function activeTurnId(response: ThreadResult): string {
+  for (let index = response.thread.turns.length - 1; index >= 0; index -= 1) { const turn = response.thread.turns[index]; if (turn?.status === "inProgress") return turn.id; }
   throw new Error("Codex thread is busy but has no authoritative in-progress turn");
 }
 function isMissingThread(error: unknown): boolean { return error instanceof Error && /not found|unknown thread/i.test(error.message); }

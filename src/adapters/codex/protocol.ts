@@ -13,6 +13,14 @@ export interface DynamicToolCallParams {
   readonly arguments: unknown;
 }
 
+export type ThreadStatusType = "idle" | "active" | "notLoaded";
+export type TurnStatus = "completed" | "interrupted" | "failed" | "inProgress";
+export interface CodexTurn { readonly id: string; readonly status: TurnStatus; readonly items: readonly unknown[] }
+export interface CodexThread { readonly id: string; readonly status: Readonly<{ type: ThreadStatusType }>; readonly turns: readonly CodexTurn[] }
+export interface ThreadResult { readonly thread: CodexThread }
+export interface TurnStartResult { readonly turn: CodexTurn }
+export interface TurnSteerResult { readonly turnId: string }
+
 export type ServerMessage =
   | Readonly<{ kind: "response"; id: JsonRpcId; result?: unknown; error?: Readonly<{ code: number; message: string; data?: unknown }> }>
   | Readonly<{ kind: "notification"; method: string; params: Readonly<Record<string, unknown>> }>
@@ -43,6 +51,45 @@ export function decodeServerMessage(input: unknown): ServerMessage {
   throw new ProtocolDecodeError("message is not a JSON-RPC response, notification, or supported request");
 }
 
+export function decodeThreadStartResult(input: unknown): ThreadResult { return decodeThreadResult(input, "thread/start result"); }
+export function decodeThreadResumeResult(input: unknown): ThreadResult { return decodeThreadResult(input, "thread/resume result"); }
+export function decodeThreadReadResult(input: unknown): ThreadResult { return decodeThreadResult(input, "thread/read result"); }
+export function decodeTurnStartResult(input: unknown): TurnStartResult {
+  const value = record(input, "turn/start result");
+  return { turn: decodeTurn(value.turn, "turn/start result.turn") };
+}
+
+export function decodeTurnSteerResult(input: unknown): TurnSteerResult {
+  const value = record(input, "turn/steer result");
+  if (typeof value.turnId !== "string" || value.turnId.length === 0) throw new ProtocolDecodeError("turn/steer result.turnId must be a non-empty string");
+  return { turnId: value.turnId };
+}
+
+function decodeThreadResult(input: unknown, label: string): ThreadResult {
+  const value = record(input, label);
+  return { thread: decodeThread(value.thread, `${label}.thread`) };
+}
+
+function decodeThread(input: unknown, label: string): CodexThread {
+  const value = record(input, label);
+  if (typeof value.id !== "string" || value.id.length === 0) throw new ProtocolDecodeError(`${label}.id must be a non-empty string`);
+  const status = record(value.status, `${label}.status`);
+  if (!isThreadStatus(status.type)) throw new ProtocolDecodeError(`${label}.status.type is invalid`);
+  if (!Array.isArray(value.turns)) throw new ProtocolDecodeError(`${label}.turns must be an array`);
+  return { id: value.id, status: { type: status.type }, turns: value.turns.map((turn, index) => decodeTurn(turn, `${label}.turns[${index}]`)) };
+}
+
+function decodeTurn(input: unknown, label: string): CodexTurn {
+  const value = record(input, label);
+  if (typeof value.id !== "string" || value.id.length === 0) throw new ProtocolDecodeError(`${label}.id must be a non-empty string`);
+  if (!isTurnStatus(value.status)) throw new ProtocolDecodeError(`${label}.status is invalid`);
+  if (!Array.isArray(value.items)) throw new ProtocolDecodeError(`${label}.items must be an array`);
+  return { id: value.id, status: value.status, items: value.items };
+}
+
+function isThreadStatus(value: unknown): value is ThreadStatusType { return value === "idle" || value === "active" || value === "notLoaded"; }
+function isTurnStatus(value: unknown): value is TurnStatus { return value === "completed" || value === "interrupted" || value === "failed" || value === "inProgress"; }
+
 function decodeDynamicToolCall(input: unknown): DynamicToolCallParams {
   const value = record(input, "item/tool/call.params");
   for (const field of ["threadId", "turnId", "callId", "tool"] as const)
@@ -55,8 +102,11 @@ function validateConsumedNotification(method: string, params: Record<string, unk
   if (!["turn/started", "turn/completed", "item/started", "item/completed", "thread/status/changed"].includes(method)) return;
   if (typeof params.threadId !== "string") throw new ProtocolDecodeError(`${method} threadId must be a string`);
   if (method.startsWith("turn/")) {
-    const turn = record(params.turn, `${method}.turn`);
-    if (typeof turn.id !== "string") throw new ProtocolDecodeError(`${method} turn.id must be a string`);
+    decodeTurn(params.turn, `${method}.turn`);
+  }
+  if (method === "thread/status/changed") {
+    const status = record(params.status, `${method}.status`);
+    if (!isThreadStatus(status.type)) throw new ProtocolDecodeError(`${method}.status.type is invalid`);
   }
   if (method.startsWith("item/")) {
     if (typeof params.turnId !== "string") throw new ProtocolDecodeError(`${method} turnId must be a string`);

@@ -3,10 +3,12 @@ import { CodexAdapter } from "../../../src/adapters/codex/codex-adapter.js";
 
 const delivery = { deliveryId: "d", messageId: "m", targetLaneId: "p/b", sequence: 1, kind: "normal", bindingGeneration: 2 } as const;
 
-function setup(status: "idle" | "busy" = "idle") {
+function setup(state: "idle" | "busy" = "idle") {
+  const status = state === "busy" ? "active" : "idle";
   const request = vi.fn(async (method: string) => method === "thread/read"
-    ? { thread: { id: "th", status: { type: status }, turns: status === "busy" ? [{ id: "turn", status: "inProgress" }] : [] } }
-    : method === "thread/start" ? { thread: { id: "th" } }
+    ? { thread: { id: "th", status: { type: status }, turns: state === "busy" ? [{ id: "turn", status: "inProgress", items: [] }] : [] } }
+    : method === "thread/start" ? { thread: { id: "th", status: { type: "idle" }, turns: [] } }
+    : method === "thread/resume" ? { thread: { id: "th", status: { type: "idle" }, turns: [] } }
     : method === "turn/start" ? { turn: { id: "turn", status: "inProgress", items: [] } }
     : method === "turn/steer" ? { turnId: "turn" } : {});
   const connected = vi.fn(() => true);
@@ -23,7 +25,7 @@ test("runtime state probes App Server and never reports idle while disconnected"
 });
 
 test("runtime state never reports idle for an unknown App Server status", async () => {
-  const adapter = new CodexAdapter({ client: { isConnected: () => true, request: vi.fn(async () => ({ thread: { id: "th", status: { type: "notLoaded" } } })) }, resolveBinding: () => ({ threadId: "th" }) });
+  const adapter = new CodexAdapter({ client: { isConnected: () => true, request: vi.fn(async () => ({ thread: { id: "th", status: { type: "notLoaded" }, turns: [] } })) }, resolveBinding: () => ({ threadId: "th" }) });
   expect(await adapter.getRuntimeState(delivery)).toEqual({ availability: "degraded", turn: "unknown" });
 });
 
@@ -66,7 +68,7 @@ test("busy normal queues without steering, while correction steers", async () =>
 
 test("correction fails safely when busy state has no authoritative active turn", async () => {
   const x = setup("busy");
-  x.request.mockResolvedValue({ thread: { id: "th", status: { type: "busy" }, turns: [] } });
+  x.request.mockResolvedValue({ thread: { id: "th", status: { type: "active" }, turns: [] } });
   expect(await x.adapter.deliver({ ...delivery, kind: "correction" })).toBe("adapter_failed");
   expect(x.request).not.toHaveBeenCalledWith("turn/steer", expect.anything());
 });
@@ -88,6 +90,6 @@ test("starts new and resumes persisted threads", async () => {
   const x = setup();
   expect(await x.adapter.startThread({ cwd: "C:/tmp", developerInstructions: "Fetch every wake message through lane_message_get." })).toBe("th");
   expect(x.request).toHaveBeenCalledWith("thread/start", expect.objectContaining({ cwd: "C:/tmp", developerInstructions: "Fetch every wake message through lane_message_get.", dynamicTools: expect.arrayContaining([expect.objectContaining({ name: "lane_message_get" })]) }));
-  x.request.mockResolvedValueOnce({ thread: { id: "persisted" } });
+  x.request.mockResolvedValueOnce({ thread: { id: "persisted", status: { type: "idle" }, turns: [] } });
   expect(await x.adapter.resumeThread("persisted")).toBe("persisted");
 });

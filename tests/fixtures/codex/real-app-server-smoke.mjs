@@ -9,7 +9,8 @@ import { openDatabase } from "../../../dist/storage/database.js";
 const executable = process.env.CODEX_EXE;
 const sourceAuth = process.env.CODEX_AUTH_FILE;
 const version = process.env.CODEX_VERSION ?? "unknown";
-if (!executable || !sourceAuth) {
+const expectedRuntimeSha = process.env.EXPECTED_RUNTIME_SHA;
+if (!executable || !sourceAuth || !expectedRuntimeSha || !/^[0-9a-f]{40}$/.test(expectedRuntimeSha)) {
   console.error(JSON.stringify({ stage: "setup", code: "MISSING_REQUIRED_ENV" }));
   process.exit(2);
 }
@@ -91,7 +92,7 @@ try {
   const turnCount = history && typeof history === "object" && history.thread && typeof history.thread === "object" && Array.isArray(history.thread.turns) ? history.thread.turns.length : 0;
   if (turnCount < 1) throw coded("RESUME_HISTORY_EMPTY");
 
-  console.log(JSON.stringify({ stage: "complete", version, runtimeCommit: "0569261f947c5cfeff4471c88c60353f21e33e66", threadId, turnId, callIds, toolCount: toolNames.length, effectCount: inbox.length, resumedTurnCount: turnCount, tuiAttached: false }));
+  console.log(JSON.stringify({ stage: "complete", version, runtimeCommit: expectedRuntimeSha, threadId, turnId, callIds, toolCount: toolNames.length, effectCount: inbox.length, resumedTurnCount: turnCount, tuiAttached: false }));
 } catch (error) {
   console.error(JSON.stringify({ stage, code: error && typeof error === "object" && typeof error.code === "string" ? error.code : "REAL_FIXTURE_FAILED", toolCount: toolNames.length, callCount: callIds.length, threadId: threadId ?? null, turnId: turnId ?? null }));
   process.exitCode = 1;

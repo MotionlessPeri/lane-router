@@ -12,6 +12,7 @@ if (args[0] === "app-server" && args[1] === "generate-json-schema") {
   if (!out) process.exit(2);
   await mkdir(`${out}/v1`, { recursive: true }); await mkdir(`${out}/v2`, { recursive: true });
   const compatible = process.env.FAKE_CODEX_SCHEMA !== "incompatible";
+  const schemaMode = process.env.FAKE_CODEX_SCHEMA;
   const methods = compatible ? ["initialize", "thread/start", "thread/resume", "thread/read", "turn/start", "turn/steer"] : ["initialize"];
   const decoy = process.env.FAKE_CODEX_SCHEMA === "decoy";
   const format = process.env.FAKE_CODEX_FORMAT === "pretty" ? 2 : undefined;
@@ -25,13 +26,26 @@ if (args[0] === "app-server" && args[1] === "generate-json-schema") {
   await emit(`${out}/v2/ThreadStartParams.json`, { type: "object", properties: dynamicTools });
   for (const [name, required] of Object.entries({ ThreadResumeParams: ["threadId"], ThreadReadParams: ["threadId"], TurnStartParams: ["input", "threadId"], TurnSteerParams: ["expectedTurnId", "input", "threadId"] }))
     await emit(`${out}/v2/${name}.json`, { type: "object", required, properties: Object.fromEntries(required.map((field) => [field, field === "input" ? { type: "array" } : { type: "string" }])) });
-  const thread = { type: "object", required: ["id", "status", "turns"], properties: { id: { type: "string" }, status: { type: "object", required: ["type"], properties: { type: { enum: ["idle", "active", "notLoaded"] } } }, turns: { type: "array" } } };
+  const threadStatus = schemaMode === "bad-thread-status"
+    ? { type: "object", properties: { renamed: { enum: ["idle", "active", "notLoaded"] } } }
+    : { type: "object", required: ["type"], properties: { type: { enum: ["idle", "active", "notLoaded"] } } };
+  const threadTurn = schemaMode === "bad-turn-items"
+    ? { type: "object", required: ["status", "items"], properties: { status: { enum: ["completed", "interrupted", "failed", "inProgress"] }, items: { type: "array" } } }
+    : { type: "object", required: ["id", "status", "items"], properties: { id: { type: "string" }, status: { enum: ["completed", "interrupted", "failed", "inProgress"] }, items: { type: "array" } } };
+  const thread = { type: "object", required: ["id", "status", "turns"], properties: { id: { type: "string" }, status: threadStatus, turns: { type: "array", items: threadTurn } } };
   for (const name of ["ThreadStartResponse", "ThreadResumeResponse", "ThreadReadResponse"]) await emit(`${out}/v2/${name}.json`, { type: "object", required: ["thread"], properties: { thread } });
-  const turn = { type: "object", required: ["id", "status", "items"], properties: { id: { type: "string" }, status: { type: "string" }, items: { type: "array" } } };
+  const turn = { type: "object", required: ["id", "status", "items"], properties: { id: { type: "string" }, status: { enum: ["completed", "interrupted", "failed", "inProgress"] }, items: { type: "array" } } };
   await emit(`${out}/v2/TurnStartResponse.json`, { type: "object", required: ["turn"], properties: { turn } });
   await emit(`${out}/v2/TurnSteerResponse.json`, { type: "object", required: ["turnId"], properties: { turnId: { type: "string" } } });
   await emit(`${out}/DynamicToolCallParams.json`, { type: "object", required: ["arguments", "callId", "threadId", "tool", "turnId"], properties: { arguments: {}, callId: { type: "string" }, threadId: { type: "string" }, tool: { type: "string" }, turnId: { type: "string" } } });
-  await emit(`${out}/DynamicToolCallResponse.json`, { type: "object", required: ["contentItems", "success"], properties: { contentItems: { type: "array" }, success: { type: "boolean" } } });
+  const toolContentItem = { oneOf: [
+    { type: "object", required: ["type", "text"], properties: { type: { enum: ["inputText"] }, text: { type: "string" } } },
+    { type: "object", required: ["type", "imageUrl"], properties: { type: { enum: ["inputImage"] }, imageUrl: { type: "string" } } },
+    { type: "object", required: ["type", "data"], properties: { type: { enum: ["inputAudio"] }, data: { type: "string" } } },
+  ] };
+  await emit(`${out}/DynamicToolCallResponse.json`, schemaMode === "bad-dynamic-output"
+    ? { type: "object", required: ["contentItems", "success"], properties: { contentItems: { type: "array", items: { type: "string" } }, success: { type: "string" } } }
+    : { type: "object", required: ["contentItems", "success"], properties: { contentItems: { type: "array", items: toolContentItem }, success: { type: "boolean" } } });
   for (const [name, required] of Object.entries({ ThreadStatusChangedNotification: ["threadId", "status"], TurnStartedNotification: ["threadId", "turn"], TurnCompletedNotification: ["threadId", "turn"], ItemStartedNotification: ["threadId", "turnId", "item"], ItemCompletedNotification: ["threadId", "turnId", "item"] })) await emit(`${out}/v2/${name}.json`, { type: "object", required, properties: Object.fromEntries(required.map((field) => [field, ["threadId", "turnId"].includes(field) ? { type: "string" } : { type: "object" }])) });
   process.exit(0);
 }

@@ -93,20 +93,27 @@ async function validateSchema(root: string): Promise<string> {
     const response = requiredSchema(schemas, relative);
     assertObjectFields(response, ["thread"], relative);
     const thread = propertySchema(response, "thread", response);
-    assertObjectFields(thread, ["id", "status", "turns"], `${relative}.thread`);
+    assertObjectFieldsAt(thread, response, ["id", "status", "turns"], `${relative}.thread`);
     assertType(propertySchema(thread, "id", response), response, "string", `${relative}.thread.id`);
-    assertType(propertySchema(thread, "turns", response), response, "array", `${relative}.thread.turns`);
+    const turns = propertySchema(thread, "turns", response);
+    assertType(turns, response, "array", `${relative}.thread.turns`);
+    assertTurnShape(arrayItemSchema(turns, response, `${relative}.thread.turns`), response, `${relative}.thread.turns[]`);
     const status = propertySchema(thread, "status", response);
     for (const discriminator of ["idle", "active", "notLoaded"])
-      if (!containsEnumValue(status, response, discriminator)) throw new CodexCapabilityError(`${relative}.thread.status lacks ${discriminator} discriminator`);
+      if (!containsObjectVariant(status, response, ["type"], "type", discriminator)) throw new CodexCapabilityError(`${relative}.thread.status lacks required ${discriminator} type variant`);
   }
   const turnStart = requiredSchema(schemas, "v2/TurnStartResponse.json");
   assertObjectFields(turnStart, ["turn"], "v2/TurnStartResponse.json");
   const turn = propertySchema(turnStart, "turn", turnStart);
-  assertObjectFields(turn, ["id", "status", "items"], "v2/TurnStartResponse.json.turn");
-  assertType(propertySchema(turn, "id", turnStart), turnStart, "string", "v2/TurnStartResponse.json.turn.id");
+  assertTurnShape(turn, turnStart, "v2/TurnStartResponse.json.turn");
   const steer = requiredSchema(schemas, "v2/TurnSteerResponse.json");
   assertType(propertySchema(steer, "turnId", steer), steer, "string", "v2/TurnSteerResponse.json.turnId");
+  const dynamicResponse = requiredSchema(schemas, "DynamicToolCallResponse.json");
+  assertType(propertySchema(dynamicResponse, "success", dynamicResponse), dynamicResponse, "boolean", "DynamicToolCallResponse.json.success");
+  const contentItems = propertySchema(dynamicResponse, "contentItems", dynamicResponse);
+  assertType(contentItems, dynamicResponse, "array", "DynamicToolCallResponse.json.contentItems");
+  const contentItem = arrayItemSchema(contentItems, dynamicResponse, "DynamicToolCallResponse.json.contentItems");
+  if (!containsObjectVariant(contentItem, dynamicResponse, ["type", "text"], "type", "inputText")) throw new CodexCapabilityError("DynamicToolCallResponse contentItems lacks inputText output shape");
   for (const [relative, required] of Object.entries({ "v2/ThreadStatusChangedNotification.json": ["threadId", "status"], "v2/TurnStartedNotification.json": ["threadId", "turn"], "v2/TurnCompletedNotification.json": ["threadId", "turn"], "v2/ItemStartedNotification.json": ["threadId", "turnId", "item"], "v2/ItemCompletedNotification.json": ["threadId", "turnId", "item"] })) assertObjectFields(requiredSchema(schemas, relative), required, relative);
   return hash.digest("hex");
 }
@@ -121,11 +128,28 @@ function assertMethodBranch(schema: Record<string, unknown>, method: string): vo
   assertObjectFields(branch, ["id", "method", "params"], `${method} request`);
 }
 function assertObjectFields(schema: Record<string, unknown>, fields: readonly string[], label: string): void {
-  const resolved = resolveLocal(schema, schema);
+  assertObjectFieldsAt(schema, schema, fields, label);
+}
+function assertObjectFieldsAt(schema: Record<string, unknown>, root: Record<string, unknown>, fields: readonly string[], label: string): void {
+  const resolved = resolveLocal(schema, root);
   const required = Array.isArray(resolved.required) ? resolved.required : [];
   const properties = record(resolved.properties);
   const missing = fields.filter((field) => !required.includes(field) || !(field in properties));
   if (missing.length) throw new CodexCapabilityError(`${label} lacks required structural fields: ${missing.join(", ")}`);
+}
+function arrayItemSchema(schema: Record<string, unknown>, root: Record<string, unknown>, label: string): Record<string, unknown> {
+  const resolved = resolveLocal(schema, root);
+  const items = record(resolved.items);
+  if (Object.keys(items).length === 0) throw new CodexCapabilityError(`${label} lacks item schema`);
+  return resolveLocal(items, root);
+}
+function assertTurnShape(schema: Record<string, unknown>, root: Record<string, unknown>, label: string): void {
+  assertObjectFieldsAt(schema, root, ["id", "status", "items"], label);
+  assertType(propertySchema(schema, "id", root), root, "string", `${label}.id`);
+  const status = propertySchema(schema, "status", root);
+  for (const discriminator of ["completed", "interrupted", "failed", "inProgress"])
+    if (!containsEnumValue(status, root, discriminator)) throw new CodexCapabilityError(`${label}.status lacks ${discriminator} discriminator`);
+  assertType(propertySchema(schema, "items", root), root, "array", `${label}.items`);
 }
 function propertySchema(schema: Record<string, unknown>, property: string, root: Record<string, unknown>): Record<string, unknown> {
   const resolved = resolveLocal(schema, root);
@@ -150,7 +174,7 @@ function containsEnumValue(schema: Record<string, unknown>, root: Record<string,
 }
 function containsObjectVariant(schema: Record<string, unknown>, root: Record<string, unknown>, fields: readonly string[], discriminator: string, value: string): boolean {
   const resolved = resolveLocal(schema, root);
-  try { assertObjectFields(resolved, fields, "dynamic tool function"); if (containsEnumValue(propertySchema(resolved, discriminator, root), root, value)) return true; } catch { /* inspect nested variants */ }
+  try { assertObjectFieldsAt(resolved, root, fields, "object variant"); if (containsEnumValue(propertySchema(resolved, discriminator, root), root, value)) return true; } catch { /* inspect nested variants */ }
   return ["oneOf", "anyOf", "allOf"].some((key) => Array.isArray(resolved[key]) && (resolved[key] as unknown[]).some((child) => containsObjectVariant(record(child), root, fields, discriminator, value))) || (resolved.items !== undefined && containsObjectVariant(record(resolved.items), root, fields, discriminator, value));
 }
 function canonicalSchema(value: unknown, parentKey = ""): unknown {
@@ -169,6 +193,7 @@ export class CodexAppServerProcess {
   private lifecycleEpoch = 0;
   private restartAbort?: AbortController;
   private restartTask?: Promise<void>;
+  private startTask?: Promise<string>;
   private endpoint?: string;
   private readonly reconnectHandlers = new Set<() => void>();
   private readonly _client: AppServerClient;
@@ -177,9 +202,19 @@ export class CodexAppServerProcess {
     this._client = new AppServerClient({ url: "ws://127.0.0.1:0", requestTimeoutMs: options.readinessTimeoutMs ?? 5_000 });
   }
   onReconnect(handler: () => void): () => void { this.reconnectHandlers.add(handler); return () => this.reconnectHandlers.delete(handler); }
-  async start(): Promise<string> {
+  start(): Promise<string> {
+    if (this.startTask) return this.startTask;
+    if (this.started && this.endpoint) return Promise.resolve(this.endpoint);
     const epoch = ++this.lifecycleEpoch;
     this.started = true;
+    let tracked: Promise<string>;
+    tracked = this.startEpoch(epoch).finally(() => {
+      if (this.startTask === tracked) this.startTask = undefined;
+    });
+    this.startTask = tracked;
+    return tracked;
+  }
+  private async startEpoch(epoch: number): Promise<string> {
     try {
       await this.options.gate.verify(this.options.command);
       this.assertActive(epoch);
@@ -267,7 +302,9 @@ export class CodexAppServerProcess {
     this.started = false;
     this.lifecycleEpoch += 1;
     this.restartAbort?.abort();
+    const startTask = this.startTask;
     await this.stopChildAndClient();
+    await startTask?.catch(() => undefined);
     await this.restartTask?.catch(() => undefined);
     await this.stopChildAndClient();
   }
@@ -275,6 +312,7 @@ export class CodexAppServerProcess {
     await this._client.close().catch(() => undefined);
     const child = this.child;
     this.child = undefined;
+    this.endpoint = undefined;
     if (child) await terminateChild(child);
   }
   private isActive(epoch: number): boolean { return this.started && this.lifecycleEpoch === epoch; }
