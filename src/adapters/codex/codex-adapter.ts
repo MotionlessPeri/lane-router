@@ -7,8 +7,8 @@ interface Binding { readonly threadId: string }
 export class CodexAdapter implements DeliveryAdapter {
   constructor(private readonly deps: { client: Client; resolveBinding: (laneId: string, generation: number) => Binding | undefined; beforeClaim?: (request: AdapterDeliveryRequest, turnId: string) => void | Promise<void> }) {}
 
-  async startThread(options: { cwd: string }): Promise<string> {
-    const response = record(await this.deps.client.request("thread/start", { cwd: options.cwd, dynamicTools: codexDynamicTools() }));
+  async startThread(options: { cwd: string; developerInstructions?: string }): Promise<string> {
+    const response = record(await this.deps.client.request("thread/start", { cwd: options.cwd, dynamicTools: codexDynamicTools(), ...(options.developerInstructions ? { developerInstructions: options.developerInstructions } : {}) }));
     return threadId(response);
   }
   async resumeThread(persistedThreadId: string): Promise<string> {

@@ -19,7 +19,7 @@ These cases verify the experimental Codex App Server boundary that deterministic
 
 **Expected**: The real schema includes `initialize`, `thread/start`, `thread/resume`, `thread/read`, `turn/start`, `turn/steer`, `dynamicTools`, and `item/tool/call`. The dynamic call requires `threadId`, `turnId`, `callId`, `tool`, and `arguments`. A changed executable, version, or schema produces a different fingerprint and is revalidated.
 
-**Last verified**: 2026-08-07 on Codex CLI 0.146.1, M4 commit placeholder. Schema fingerprint: `fd55f76cc8eba025b64d79aaea1d0bc48a115069604f716b326926b36c407eb4`.
+**Last verified**: 2026-08-07 on Codex CLI 0.146.1 and production-runtime commit `0569261f947c5cfeff4471c88c60353f21e33e66`. Two consecutive probes produced executable/version/schema fingerprint `5bbc27ab20a514a3bd49c4f38a83989d0950c1b07c2d848b2607d51335eb38d1`; the second was a cache hit. Canonical schema fingerprint: `8aac2cf925bc06a6ac4b71095115e201691aa629aa965eab39ecb219acd44b17`.
 
 ## TC-CODEX-002: Disposable real App Server turn and resume
 
@@ -31,16 +31,17 @@ These cases verify the experimental Codex App Server boundary that deterministic
 
 **Steps**:
 
-1. Run `$env:CODEX_EXE='C:\Users\KrabsXD\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe'`.
-2. Run `$env:CODEX_AUTH_FILE='C:\Users\KrabsXD\.codex\auth.json'`.
-3. Run `node tests/fixtures/codex/real-app-server-smoke.mjs`.
-4. Confirm the JSON result contains only `endpointHost`, `threadId`, `turnId`, `callId`, and `resumedTurnCount`.
-5. Confirm no Codex App Server child remains and the printed loopback port is closed.
+1. Run `npm run build` so the fixture imports the committed production modules from `dist`.
+2. Run `$env:CODEX_EXE='C:\Users\KrabsXD\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe'`.
+3. Run `$env:CODEX_AUTH_FILE='C:\Users\KrabsXD\.codex\auth.json'` and `$env:CODEX_VERSION='0.146.1'`.
+4. Run `node tests/fixtures/codex/real-app-server-smoke.mjs`.
+5. Confirm the JSON result contains only the sanitized stage, version, production-runtime commit, anonymous IDs, counts, and `tuiAttached` flag.
+6. Confirm no Codex App Server child remains and no fixture temporary directory remains.
 
-**Expected**: The controller initializes over `127.0.0.1`, starts a thread containing the strict `lane_whoami` dynamic tool, receives one `item/tool/call` whose `threadId` and `turnId` match the active conversation, answers it, observes `turn/completed`, disconnects, and resumes the same thread with at least one persisted turn. The fixture removes its temporary `CODEX_HOME`, copied authentication file, workspace, thread data, child process, and port.
+**Expected**: The production runtime initializes over `127.0.0.1`, starts a thread containing all eight strict Lane Router tools, and the production scheduler sends a wake containing ordered IDs but no message body. The model fetches the message through `lane_message_get`, identifies itself through `lane_whoami`, and performs one `lane_send`; the real broker database contains exactly one expected effect. After the first runtime stops, a fresh production runtime resumes the same thread with at least one persisted turn. The fixture removes its SQLite database, temporary `CODEX_HOME`, copied authentication file, workspace, thread data, child processes, and ports.
 
-**Last verified**: 2026-08-07 on Codex CLI 0.146.1, M4 commit placeholder.
+**Last verified**: 2026-08-07 on Codex CLI 0.146.1 and production-runtime commit `0569261f947c5cfeff4471c88c60353f21e33e66`.
 
-**Evidence**: Thread `019fdb0b-8d4c-76f0-9074-eee7e9c0df3b`; turn `019fdb0b-8da6-70f3-98bd-57ff7d1596f5`; dynamic call `exec-57791eec-f999-4a5c-9d97-52de64c7ab3b`; resumed turn count `1`. The first run reached a real turn but model streaming timed out five times before HTTP fallback; the second run used a 300-second fixture deadline and completed in 155 seconds.
+**Evidence**: Thread `019fdb32-b7b6-7412-9731-9835ae631086`; turn `019fdb32-b81b-7370-8bb5-e067f0d0f8ad`; dynamic calls `exec-89d70ee8-8f36-42ea-9543-d23f9ff516e0`, `exec-1476d87b-9085-4b92-b7a6-ca7d78d0e109`, and `exec-4d317d2e-e4d4-4471-9947-d4ee0fa4ce80`; advertised tool count `8`; observed tool count `3`; verified broker effect count `1`; resumed turn count `1`; TUI attached `false`. The production run completed in 169 seconds. During the earlier M4 characterization, the first sampling run timed out five times before HTTP fallback and the bounded retry completed in 155 seconds; the production fixture therefore retains one 300-second deadline and performs no infinite retry.
 
-**Optional observer**: A remote Codex TUI subscription was not automated in this environment. The App Server listener supports an additional observer connection; controller ownership of `item/tool/call` responses remains enforced by the single dispatcher instance and duplicate-call operation key.
+**Optional observer**: A remote Codex TUI subscription was not automated or claimed as verified. No TUI was attached during the broker-driven turn. Controller ownership of `item/tool/call` responses is enforced by the production runtime's single dispatcher and deterministic duplicate-call operation key.

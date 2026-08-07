@@ -1,66 +1,112 @@
-import { copyFile, mkdtemp, mkdir, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "node:net";
-import { spawn } from "node:child_process";
-import WebSocket from "ws";
+import { createCodexRuntime } from "../../../dist/adapters/codex/codex-runtime.js";
+import { BrokerService } from "../../../dist/broker/broker-service.js";
+import { Scheduler } from "../../../dist/broker/scheduler.js";
+import { openDatabase } from "../../../dist/storage/database.js";
 
 const executable = process.env.CODEX_EXE;
 const sourceAuth = process.env.CODEX_AUTH_FILE;
-if (!executable || !sourceAuth) throw new Error("CODEX_EXE and CODEX_AUTH_FILE are required");
-const root = await mkdtemp(join(tmpdir(), "lane-router-real-codex-"));
-const home = join(root, "codex-home"); const workspace = join(root, "workspace");
-await mkdir(home); await mkdir(workspace); await copyFile(sourceAuth, join(home, "auth.json"));
-const port = await freePort(); const endpoint = `ws://127.0.0.1:${port}`;
-const child = spawn(executable, ["app-server", "--listen", endpoint], { env: { ...process.env, CODEX_HOME: home }, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
-let stderr = ""; child.stderr.on("data", (data) => { stderr = `${stderr}${data}`.slice(-4000); });
-async function main() { try {
-  const first = await Rpc.connect(endpoint);
-  await first.initialize();
-  const started = await first.request("thread/start", { cwd: workspace, approvalPolicy: "never", sandbox: "read-only", dynamicTools: [{ type: "function", name: "lane_whoami", description: "Return the current Lane Router identity.", inputSchema: { type: "object", properties: {}, additionalProperties: false } }] });
-  const threadId = started.thread.id;
-  let dynamicCall;
-  first.onRequest = async (message) => {
-    if (message.method !== "item/tool/call") throw new Error(`unexpected server request ${message.method}`);
-    dynamicCall = message.params;
-    return { success: true, contentItems: [{ type: "inputText", text: JSON.stringify({ lane: "fixture-lane", bindingGeneration: 1 }) }] };
-  };
-  const turn = await first.request("turn/start", { threadId, input: [{ type: "text", text: "Call lane_whoami exactly once, then reply with a short acknowledgement." }] });
-  await first.waitFor("turn/completed", (params) => params.threadId === threadId && params.turn.id === turn.turn.id, 300_000);
-  if (!dynamicCall || dynamicCall.threadId !== threadId || dynamicCall.turnId !== turn.turn.id || !dynamicCall.callId) throw new Error("authoritative dynamic tool identifiers were not observed");
-  await first.close();
-  const second = await Rpc.connect(endpoint); await second.initialize();
-  const resumed = await second.request("thread/resume", { threadId });
-  if (resumed.thread.id !== threadId || !Array.isArray(resumed.thread.turns) || resumed.thread.turns.length < 1) throw new Error("resume did not include persisted history");
-  console.log(JSON.stringify({ endpointHost: "127.0.0.1", threadId, turnId: turn.turn.id, callId: dynamicCall.callId, resumedTurnCount: resumed.thread.turns.length }));
-  await second.close();
-} catch (error) {
-  throw new Error(`${error instanceof Error ? error.message : String(error)}; app-server stderr tail: ${stderr}`);
-} finally {
-  if (child.exitCode === null) {
-    child.kill();
-    await new Promise((resolve) => child.once("exit", resolve));
-  }
-  await rm(root, { recursive: true, force: true });
-} }
-
-class Rpc {
-  static async connect(url) {
-    const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline) try { const rpc = new Rpc(url); await rpc.open(); return rpc; } catch { await new Promise((resolve) => setTimeout(resolve, 50)); }
-    throw new Error("app-server readiness timeout");
-  }
-  constructor(url) { this.url = url; this.nextId = 1; this.pending = new Map(); this.notifications = []; }
-  open() { return new Promise((resolve, reject) => { this.socket = new WebSocket(this.url); this.socket.once("open", resolve); this.socket.once("error", reject); this.socket.on("message", (data) => this.receive(JSON.parse(data.toString()))); }); }
-  async initialize() { await this.request("initialize", { clientInfo: { name: "lane-router-real-fixture", version: "0.1.0" }, capabilities: { experimentalApi: true } }); this.socket.send(JSON.stringify({ method: "initialized" })); }
-  request(method, params) { const id = this.nextId++; return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); this.socket.send(JSON.stringify({ id, method, params })); }); }
-  receive(message) {
-    if (message.id !== undefined && message.method) { void Promise.resolve(this.onRequest?.(message)).then((result) => this.socket.send(JSON.stringify({ id: message.id, result })), (error) => this.socket.send(JSON.stringify({ id: message.id, error: { code: -32000, message: error.message } }))); return; }
-    if (message.id !== undefined) { const pending = this.pending.get(message.id); if (!pending) return; this.pending.delete(message.id); message.error ? pending.reject(new Error(message.error.message)) : pending.resolve(message.result); return; }
-    this.notifications.push(message); this.notifyWaiters?.();
-  }
-  waitFor(method, predicate, timeoutMs) { return new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error(`timeout waiting for ${method}`)), timeoutMs); const scan = () => { const found = this.notifications.find((item) => item.method === method && predicate(item.params)); if (!found) return; clearTimeout(timer); this.notifyWaiters = undefined; resolve(found.params); }; this.notifyWaiters = scan; scan(); }); }
-  close() { return new Promise((resolve) => { this.socket.once("close", resolve); this.socket.close(); }); }
+const version = process.env.CODEX_VERSION ?? "unknown";
+if (!executable || !sourceAuth) {
+  console.error(JSON.stringify({ stage: "setup", code: "MISSING_REQUIRED_ENV" }));
+  process.exit(2);
 }
-function freePort() { return new Promise((resolve, reject) => { const server = createServer(); server.listen(0, "127.0.0.1", () => { const address = server.address(); const port = typeof address === "object" && address ? address.port : 0; server.close((error) => error ? reject(error) : resolve(port)); }); server.once("error", reject); }); }
-await main();
+
+const root = await mkdtemp(join(tmpdir(), "lane-router-real-codex-"));
+const home = join(root, "codex-home");
+const workspace = join(root, "workspace");
+await mkdir(home); await mkdir(workspace);
+await copyFile(sourceAuth, join(home, "auth.json"));
+const database = openDatabase(join(root, "router.db"));
+let runtime;
+let resumedRuntime;
+let stage = "broker_setup";
+let threadId;
+let turnId;
+const toolNames = [];
+const callIds = [];
+
+try {
+  const broker = createBroker(database, workspace);
+  runtime = createCodexRuntime({ broker, command: { executable, env: { CODEX_HOME: home } }, capabilityCacheDir: join(root, "capability-cache"), adminId: "fixture-runtime" });
+  stage = "runtime_start";
+  await runtime.start();
+  if (runtime.dynamicTools.length !== 8) throw coded("DYNAMIC_TOOL_COUNT");
+
+  stage = "thread_start";
+  threadId = await runtime.adapter.startThread({
+    cwd: workspace,
+    developerInstructions: "For each JSON wake envelope, call lane_message_get for every messageIds entry. Follow the retrieved message and use the requested lane tools before replying.",
+  });
+  const bound = broker.bind({ operationId: "bind-b", adminId: "fixture-admin", bindingId: "fixture-binding-b", laneAddress: "fixture/b", workspaceId: "fixture-workspace", adapter: "codex", conversationId: threadId });
+  runtime.registerBinding({ laneId: "fixture/b", bindingId: bound.binding.id, generation: bound.binding.generation, threadId });
+
+  let complete;
+  const completed = new Promise((resolve) => { complete = resolve; });
+  runtime.client.onNotification((notification) => {
+    if (notification.method === "item/started") {
+      const item = notification.params.item;
+      if (typeof item === "object" && item !== null && item.type === "dynamicToolCall") {
+        if (typeof item.tool === "string") toolNames.push(item.tool);
+        if (typeof item.id === "string") callIds.push(item.id);
+      }
+    }
+    if (notification.method === "turn/completed" && notification.params.threadId === threadId) {
+      const turn = notification.params.turn;
+      if (typeof turn === "object" && turn !== null && typeof turn.id === "string") turnId = turn.id;
+      complete();
+    }
+  });
+
+  stage = "broker_offline_turn";
+  broker.send({
+    operationId: "fixture-instruction",
+    actor: { bindingId: "fixture-binding-a", generation: 1 },
+    target: "fixture/b",
+    kind: "normal",
+    body: "Call lane_whoami. Then call lane_send exactly once with target fixture/a, kind normal, body fixture-result, empty metadata, and any nonempty operation_id. Then reply briefly.",
+    metadata: {},
+  });
+  const scheduler = new Scheduler(database, { codex: runtime.adapter, claude: runtime.adapter }, broker.config);
+  await scheduler.runOnce();
+  await withTimeout(completed, 300_000, "TURN_TIMEOUT");
+
+  stage = "verify_tool_effect";
+  for (const expected of ["lane_message_get", "lane_whoami", "lane_send"])
+    if (!toolNames.includes(expected)) throw coded("EXPECTED_TOOL_NOT_CALLED");
+  const inbox = broker.inbox({ bindingId: "fixture-binding-a", generation: 1 });
+  if (inbox.length !== 1) throw coded("TOOL_EFFECT_COUNT");
+  const effect = broker.message({ bindingId: "fixture-binding-a", generation: 1 }, inbox[0].messageId);
+  if (effect.body !== "fixture-result") throw coded("TOOL_EFFECT_RESULT");
+
+  stage = "detach";
+  await runtime.stop(); runtime = undefined;
+  resumedRuntime = createCodexRuntime({ broker, command: { executable, env: { CODEX_HOME: home } }, capabilityCacheDir: join(root, "capability-cache"), adminId: "fixture-runtime-resumed" });
+  stage = "resume_runtime";
+  await resumedRuntime.start();
+  await resumedRuntime.resumeBindingThread({ laneId: "fixture/b", bindingId: "fixture-binding-b", generation: 1, threadId });
+  const history = await resumedRuntime.client.request("thread/read", { threadId, includeTurns: true });
+  const turnCount = history && typeof history === "object" && history.thread && typeof history.thread === "object" && Array.isArray(history.thread.turns) ? history.thread.turns.length : 0;
+  if (turnCount < 1) throw coded("RESUME_HISTORY_EMPTY");
+
+  console.log(JSON.stringify({ stage: "complete", version, runtimeCommit: "0569261f947c5cfeff4471c88c60353f21e33e66", threadId, turnId, callIds, toolCount: toolNames.length, effectCount: inbox.length, resumedTurnCount: turnCount, tuiAttached: false }));
+} catch (error) {
+  console.error(JSON.stringify({ stage, code: error && typeof error === "object" && typeof error.code === "string" ? error.code : "REAL_FIXTURE_FAILED", toolCount: toolNames.length, callCount: callIds.length, threadId: threadId ?? null, turnId: turnId ?? null }));
+  process.exitCode = 1;
+} finally {
+  await resumedRuntime?.stop().catch(() => undefined);
+  await runtime?.stop().catch(() => undefined);
+  database.close();
+  await rm(root, { recursive: true, force: true });
+}
+
+function createBroker(database, workspace) {
+  const broker = new BrokerService(database);
+  broker.syncProject({ operationId: "sync", adminId: "fixture-admin", workspaceId: "fixture-workspace", rootPath: workspace, manifest: { projectId: "fixture", projectKey: "fixture", displayName: "Fixture", manifestHash: "fixture-hash", manifestVersion: 1, lanes: [{ name: "a", roleFile: "a.md", communicationEntry: true }, { name: "b", roleFile: "b.md", communicationEntry: false }] } });
+  broker.bind({ operationId: "bind-a", adminId: "fixture-admin", bindingId: "fixture-binding-a", laneAddress: "fixture/a", workspaceId: "fixture-workspace", adapter: "codex", conversationId: "fixture-sender" });
+  return broker;
+}
+function coded(code) { const error = new Error(code); error.code = code; return error; }
+function withTimeout(promise, timeoutMs, code) { return new Promise((resolve, reject) => { const timer = setTimeout(() => reject(coded(code)), timeoutMs); promise.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); }); }); }

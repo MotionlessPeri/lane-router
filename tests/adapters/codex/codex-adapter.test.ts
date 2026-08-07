@@ -86,7 +86,8 @@ test("missing persisted App Server thread maps to binding_not_found", async () =
 
 test("starts new and resumes persisted threads", async () => {
   const x = setup();
-  expect(await x.adapter.startThread({ cwd: "C:/tmp" })).toBe("th");
+  expect(await x.adapter.startThread({ cwd: "C:/tmp", developerInstructions: "Fetch every wake message through lane_message_get." })).toBe("th");
+  expect(x.request).toHaveBeenCalledWith("thread/start", expect.objectContaining({ cwd: "C:/tmp", developerInstructions: "Fetch every wake message through lane_message_get.", dynamicTools: expect.arrayContaining([expect.objectContaining({ name: "lane_message_get" })]) }));
   x.request.mockResolvedValueOnce({ thread: { id: "persisted" } });
   expect(await x.adapter.resumeThread("persisted")).toBe("persisted");
 });

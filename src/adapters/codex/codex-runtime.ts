@@ -69,9 +69,9 @@ export class CodexRuntime {
     this.byThread.delete(registration.threadId);
   }
 
-  async startBindingThread(input: Omit<CodexBindingRegistration, "threadId"> & { cwd: string }): Promise<string> {
-    const threadId = await this.adapter.startThread({ cwd: input.cwd });
-    this.registerBinding({ ...input, threadId });
+  async startBindingThread(input: Omit<CodexBindingRegistration, "threadId"> & { cwd: string; developerInstructions?: string }): Promise<string> {
+    const threadId = await this.adapter.startThread({ cwd: input.cwd, ...(input.developerInstructions ? { developerInstructions: input.developerInstructions } : {}) });
+    this.registerBinding({ laneId: input.laneId, bindingId: input.bindingId, generation: input.generation, threadId });
     return threadId;
   }
 
