@@ -65,6 +65,21 @@ export interface BrokerStatus {
   readonly projects: { readonly count: number };
   readonly lanes: { readonly count: number };
   readonly pending: { readonly count: number };
+  readonly dispatchFences: {
+    readonly activeCount: number;
+    readonly affectedLanes: readonly string[];
+  };
+}
+export interface DispatchFenceView {
+  readonly fenceId: string;
+  readonly deliveryId: string;
+  readonly laneId: string;
+  readonly adapterOutcome: AdapterResult;
+  readonly createdAt: number;
+  readonly reasonCode: string;
+  readonly resolvedAt: number | null;
+  readonly resolution: "retry" | "settled" | null;
+  readonly resolutionOperationId: string | null;
 }
 export interface InboxEntry {
   readonly deliveryId: string;
@@ -762,6 +777,13 @@ export class BrokerService {
     };
   }
   status(): BrokerStatus {
+    const activeFences = this.database.prepare(`
+      SELECT COUNT(*) AS count FROM dispatch_fence WHERE resolved_at IS NULL
+    `).get() as { count: number };
+    const affectedLanes = (this.database.prepare(`
+      SELECT DISTINCT lane_id FROM dispatch_fence
+      WHERE resolved_at IS NULL ORDER BY lane_id
+    `).all() as Array<{ lane_id: string }>).map((row) => row.lane_id);
     return {
       projects: this.database
         .prepare("SELECT COUNT(*) AS count FROM project")
@@ -772,10 +794,36 @@ export class BrokerService {
       pending: this.database
         .prepare("SELECT COUNT(*) AS count FROM delivery WHERE state='pending'")
         .get() as { count: number },
+      dispatchFences: {
+        activeCount: activeFences.count,
+        affectedLanes,
+      },
     };
   }
   events(afterId = 0, limit = 100): BrokerEvent[] {
     return listEvents(this.database, afterId, limit);
+  }
+  listDispatchFences(input: {
+    adminId: string;
+    scope: "active" | "all";
+  }): DispatchFenceView[] {
+    this.assertAdminIdentity(input.adminId);
+    const where = input.scope === "active" ? "WHERE resolved_at IS NULL" : "";
+    return (this.database.prepare(`
+      SELECT fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code,
+        resolved_at,resolution,resolution_operation_id
+      FROM dispatch_fence ${where} ORDER BY created_at,fence_id
+    `).all() as DispatchFenceRow[]).map(mapDispatchFence);
+  }
+  getDispatchFence(input: { adminId: string; fenceId: string }): DispatchFenceView {
+    this.assertAdminIdentity(input.adminId);
+    const row = this.database.prepare(`
+      SELECT fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code,
+        resolved_at,resolution,resolution_operation_id
+      FROM dispatch_fence WHERE fence_id=?
+    `).get(input.fenceId) as DispatchFenceRow | undefined;
+    if (!row) throw new BrokerContractError("Dispatch fence was not found");
+    return mapDispatchFence(row);
   }
   resolveDispatchFence(input: {
     operationId: string;
@@ -923,6 +971,9 @@ export class BrokerService {
       generation: row.generation,
       state: row.state,
     };
+  }
+  private assertAdminIdentity(adminId: string): void {
+    if (!adminId.trim()) throw new BrokerContractError("Admin identity is required");
   }
   private assertTargetsActor(deliveryId: string, actor: CurrentBinding): void {
     const row = this.database
@@ -1144,4 +1195,30 @@ function readProjectIdAtRoot(rootPath: string): string | null {
   } catch {
     return null;
   }
+}
+
+interface DispatchFenceRow {
+  fence_id: string;
+  delivery_id: string;
+  lane_id: string;
+  adapter_outcome: AdapterResult;
+  created_at: number;
+  reason_code: string;
+  resolved_at: number | null;
+  resolution: "retry" | "settled" | null;
+  resolution_operation_id: string | null;
+}
+
+function mapDispatchFence(row: DispatchFenceRow): DispatchFenceView {
+  return {
+    fenceId: row.fence_id,
+    deliveryId: row.delivery_id,
+    laneId: row.lane_id,
+    adapterOutcome: row.adapter_outcome,
+    createdAt: row.created_at,
+    reasonCode: row.reason_code,
+    resolvedAt: row.resolved_at,
+    resolution: row.resolution,
+    resolutionOperationId: row.resolution_operation_id,
+  };
 }

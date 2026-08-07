@@ -49,6 +49,19 @@ export interface ApiError {
   readonly message: string;
   readonly details?: unknown;
 }
+const FETCH_FORBIDDEN_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69,
+  77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119,
+  123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515,
+  526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990,
+  993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000,
+  6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080,
+]);
+
+export function isFetchForbiddenPort(port: number): boolean {
+  return FETCH_FORBIDDEN_PORTS.has(port);
+}
+
 export async function startBrokerHttpServer(
   options: BrokerHttpOptions,
 ): Promise<RunningBrokerServer> {
@@ -71,13 +84,14 @@ export async function startBrokerHttpServer(
   server.requestTimeout = options.requestTimeoutMs ?? 30_000;
   server.keepAliveTimeout = options.keepAliveTimeoutMs ?? 5_000;
   const events = attachEventWebSocket(server, options.service, sessionSecret, options.webSocket);
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(options.port ?? 0, host, () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
+  do {
+    await listen(server, options.port ?? 0, host);
+    const selected = (server.address() as AddressInfo).port;
+    if ((options.port ?? 0) !== 0 || !isFetchForbiddenPort(selected)) break;
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => error ? reject(error) : resolve()),
+    );
+  } while (true);
   const address = server.address() as AddressInfo;
   const displayHost =
     address.family === "IPv6" ? `[${address.address}]` : address.address;
@@ -97,6 +111,16 @@ export async function startBrokerHttpServer(
   };
   void options.runtimeLock?.ownershipLost.then(() => running.close());
   return running;
+}
+
+function listen(server: ReturnType<typeof createServer>, port: number, host: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
 }
 
 async function handle(
@@ -194,9 +218,15 @@ async function handle(
               .generation,
           },
         };
+    const serviceMethod = ({
+      "dispatchFence.list": "listDispatchFences",
+      "dispatchFence.get": "getDispatchFence",
+      "dispatchFence.resolve": "resolveDispatchFence",
+      "adapter.reconnect": "notifyAdapterAvailable",
+    } as Partial<Record<RpcMethod, string>>)[rpcMethod] ?? rpcMethod;
     const method = (
       options.service as unknown as Record<string, (input: never) => unknown>
-    )[rpcMethod]!;
+    )[serviceMethod]!;
     let data =
       rpcMethod === "whoami" || rpcMethod === "inbox"
         ? await method.call(

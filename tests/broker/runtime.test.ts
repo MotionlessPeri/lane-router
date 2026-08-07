@@ -27,6 +27,23 @@ import {
   BrokerAlreadyRunningError,
 } from "../../src/broker/runtime.js";
 
+test.each([
+  { staleAfterMs: 0 },
+  { malformedStaleAfterMs: 1.5 },
+  { heartbeatIntervalMs: Number.MAX_SAFE_INTEGER + 1 },
+  { heartbeatIntervalMs: 0 },
+  { staleAfterMs: 10, heartbeatIntervalMs: 4 },
+  { heartbeatJournalMaxRecords: 1 },
+  { heartbeatJournalMaxBytes: 128 },
+  { heartbeatJournalMaxBytes: 32 * 1024 * 1024 },
+] as const)("invalid lock timing/journal config rejects before filesystem mutation: %j", async (options) => {
+  const dir = join(tmpdir(), `lane-router-invalid-lock-${process.pid}-${Math.random()}`);
+  dirs.push(dir);
+  expect(existsSync(dir)).toBe(false);
+  await expect(acquireRuntimeLock(dir, options)).rejects.toThrow(/lock|heartbeat|stale|journal|positive|safe/i);
+  expect(existsSync(dir)).toBe(false);
+});
+
 const dirs: string[] = [];
 afterEach(async () =>
   Promise.all(
@@ -118,6 +135,7 @@ test("a partial heartbeat record preserves the prior live owner record", async (
   const owner = await acquireRuntimeLock(dir, {
     instanceId: "journal-owner",
     heartbeatIntervalMs: 60_000,
+    staleAfterMs: 180_000,
   });
   await appendFile(path, '\n{"pid":');
   await expect(acquireRuntimeLock(dir, {

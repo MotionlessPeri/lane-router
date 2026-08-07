@@ -95,6 +95,57 @@ export interface BrokerLockOwner {
   readonly createdAt: number;
   readonly heartbeatAt: number;
 }
+interface LockConfigInput {
+  staleAfterMs?: number;
+  malformedStaleAfterMs?: number;
+  heartbeatIntervalMs?: number;
+  heartbeatJournalMaxRecords?: number;
+  heartbeatJournalMaxBytes?: number;
+  maxAttempts?: number;
+}
+interface ValidatedLockConfig {
+  staleAfterMs: number;
+  malformedStaleAfterMs: number;
+  heartbeatIntervalMs: number;
+  heartbeatJournalMaxRecords: number;
+  heartbeatJournalMaxBytes: number;
+  maxAttempts: number;
+}
+const MIN_HEARTBEAT_JOURNAL_BYTES = 512;
+const MAX_HEARTBEAT_JOURNAL_BYTES = 16 * 1024 * 1024;
+const MAX_HEARTBEAT_JOURNAL_RECORDS = 1_000_000;
+
+function validateLockConfig(
+  options: LockConfigInput,
+  minimumJournalBytes: number,
+): ValidatedLockConfig {
+  const staleAfterMs = options.staleAfterMs ?? 15_000;
+  const config = {
+    staleAfterMs,
+    malformedStaleAfterMs: options.malformedStaleAfterMs ?? 5_000,
+    heartbeatIntervalMs: options.heartbeatIntervalMs
+      ?? Math.max(1, Math.floor(staleAfterMs / 3)),
+    heartbeatJournalMaxRecords: options.heartbeatJournalMaxRecords ?? 16,
+    heartbeatJournalMaxBytes: options.heartbeatJournalMaxBytes ?? 4_096,
+    maxAttempts: options.maxAttempts ?? 10_000,
+  };
+  for (const [name, value] of Object.entries(config))
+    if (!Number.isSafeInteger(value) || value <= 0)
+      throw new RangeError(`Lock ${name} must be a positive safe integer`);
+  if (config.heartbeatIntervalMs > Math.floor(config.staleAfterMs / 3))
+    throw new RangeError("Lock heartbeat interval times three must not exceed stale timeout");
+  if (
+    config.heartbeatJournalMaxRecords < 2
+    || config.heartbeatJournalMaxRecords > MAX_HEARTBEAT_JOURNAL_RECORDS
+  )
+    throw new RangeError("Lock heartbeat journal record threshold is outside the sensible range");
+  if (
+    config.heartbeatJournalMaxBytes < Math.max(MIN_HEARTBEAT_JOURNAL_BYTES, minimumJournalBytes)
+    || config.heartbeatJournalMaxBytes > MAX_HEARTBEAT_JOURNAL_BYTES
+  )
+    throw new RangeError("Lock heartbeat journal byte threshold cannot hold one record or exceeds the sensible cap");
+  return config;
+}
 type MetadataStage = "serialize" | "truncate" | "write" | "fsync";
 type MetadataTarget = "lock" | "marker";
 type MetadataFault = (stage: MetadataStage, target: MetadataTarget) => void;
@@ -118,19 +169,29 @@ export async function acquireRuntimeLock(
     metadataFault?: MetadataFault;
   } = {},
 ): Promise<BrokerRuntimeLock> {
-  await mkdir(dataDir, { recursive: true });
-  const path = join(dataDir, "broker.lock");
-  const markerPath = join(dataDir, "broker.lock.reclaim");
   const pid = options.pid ?? process.pid;
   const instanceId = options.instanceId ?? randomBytes(16).toString("hex");
   const isPidAlive = options.isPidAlive ?? defaultPidLiveness;
   const now = options.now ?? Date.now;
-  const staleAfterMs = options.staleAfterMs ?? 15_000;
-  const malformedStaleAfterMs = options.malformedStaleAfterMs ?? 5_000;
+  const createdAt = now();
+  const heartbeatAt = now();
   const processStart =
     options.processStart ??
     `${pid}:${Math.floor(Date.now() - process.uptime() * 1000)}`;
-  const maxAttempts = options.maxAttempts ?? 10_000;
+  const maximumRecordBytes = Buffer.byteLength(serializeJournalRecord({
+    pid,
+    instanceId,
+    processStart,
+    createdAt: Number.MAX_SAFE_INTEGER,
+    heartbeatAt: Number.MAX_SAFE_INTEGER,
+  }), "utf8") + 1;
+  const lockConfig = validateLockConfig(options, maximumRecordBytes);
+  await mkdir(dataDir, { recursive: true });
+  const path = join(dataDir, "broker.lock");
+  const markerPath = join(dataDir, "broker.lock.reclaim");
+  const staleAfterMs = lockConfig.staleAfterMs;
+  const malformedStaleAfterMs = lockConfig.malformedStaleAfterMs;
+  const maxAttempts = lockConfig.maxAttempts;
   let attempts = 0;
   for (;;) {
     attempts += 1;
@@ -163,14 +224,13 @@ export async function acquireRuntimeLock(
       const owned = createOwnedLock(
         path,
         markerPath,
-        { pid, instanceId, processStart, createdAt: now(), heartbeatAt: now() },
-        options.heartbeatIntervalMs ??
-          Math.max(250, Math.floor(staleAfterMs / 3)),
+        { pid, instanceId, processStart, createdAt, heartbeatAt },
+        lockConfig.heartbeatIntervalMs,
         now,
         false,
         options.metadataFault,
-        options.heartbeatJournalMaxRecords ?? 16,
-        options.heartbeatJournalMaxBytes ?? 4_096,
+        lockConfig.heartbeatJournalMaxRecords,
+        lockConfig.heartbeatJournalMaxBytes,
         options.onOwnershipLost,
       );
       if (owned) return owned;
@@ -243,13 +303,12 @@ export async function acquireRuntimeLock(
                 createdAt: now(),
                 heartbeatAt: now(),
               },
-              options.heartbeatIntervalMs ??
-                Math.max(250, Math.floor(staleAfterMs / 3)),
+              lockConfig.heartbeatIntervalMs,
               now,
               true,
               options.metadataFault,
-              options.heartbeatJournalMaxRecords ?? 16,
-              options.heartbeatJournalMaxBytes ?? 4_096,
+              lockConfig.heartbeatJournalMaxRecords,
+              lockConfig.heartbeatJournalMaxBytes,
               options.onOwnershipLost,
             );
             if (owned) return owned;

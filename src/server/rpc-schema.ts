@@ -3,6 +3,10 @@ import { z } from "zod";
 const text = z.string().trim().min(1);
 const safeInteger = z.number().int().safe();
 const safePositive = z.number().int().safe().positive();
+const adapterResult = z.enum([
+  "started_new_turn", "applied_current_turn", "queued_next_turn",
+  "stored_pending", "binding_not_found", "adapter_failed",
+]);
 const operation = { operationId: text };
 const identityFields = {
   actor: z.never().optional(),
@@ -145,6 +149,12 @@ export const rpcSchemas = {
   whoami: z.object({ ...identityFields }).strict(),
   inbox: z.object({ ...identityFields }).strict(),
   message: z.object({ messageId: text, ...identityFields }).strict(),
+  "dispatchFence.list": z.object({ scope: z.enum(["active", "all"]), ...identityFields }).strict(),
+  "dispatchFence.get": z.object({ fenceId: text, ...identityFields }).strict(),
+  "dispatchFence.resolve": z.object({
+    ...operation, fenceId: text, resolution: z.enum(["retry", "settled"]), ...identityFields,
+  }).strict(),
+  "adapter.reconnect": z.object({ ...operation, laneId: text, ...identityFields }).strict(),
 } as const;
 export type RpcMethod = keyof typeof rpcSchemas;
 export const adminMethods = new Set<RpcMethod>([
@@ -156,6 +166,10 @@ export const adminMethods = new Set<RpcMethod>([
   "rebuild",
   "rotate",
   "unpark",
+  "dispatchFence.list",
+  "dispatchFence.get",
+  "dispatchFence.resolve",
+  "adapter.reconnect",
 ]);
 
 const binding = z
@@ -250,6 +264,10 @@ export const brokerStatusSchema = z
     projects: z.object({ count: z.number().int().safe().nonnegative() }).strict(),
     lanes: z.object({ count: z.number().int().safe().nonnegative() }).strict(),
     pending: z.object({ count: z.number().int().safe().nonnegative() }).strict(),
+    dispatchFences: z.object({
+      activeCount: z.number().int().safe().nonnegative(),
+      affectedLanes: z.array(text),
+    }).strict(),
   })
   .strict();
 export const brokerEventSchema = z
@@ -286,6 +304,17 @@ export const messageViewSchema = z
   .strict();
 export const healthSchema = z.object({ status: z.literal("ok") }).strict();
 export const adminSessionSchema = z.object({ credential: text }).strict();
+const dispatchFence = z.object({
+  fenceId: text,
+  deliveryId: text,
+  laneId: text,
+  adapterOutcome: adapterResult,
+  createdAt: safeInteger,
+  reasonCode: text,
+  resolvedAt: safeInteger.nullable(),
+  resolution: z.enum(["retry", "settled"]).nullable(),
+  resolutionOperationId: text.nullable(),
+}).strict();
 
 export const serviceRpcResultSchemas = {
   syncProject: z
@@ -332,6 +361,12 @@ export const serviceRpcResultSchemas = {
     .strict(),
   inbox: z.array(inboxEntrySchema),
   message: messageViewSchema,
+  "dispatchFence.list": z.array(dispatchFence),
+  "dispatchFence.get": dispatchFence,
+  "dispatchFence.resolve": z.object({
+    fenceId: text, deliveryId: text, resolution: z.enum(["retry", "settled"]),
+  }).strict(),
+  "adapter.reconnect": z.object({ laneId: text, cleared: z.boolean() }).strict(),
 } satisfies Record<RpcMethod, z.ZodType>;
 
 export const rpcResultSchemas = {

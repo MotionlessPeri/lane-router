@@ -56,6 +56,13 @@ export interface RpcRequestMap {
   whoami: Record<string, never>;
   inbox: Record<string, never>;
   message: { messageId: string };
+  "dispatchFence.list": { scope: "active" | "all" };
+  "dispatchFence.get": { fenceId: string };
+  "dispatchFence.resolve": Operation & {
+    fenceId: string;
+    resolution: "retry" | "settled";
+  };
+  "adapter.reconnect": Operation & { laneId: string };
 }
 const ADMIN_METHODS = new Set<RpcMethod>([
   "syncProject",
@@ -66,6 +73,10 @@ const ADMIN_METHODS = new Set<RpcMethod>([
   "rebuild",
   "rotate",
   "unpark",
+  "dispatchFence.list",
+  "dispatchFence.get",
+  "dispatchFence.resolve",
+  "adapter.reconnect",
 ]);
 
 export class BrokerClientError extends Error {

@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "vitest";
 import { BrokerService } from "../../src/broker/broker-service.js";
 import { BrokerClient } from "../../src/client/broker-client.js";
 import {
+  isFetchForbiddenPort,
   startBrokerHttpServer,
   type RunningBrokerServer,
 } from "../../src/server/http-server.js";
@@ -20,6 +21,13 @@ import { join } from "node:path";
 const servers: RunningBrokerServer[] = [];
 const databases: RouterDatabase[] = [];
 const dataDirs: string[] = [];
+test("ephemeral HTTP servers avoid Fetch forbidden ports", async () => {
+  expect(isFetchForbiddenPort(6000)).toBe(true);
+  expect(isFetchForbiddenPort(6667)).toBe(true);
+  expect(isFetchForbiddenPort(8080)).toBe(false);
+  const x = await setup();
+  expect(isFetchForbiddenPort(Number(new URL(x.server.url).port))).toBe(false);
+});
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => s.close()));
   databases.splice(0).forEach((d) => d.close());
@@ -38,7 +46,7 @@ async function setup() {
     port: 0,
   });
   servers.push(server);
-  return { service, server, client: new BrokerClient(server.url, "secret") };
+  return { db, service, server, client: new BrokerClient(server.url, "secret") };
 }
 
 test("loopback health/status/events use authenticated typed envelopes", async () => {
@@ -76,6 +84,125 @@ test("RPC carries admin and binding identity plus operation IDs", async () => {
   expect(
     await x.client.withCredential(bound.bindingCredential).call("whoami", {}),
   ).toMatchObject({ laneAddress: "p/a" });
+});
+
+test("admin dispatch-fence RPC lists, gets, resolves, reports status, and resumes delivery", async () => {
+  const x = await setup();
+  await x.client.call("syncProject", {
+    operationId: "fence-admin-sync", workspaceId: "w", rootPath: "C:/r",
+    manifest: {
+      projectId: "p", projectKey: "p", displayName: "P", manifestHash: "h", manifestVersion: 1,
+      lanes: [
+        { name: "a", roleFile: "a", communicationEntry: true },
+        { name: "b", roleFile: "b", communicationEntry: false },
+      ],
+    },
+  });
+  const sender = await x.client.call("bind", {
+    operationId: "fence-admin-bind-a", bindingId: "ba", laneAddress: "p/a",
+    workspaceId: "w", adapter: "codex", conversationId: "a",
+  });
+  await x.client.call("bind", {
+    operationId: "fence-admin-bind-b", bindingId: "bb", laneAddress: "p/b",
+    workspaceId: "w", adapter: "codex", conversationId: "b",
+  });
+  const delivery = await x.client.withCredential(sender.bindingCredential).call("send", {
+    operationId: "fence-admin-send", target: "p/b", kind: "normal", body: "secret body", metadata: {},
+  });
+  x.db.prepare(`INSERT INTO dispatch_fence(
+    fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code
+  ) VALUES('admin-fence',?,'p/b','queued_next_turn',100,'post_adapter_persistence_failed')`).run(delivery.deliveryId);
+
+  expect(await x.client.status()).toMatchObject({
+    dispatchFences: { activeCount: 1, affectedLanes: ["p/b"] },
+  });
+  expect(await x.client.call("dispatchFence.list", { scope: "active" })).toEqual([
+    expect.objectContaining({ fenceId: "admin-fence", deliveryId: delivery.deliveryId, resolution: null }),
+  ]);
+  expect(await x.client.call("dispatchFence.get", { fenceId: "admin-fence" })).toEqual(
+    expect.objectContaining({ fenceId: "admin-fence", laneId: "p/b" }),
+  );
+  await expect(x.client.withCredential(sender.bindingCredential).call(
+    "dispatchFence.list", { scope: "all" },
+  )).rejects.toMatchObject({ code: "FORBIDDEN" });
+  expect(await x.client.call("dispatchFence.resolve", {
+    operationId: "fence-admin-resolve", fenceId: "admin-fence", resolution: "retry",
+  })).toMatchObject({ fenceId: "admin-fence", resolution: "retry" });
+  expect(await x.client.call("dispatchFence.list", { scope: "active" })).toEqual([]);
+  expect(await x.client.call("dispatchFence.list", { scope: "all" })).toEqual([
+    expect.objectContaining({ fenceId: "admin-fence", resolution: "retry" }),
+  ]);
+  expect(await x.client.status()).toMatchObject({
+    dispatchFences: { activeCount: 0, affectedLanes: [] },
+  });
+  x.db.prepare(`INSERT INTO adapter_suppression(lane_id,source_delivery_id,created_at,reason_code)
+    VALUES('p/b',?,100,'offline')`).run(delivery.deliveryId);
+  expect(await x.client.call("adapter.reconnect", {
+    operationId: "fence-admin-reconnect", laneId: "p/b",
+  })).toEqual({ laneId: "p/b", cleared: true });
+  const events = await x.client.events();
+  expect(events.map((event) => event.type)).toEqual(expect.arrayContaining([
+    "dispatch_fence_resolved", "adapter_reconnected",
+  ]));
+  expect(JSON.stringify(events)).not.toContain("secret body");
+  let deliveries = 0;
+  const adapter: DeliveryAdapter = {
+    getRuntimeState: async () => ({ availability: "online", turn: "idle" }),
+    deliver: async () => { deliveries += 1; return "queued_next_turn"; },
+  };
+  await new Scheduler(
+    x.db, { codex: adapter, claude: adapter }, x.service.config,
+    { now: () => 100, random: () => 0.5 },
+  ).runOnce();
+  expect(deliveries).toBe(1);
+});
+
+test("dispatch-fence admin status and reads survive database reopen", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "lane-router-fence-admin-reopen-"));
+  dataDirs.push(directory);
+  const path = join(directory, "router.sqlite");
+  const first = openDatabase(path);
+  const initial = new BrokerService(first, { now: () => 100, randomId: (prefix) => prefix });
+  initial.syncProject({
+    operationId: "reopen-sync", adminId: "admin", workspaceId: "w", rootPath: "C:/r",
+    manifest: {
+      projectId: "p", projectKey: "p", displayName: "P", manifestHash: "h", manifestVersion: 1,
+      lanes: [
+        { name: "a", roleFile: "a", communicationEntry: true },
+        { name: "b", roleFile: "b", communicationEntry: false },
+      ],
+    },
+  });
+  initial.bind({
+    operationId: "reopen-bind-a", adminId: "admin", bindingId: "ba", laneAddress: "p/a",
+    workspaceId: "w", adapter: "codex", conversationId: "a",
+  });
+  initial.bind({
+    operationId: "reopen-bind-b", adminId: "admin", bindingId: "bb", laneAddress: "p/b",
+    workspaceId: "w", adapter: "codex", conversationId: "b",
+  });
+  const sent = initial.send({
+    operationId: "reopen-send", actor: { bindingId: "ba", generation: 1 },
+    target: "p/b", kind: "normal", body: "body", metadata: {},
+  });
+  first.prepare(`INSERT INTO dispatch_fence(
+    fence_id,delivery_id,lane_id,adapter_outcome,created_at,reason_code
+  ) VALUES('reopened-fence',?,'p/b','queued_next_turn',100,'post_adapter_persistence_failed')`).run(sent.deliveryId);
+  first.close();
+
+  const reopened = openDatabase(path);
+  databases.push(reopened);
+  const server = await startBrokerHttpServer({
+    service: new BrokerService(reopened), token: "secret", host: "127.0.0.1", port: 0,
+  });
+  servers.push(server);
+  const client = new BrokerClient(server.url, "secret");
+  expect(await client.status()).toMatchObject({
+    dispatchFences: { activeCount: 1, affectedLanes: ["p/b"] },
+  });
+  expect(await client.call("dispatchFence.get", { fenceId: "reopened-fence" })).toMatchObject({
+    fenceId: "reopened-fence", deliveryId: sent.deliveryId,
+  });
 });
 test("malformed and oversized input fail without invoking service and non-loopback bind is rejected", async () => {
   const x = await setup();
