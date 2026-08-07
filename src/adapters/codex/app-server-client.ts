@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { decodeServerMessage, type JsonRpcId, type ServerMessage } from "./protocol.js";
+import { decodeServerMessage, ProtocolDecodeError, type JsonRpcId, type ServerMessage } from "./protocol.js";
 
 export class AppServerDisconnectedError extends Error { readonly code = "CODEX_APP_SERVER_DISCONNECTED"; constructor(message = "Codex App Server disconnected") { super(message); this.name = new.target.name; } }
 export class AppServerRequestTimeoutError extends Error { readonly code = "CODEX_APP_SERVER_TIMEOUT"; constructor(readonly method: string) { super(`Codex App Server request timed out: ${method}`); this.name = new.target.name; } }
@@ -11,22 +11,26 @@ type ServerRequest = Extract<ServerMessage, { kind: "request" }>;
 
 export class AppServerClient {
   private socket?: WebSocket;
+  private url: string;
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, Pending>();
   private notificationHandler: (message: Notification) => void = () => undefined;
   private requestHandler?: (message: ServerRequest) => Promise<unknown>;
-  constructor(private readonly options: { url: string; requestTimeoutMs?: number; clientName?: string; clientVersion?: string }) {}
+  private protocolErrorHandler: (error: ProtocolDecodeError) => void = () => undefined;
+  constructor(private readonly options: { url: string; requestTimeoutMs?: number; clientName?: string; clientVersion?: string }) { this.url = options.url; }
 
   isConnected(): boolean { return this.socket?.readyState === WebSocket.OPEN; }
   onNotification(handler: (message: Notification) => void): void { this.notificationHandler = handler; }
   onServerRequest(handler: (message: ServerRequest) => Promise<unknown>): void { this.requestHandler = handler; }
+  onProtocolError(handler: (error: ProtocolDecodeError) => void): void { this.protocolErrorHandler = handler; }
+  setUrl(url: string): void { if (this.isConnected()) throw new Error("Cannot change App Server URL while connected"); this.url = url; }
 
   async connect(): Promise<void> {
     if (this.isConnected()) return;
-    const socket = new WebSocket(this.options.url);
+    const socket = new WebSocket(this.url);
     this.socket = socket;
-    socket.on("message", (data) => this.receive(data.toString()));
-    socket.on("close", () => this.disconnect(new AppServerDisconnectedError()));
+    socket.on("message", (data) => { if (this.socket === socket) this.receive(data.toString()); });
+    socket.on("close", () => { if (this.socket === socket) this.disconnect(new AppServerDisconnectedError()); });
     socket.on("error", () => undefined);
     await new Promise<void>((resolve, reject) => {
       const cleanup = () => { socket.off("open", onOpen); socket.off("error", onError); };
@@ -72,8 +76,20 @@ export class AppServerClient {
   }
 
   private receive(raw: string): void {
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw) as unknown; }
+    catch { this.fenceProtocol(new ProtocolDecodeError("message is not valid JSON")); return; }
     let decoded: ServerMessage;
-    try { decoded = decodeServerMessage(JSON.parse(raw) as unknown); } catch { return; }
+    try { decoded = decodeServerMessage(parsed); }
+    catch (error) {
+      const protocolError = error instanceof ProtocolDecodeError ? error : new ProtocolDecodeError(error instanceof Error ? error.message : String(error));
+      this.protocolErrorHandler(protocolError);
+      const id = messageId(parsed);
+      const pending = id === undefined ? undefined : this.pending.get(id);
+      if (pending) { this.pending.delete(id!); clearTimeout(pending.timer); pending.reject(protocolError); }
+      else this.fenceProtocol(protocolError, false);
+      return;
+    }
     if (decoded.kind === "response") {
       const pending = this.pending.get(decoded.id); if (!pending) return;
       this.pending.delete(decoded.id); clearTimeout(pending.timer);
@@ -92,9 +108,22 @@ export class AppServerClient {
     }
   }
 
-  private disconnect(error: AppServerDisconnectedError): void {
+  private fenceProtocol(error: ProtocolDecodeError, emit = true): void {
+    if (emit) this.protocolErrorHandler(error);
+    const socket = this.socket;
+    this.disconnect(error);
+    socket?.close();
+  }
+
+  private disconnect(error: Error): void {
     this.socket = undefined;
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
     this.pending.clear();
   }
+}
+
+function messageId(value: unknown): JsonRpcId | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const id = (value as Record<string, unknown>).id;
+  return typeof id === "string" || typeof id === "number" ? id : undefined;
 }

@@ -2,7 +2,9 @@ import { afterEach, expect, test, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { join } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
 import { AppServerClient, AppServerDisconnectedError, AppServerRequestTimeoutError } from "../../../src/adapters/codex/app-server-client.js";
 import { decodeServerMessage, ProtocolDecodeError } from "../../../src/adapters/codex/protocol.js";
 import { CodexAppServerProcess, CodexCapabilityError, CodexCapabilityGate } from "../../../src/adapters/codex/app-server-process.js";
@@ -77,6 +79,31 @@ test("timeouts, disconnects, and shutdown reject pending requests", async () => 
   await client.close();
 });
 
+test("a malformed correlated response rejects immediately with a typed protocol error", async () => {
+  const url = await server((message, socket) => {
+    if (message.method === "initialize") socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
+    if (message.method === "broken") socket.send(JSON.stringify({ id: message.id, result: {}, error: { code: 1, message: "both" } }));
+  });
+  const client = new AppServerClient({ url, requestTimeoutMs: 1_000 });
+  const errors: Error[] = [];
+  client.onProtocolError((error) => errors.push(error));
+  await client.connect();
+  await expect(client.request("broken", {})).rejects.toBeInstanceOf(ProtocolDecodeError);
+  expect(errors).toHaveLength(1);
+  await client.close();
+});
+
+test("an uncorrelated malformed message fences the connection and rejects pending", async () => {
+  const url = await server((message, socket) => {
+    if (message.method === "initialize") socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
+    if (message.method === "pending") socket.send(JSON.stringify({ method: "turn/started", params: { threadId: 2 } }));
+  });
+  const client = new AppServerClient({ url, requestTimeoutMs: 1_000 });
+  await client.connect();
+  await expect(client.request("pending", {})).rejects.toBeInstanceOf(ProtocolDecodeError);
+  expect(client.isConnected()).toBe(false);
+});
+
 test("reconnect attempts are bounded", async () => {
   const client = new AppServerClient({ url: "ws://127.0.0.1:1", requestTimeoutMs: 20 });
   await expect(client.reconnect({ attempts: 2, backoffMs: 1 })).rejects.toBeInstanceOf(AppServerDisconnectedError);
@@ -95,6 +122,21 @@ test("capability gate validates a compatible executable/schema and caches only i
   expect(first).toMatchObject({ version: "codex-cli 0.146.1-fake" });
   expect(second.fingerprint).toBe(first.fingerprint);
   expect(second.cached).toBe(true);
+});
+
+test("semantic schema formatting changes preserve the fingerprint and cache hit", async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), "lane-router-capability-semantic-")); dirs.push(cacheDir);
+  const gate = new CodexCapabilityGate({ cacheDir });
+  const compact = await gate.verify(fakeCommand({ FAKE_CODEX_FORMAT: "compact" }));
+  const pretty = await gate.verify(fakeCommand({ FAKE_CODEX_FORMAT: "pretty" }));
+  expect(pretty.fingerprint).toBe(compact.fingerprint);
+  expect(pretty.cached).toBe(true);
+});
+
+test("decoy method strings with incompatible structural shapes fail the gate", async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), "lane-router-capability-decoy-")); dirs.push(cacheDir);
+  const gate = new CodexCapabilityGate({ cacheDir });
+  await expect(gate.verify(fakeCommand({ FAKE_CODEX_SCHEMA: "decoy" }))).rejects.toBeInstanceOf(CodexCapabilityError);
 });
 
 test("incompatible schema produces a typed failure before managed spawn", async () => {
@@ -129,7 +171,36 @@ test("process manager restarts an unexpected exit with bounded backoff", async (
   let reconnected = 0;
   const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_EXIT_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, restartBackoffMs: 5, onReconnect: () => { reconnected += 1; } });
   await manager.start();
+  const originalClient = manager.client;
   await vi.waitFor(() => expect(reconnected).toBe(1), { timeout: 5_000 });
+  expect(manager.client).toBe(originalClient);
   expect(manager.client.isConnected()).toBe(true);
   await manager.shutdown();
+});
+
+test("shutdown during restart backoff cannot spawn an orphan", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lane-router-process-race-")); dirs.push(root);
+  const marker = join(root, "exited-once");
+  let spawned = 0;
+  const children: ReturnType<typeof spawn>[] = [];
+  const spawnProcess = ((...args: Parameters<typeof spawn>) => {
+    spawned += 1;
+    const child = spawn(...args);
+    children.push(child);
+    return child;
+  }) as typeof spawn;
+  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_EXIT_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, restartBackoffMs: 250, spawnProcess });
+  try {
+    await manager.start();
+    await vi.waitFor(() => expect(existsSync(marker)).toBe(true));
+    await vi.waitFor(() => expect(manager.client.isConnected()).toBe(false));
+    await manager.shutdown();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(spawned).toBe(1);
+    expect(manager.client.isConnected()).toBe(false);
+    expect(children.every((child) => child.exitCode !== null)).toBe(true);
+  } finally {
+    await manager.shutdown();
+    for (const child of children) if (child.exitCode === null) child.kill();
+  }
 });
