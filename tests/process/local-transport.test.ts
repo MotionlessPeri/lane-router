@@ -26,6 +26,7 @@ test("the Codex TUI bridge injects Router tools into TUI-created threads", async
   let upstream: WebSocket | undefined;
   try {
     expect(discovery.codexEndpoint).not.toBe(upstreamEndpoint);
+    expect(discovery.codexEndpoint).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/u);
     const upstreamConnected = new Promise<WebSocket>((resolve) => upstreamServer.once("connection", resolve));
     client = new WebSocket(discovery.codexEndpoint);
     await new Promise<void>((resolve, reject) => { client!.once("open", resolve); client!.once("error", reject); });
@@ -73,7 +74,7 @@ test("serves health and four lane calls on loopback", async () => {
   try {
     expect(discovery.url).toMatch(/^http:\/\/127\.0\.0\.1:/u);
     const client = new LocalRouterClient(discovery.url);
-    await expect(client.health()).resolves.toMatchObject({ instanceId: "instance-1", codexEndpoint: expect.stringMatching(/\/codex$/u) });
+    await expect(client.health()).resolves.toMatchObject({ instanceId: "instance-1", codexEndpoint: expect.stringMatching(/^ws:\/\/127\.0\.0\.1:\d+$/u) });
     await expect(client.call("lane_directory", { project: "alpha" }, {
       backend: "claude", conversationId: "session-1", requestKey: "request-1",
     })).resolves.toEqual({ name: "lane_directory" });

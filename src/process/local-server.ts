@@ -107,6 +107,7 @@ export class LocalRouterServer {
   private readonly http = createServer((request, response) => void this.handle(request, response));
   private readonly websocket = new WebSocketServer({ noServer: true });
   private readonly codexBridge: CodexTuiBridge;
+  private codexEndpoint = "";
   readonly claude: ClaudeChannelHub;
 
   constructor(private readonly options: {
@@ -128,10 +129,6 @@ export class LocalRouterServer {
         this.websocket.handleUpgrade(request, socket, head, (client) => this.claude.connect(conversationId, client));
         return;
       }
-      if (url.pathname === "/codex") {
-        this.websocket.handleUpgrade(request, socket, head, (client) => this.codexBridge.connect(client));
-        return;
-      }
       socket.destroy();
     });
   }
@@ -141,13 +138,17 @@ export class LocalRouterServer {
       this.http.once("error", reject);
       this.http.listen(this.options.port ?? 0, this.host, () => { this.http.off("error", reject); resolve(); });
     });
-    const address = this.http.address() as AddressInfo;
+    try { this.codexEndpoint = await this.codexBridge.start(this.host); }
+    catch (error) {
+      await new Promise<void>((resolve) => this.http.close(() => resolve()));
+      throw error;
+    }
     return this.discovery();
   }
 
   async close(): Promise<void> {
     this.claude.close();
-    this.codexBridge.close();
+    await this.codexBridge.close();
     await new Promise<void>((resolve) => this.websocket.close(() => resolve()));
     await new Promise<void>((resolve, reject) => this.http.close((error) => error ? reject(error) : resolve()));
   }
@@ -175,7 +176,7 @@ export class LocalRouterServer {
 
   private discovery(): RouterDiscovery {
     const address = this.http.address() as AddressInfo;
-    return { pid: process.pid, port: address.port, url: `http://${this.host}:${address.port}`, codexEndpoint: `ws://${this.host}:${address.port}/codex`, instanceId: this.options.instanceId };
+    return { pid: process.pid, port: address.port, url: `http://${this.host}:${address.port}`, codexEndpoint: this.codexEndpoint, instanceId: this.options.instanceId };
   }
 }
 

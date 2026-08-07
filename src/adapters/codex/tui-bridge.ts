@@ -1,4 +1,5 @@
-import WebSocket from "ws";
+import type { AddressInfo } from "node:net";
+import WebSocket, { WebSocketServer } from "ws";
 
 import { decodeServerMessage, type DynamicToolCallParams, type JsonRpcId } from "./protocol.js";
 
@@ -13,8 +14,24 @@ export interface CodexTuiBridgeHost {
 
 export class CodexTuiBridge {
   private readonly connections = new Set<{ downstream: WebSocket; upstream: WebSocket }>();
+  private server?: WebSocketServer;
+  private listenEndpoint?: string;
 
   constructor(private readonly host: CodexTuiBridgeHost) {}
+
+  async start(listenHost = "127.0.0.1"): Promise<string> {
+    if (this.listenEndpoint) return this.listenEndpoint;
+    const server = new WebSocketServer({ host: listenHost, port: 0 });
+    this.server = server;
+    server.on("connection", (socket) => this.connect(socket));
+    await new Promise<void>((resolve, reject) => {
+      server.once("listening", resolve);
+      server.once("error", reject);
+    });
+    const address = server.address() as AddressInfo;
+    this.listenEndpoint = `ws://${listenHost}:${address.port}`;
+    return this.listenEndpoint;
+  }
 
   connect(downstream: WebSocket): void {
     const upstream = new WebSocket(this.host.endpoint);
@@ -43,12 +60,16 @@ export class CodexTuiBridge {
     upstream.once("close", detach);
   }
 
-  close(): void {
+  async close(): Promise<void> {
     for (const { downstream, upstream } of this.connections) {
-      downstream.close(1001, "Router closing");
-      upstream.close(1001, "Router closing");
+      downstream.terminate();
+      upstream.terminate();
     }
     this.connections.clear();
+    const server = this.server;
+    this.server = undefined;
+    this.listenEndpoint = undefined;
+    if (server) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 
   private fromTui(raw: string, pendingStarts: Set<JsonRpcId>, downstream: WebSocket): string | undefined {
