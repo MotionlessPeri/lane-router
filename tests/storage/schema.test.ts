@@ -526,7 +526,9 @@ describe("SQLite schema", () => {
 
     const upgraded = openDatabase(path);
     try {
-      expect(upgraded.pragma("user_version", { simple: true })).toBe(5);
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(
+        LATEST_MIGRATION_VERSION,
+      );
       expect(
         (upgraded.pragma("table_info(event)") as Array<{ name: string }>).map(
           (column) => column.name,
@@ -654,6 +656,28 @@ describe("SQLite schema", () => {
     }
   });
 
+  it("upgrades v5 with a body-free durable dispatch fence", () => {
+    const path = temporaryDatabasePath();
+    const v5 = openDatabase(path);
+    seedStorage(v5);
+    v5.pragma("user_version = 5");
+    v5.close();
+
+    const upgraded = openDatabase(path);
+    try {
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(6);
+      const columns = (upgraded.pragma("table_info(dispatch_fence)") as Array<{ name: string }>).map((column) => column.name);
+      expect(columns).toEqual([
+        "delivery_id", "lane_id", "adapter_outcome", "fenced_at",
+        "reason_code", "resolved_at", "resolution", "resolution_operation_id",
+      ]);
+      expect(columns).not.toContain("body");
+      expect(columns).not.toContain("error_text");
+    } finally {
+      upgraded.close();
+    }
+  });
+
   it.each(["unbound", "rebuilt"] as const)(
     "upgrades a v2 database with an internally valid historical claim after binding is %s",
     (bindingState) => {
@@ -735,6 +759,7 @@ describe("SQLite schema", () => {
       "event",
       "workspace_manifest",
       "project_declaration",
+      "dispatch_fence",
     ]));
     expect(
       connection

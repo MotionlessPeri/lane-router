@@ -754,7 +754,7 @@ test("turn-ended persistence rolls back with its event while other lanes continu
     x.service.config,
     { now: () => 100, random: () => 0.5 },
   );
-  await expect(scheduler.runOnce()).resolves.toBe(2);
+  await expect(scheduler.runOnce()).rejects.toBeInstanceOf(AggregateError);
   expect(deliveredLanes).toEqual(["p/c"]);
   expect(
     x.db
@@ -766,4 +766,141 @@ test("turn-ended persistence rolls back with its event while other lanes continu
       .events()
       .filter((event) => event.type === "turn_ended_before_claim"),
   ).toHaveLength(0);
+});
+
+test("post-adapter persistence failure fences ambiguous delivery across restart", async () => {
+  const x = setup("queued_next_turn");
+  const ambiguous = x.service.send({
+    operationId: "ambiguous-send",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "ambiguous",
+    metadata: {},
+  });
+  x.db.exec(`
+    INSERT INTO lane(id,project_id,name,role_document,communication_entry)
+      VALUES('p/c','p','c','c',0);
+    INSERT INTO binding(
+      id,lane_id,workspace_id,adapter,conversation_id,generation,active_at,
+      inactive_at,inactive_reason,is_current,state,state_changed_at,state_reason
+    ) VALUES('bc','p/c','w','codex','c',1,100,NULL,NULL,1,'bound',NULL,NULL);
+  `);
+  const unrelated = x.service.send({
+    operationId: "unrelated-send",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/c",
+    kind: "normal",
+    body: "unrelated",
+    metadata: {},
+  });
+  x.db.exec(`
+    CREATE TRIGGER fail_ambiguous_adapter_event
+    BEFORE INSERT ON event
+    WHEN NEW.event_type='adapter_result' AND NEW.delivery_id='${ambiguous.deliveryId}'
+    BEGIN SELECT RAISE(ABORT, 'injected post-adapter persistence failure'); END;
+  `);
+  const delivered: string[] = [];
+  const adapter: DeliveryAdapter = {
+    getRuntimeState: async () => ({ availability: "online", turn: "idle" }),
+    deliver: async (request) => {
+      delivered.push(request.targetLaneId);
+      return "queued_next_turn";
+    },
+  };
+  const scheduler = new Scheduler(
+    x.db,
+    { codex: adapter, claude: adapter },
+    x.service.config,
+    { now: () => 100, random: () => 0.5 },
+  );
+  await expect(scheduler.runOnce()).rejects.toBeInstanceOf(AggregateError);
+  expect(delivered.sort()).toEqual(["p/b", "p/c"]);
+  expect(x.db.prepare("SELECT state FROM delivery WHERE id=?").get(ambiguous.deliveryId)).toEqual({ state: "pending" });
+  expect(x.db.prepare("SELECT state FROM delivery WHERE id=?").get(unrelated.deliveryId)).toEqual({ state: "notified" });
+  expect(x.db.prepare("SELECT lane_id,adapter_outcome,reason_code,resolved_at FROM dispatch_fence WHERE delivery_id=?").get(ambiguous.deliveryId)).toEqual({
+    lane_id: "p/b",
+    adapter_outcome: "queued_next_turn",
+    reason_code: "post_adapter_persistence_failed",
+    resolved_at: null,
+  });
+  await expect(scheduler.runOnce()).resolves.toBe(1);
+  await expect(new Scheduler(
+    x.db,
+    { codex: adapter, claude: adapter },
+    x.service.config,
+    { now: () => 100, random: () => 0.5 },
+  ).runOnce()).resolves.toBe(1);
+  expect(delivered.filter((lane) => lane === "p/b")).toHaveLength(1);
+});
+
+test("failure to persist an ambiguity fence fatally stops scheduling", async () => {
+  const x = setup("queued_next_turn");
+  const sent = x.service.send({
+    operationId: "fatal-fence-send",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "fatal",
+    metadata: {},
+  });
+  x.db.exec(`
+    CREATE TRIGGER fail_adapter_result_for_fatal
+    BEFORE INSERT ON event WHEN NEW.event_type='adapter_result'
+    BEGIN SELECT RAISE(ABORT, 'adapter persistence failed'); END;
+    CREATE TRIGGER fail_dispatch_fence
+    BEFORE INSERT ON dispatch_fence
+    BEGIN SELECT RAISE(ABORT, 'fence persistence failed'); END;
+  `);
+  let deliveries = 0;
+  let fatal: Error | undefined;
+  const adapter: DeliveryAdapter = {
+    getRuntimeState: async () => ({ availability: "online", turn: "idle" }),
+    deliver: async () => { deliveries += 1; return "queued_next_turn"; },
+  };
+  const scheduler = new Scheduler(
+    x.db,
+    { codex: adapter, claude: adapter },
+    x.service.config,
+    { now: () => 100, random: () => 0.5, onFatal: (error) => { fatal = error; } },
+  );
+  await expect(scheduler.runOnce()).rejects.toBeInstanceOf(AggregateError);
+  expect(fatal?.message).toMatch(/fence persistence failed/i);
+  await expect(scheduler.runOnce()).rejects.toBe(fatal);
+  expect(deliveries).toBe(1);
+  expect(x.db.prepare("SELECT state FROM delivery WHERE id=?").get(sent.deliveryId)).toEqual({ state: "pending" });
+});
+
+test("explicit operation-backed reconciliation clears or settles dispatch fences idempotently", async () => {
+  const x = setup("queued_next_turn");
+  const retry = x.service.send({
+    operationId: "retry-fenced-send", actor: { bindingId: "ba", generation: 1 },
+    target: "p/b", kind: "normal", body: "retry", metadata: {},
+  });
+  x.db.prepare(`INSERT INTO dispatch_fence(delivery_id,lane_id,adapter_outcome,fenced_at,reason_code)
+    VALUES(?, 'p/b', 'queued_next_turn', 100, 'post_adapter_persistence_failed')`).run(retry.deliveryId);
+  expect(() => x.service.resolveDispatchFence({
+    operationId: "resolve-unauthorized", adminId: "", deliveryId: retry.deliveryId, resolution: "retry",
+  })).toThrow(/admin identity/i);
+  expect(x.service.resolveDispatchFence({
+    operationId: "resolve-retry", adminId: "admin", deliveryId: retry.deliveryId, resolution: "retry",
+  })).toEqual({ deliveryId: retry.deliveryId, resolution: "retry" });
+  expect(x.service.resolveDispatchFence({
+    operationId: "resolve-retry", adminId: "admin", deliveryId: retry.deliveryId, resolution: "retry",
+  })).toEqual({ deliveryId: retry.deliveryId, resolution: "retry" });
+
+  const settled = x.service.send({
+    operationId: "settle-fenced-send", actor: { bindingId: "ba", generation: 1 },
+    target: "p/b", kind: "normal", body: "settle", metadata: {},
+  });
+  x.db.prepare(`INSERT INTO dispatch_fence(delivery_id,lane_id,adapter_outcome,fenced_at,reason_code)
+    VALUES(?, 'p/b', 'queued_next_turn', 100, 'post_adapter_persistence_failed')`).run(settled.deliveryId);
+  expect(x.service.resolveDispatchFence({
+    operationId: "resolve-settled", adminId: "admin", deliveryId: settled.deliveryId, resolution: "settled",
+  })).toEqual({ deliveryId: settled.deliveryId, resolution: "settled" });
+  expect(x.db.prepare("SELECT state FROM delivery WHERE id=?").get(settled.deliveryId)).toEqual({ state: "notified" });
+  expect(x.db.prepare("SELECT resolution,resolution_operation_id FROM dispatch_fence ORDER BY delivery_id").all()).toEqual([
+    { resolution: "retry", resolution_operation_id: "resolve-retry" },
+    { resolution: "settled", resolution_operation_id: "resolve-settled" },
+  ]);
 });

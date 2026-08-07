@@ -1,4 +1,4 @@
-import type { DeliveryAdapter } from "../core/adapter-contract.js";
+import type { AdapterResult, DeliveryAdapter } from "../core/adapter-contract.js";
 import {
   applyAdapterResult,
   recordStartedTurnEndedBeforeClaim,
@@ -18,6 +18,7 @@ export type AdapterRegistry = Readonly<{
 interface SchedulerDependencies {
   readonly now?: () => number;
   readonly random?: () => number;
+  readonly onFatal?: (error: SchedulerFatalError) => void;
 }
 interface EligibleRow {
   id: string;
@@ -40,6 +41,8 @@ export class Scheduler {
   private readonly storedPending = new Set<string>();
   private readonly now: () => number;
   private readonly random: () => number;
+  private readonly onFatal: (error: SchedulerFatalError) => void;
+  private fatal: SchedulerFatalError | null = null;
   constructor(
     private readonly database: RouterDatabase,
     private readonly adapters: AdapterRegistry,
@@ -49,6 +52,7 @@ export class Scheduler {
     this.repositories = new StorageRepositories(database);
     this.now = dependencies.now ?? Date.now;
     this.random = dependencies.random ?? Math.random;
+    this.onFatal = dependencies.onFatal ?? (() => undefined);
   }
   setLaneBusy(laneId: string, busy: boolean): void {
     if (busy) this.busy.add(laneId);
@@ -83,6 +87,7 @@ export class Scheduler {
   }
 
   async runOnce(): Promise<number> {
+    if (this.fatal) throw this.fatal;
     recoverDatabase(this.database, {
       now: this.now(),
       failureLimit: this.config.failureLimit,
@@ -90,7 +95,7 @@ export class Scheduler {
     });
     const rows = this.database
       .prepare(
-        `SELECT d.id,d.message_id,d.target_lane_id,d.sequence,m.kind,b.generation,b.adapter,d.state,d.next_attempt_at,d.deadline_kind FROM delivery d JOIN message m ON m.id=d.message_id JOIN binding b ON b.lane_id=d.target_lane_id AND b.is_current=1 WHERE d.state NOT IN ('acknowledged','parked') AND b.state='bound' ORDER BY d.target_lane_id,d.sequence`,
+        `SELECT d.id,d.message_id,d.target_lane_id,d.sequence,m.kind,b.generation,b.adapter,d.state,d.next_attempt_at,d.deadline_kind FROM delivery d JOIN message m ON m.id=d.message_id JOIN binding b ON b.lane_id=d.target_lane_id AND b.is_current=1 WHERE d.state NOT IN ('acknowledged','parked') AND b.state='bound' AND NOT EXISTS (SELECT 1 FROM dispatch_fence f WHERE f.delivery_id=d.id AND f.resolved_at IS NULL) ORDER BY d.target_lane_id,d.sequence`,
       )
       .all() as EligibleRow[];
     const groups = new Map<string, EligibleRow[]>();
@@ -99,7 +104,7 @@ export class Scheduler {
       current.push(row);
       groups.set(row.target_lane_id, current);
     }
-    await Promise.all(
+    const laneResults = await Promise.allSettled(
       [...groups.entries()].map(async ([laneId, candidates]) => {
         if (this.running.has(laneId)) return;
         this.running.add(laneId);
@@ -154,13 +159,16 @@ export class Scheduler {
               : this.eligiblePrefix(normals);
           if (!selected.length) return;
           await this.deliverBatch(selected);
-        } catch {
-          /* A lane-local failure cannot stop unrelated lanes or the scheduler tick. */
         } finally {
           this.running.delete(laneId);
         }
       }),
     );
+    const failures = laneResults.flatMap((result) =>
+      result.status === "rejected" ? [result.reason as unknown] : [],
+    );
+    if (failures.length > 0)
+      throw new AggregateError(failures, "One or more scheduler lanes failed");
     return groups.size;
   }
 
@@ -194,45 +202,74 @@ export class Scheduler {
     } catch {
       result = "adapter_failed";
     }
-    inTransaction(this.database, () => {
-      for (const row of rows) {
-        const current = this.repositories.readDelivery(row.id);
-        const attempt = current.failureCount;
-        const next = applyAdapterResult(current, result, {
-          claimDeadlineAt: this.now() + this.config.claimDeadlineMs,
-          queueDeadlineAt: this.now() + this.config.queueDeadlineMs,
-          failureLimit: this.config.failureLimit,
-          nextAttemptAt:
-            this.now() + retryDelay(this.config, attempt, this.random),
-        });
-        this.persist(
-          next,
-          result === "adapter_failed" ? "adapter failed" : null,
-        );
-        appendEvent(
-          this.database,
-          "adapter_result",
-          this.now(),
-          { result, status: next.status, failureCount: next.failureCount },
-          { deliveryId: row.id },
-        );
-      }
-      if (result === "binding_not_found") {
-        const binding = this.repositories.getCurrentBinding(
-          first.target_lane_id,
-        );
-        if (binding?.state === "bound")
-          this.repositories.markCurrentBindingUnbound({
-            laneId: first.target_lane_id,
-            generation: binding.generation,
-            occurredAt: this.now(),
-            reason: "adapter reported binding not found",
+    try {
+      inTransaction(this.database, () => {
+        for (const row of rows) {
+          const current = this.repositories.readDelivery(row.id);
+          const attempt = current.failureCount;
+          const next = applyAdapterResult(current, result, {
+            claimDeadlineAt: this.now() + this.config.claimDeadlineMs,
+            queueDeadlineAt: this.now() + this.config.queueDeadlineMs,
+            failureLimit: this.config.failureLimit,
+            nextAttemptAt:
+              this.now() + retryDelay(this.config, attempt, this.random),
           });
+          this.persist(
+            next,
+            result === "adapter_failed" ? "adapter failed" : null,
+          );
+          appendEvent(
+            this.database,
+            "adapter_result",
+            this.now(),
+            { result, status: next.status, failureCount: next.failureCount },
+            { deliveryId: row.id },
+          );
+        }
+        if (result === "binding_not_found") {
+          const binding = this.repositories.getCurrentBinding(
+            first.target_lane_id,
+          );
+          if (binding?.state === "bound")
+            this.repositories.markCurrentBindingUnbound({
+              laneId: first.target_lane_id,
+              generation: binding.generation,
+              occurredAt: this.now(),
+              reason: "adapter reported binding not found",
+            });
+        }
+      });
+    } catch (persistenceError) {
+      try {
+        this.persistDispatchFences(rows, result);
+      } catch (fenceError) {
+        this.markFatal(persistenceError, fenceError);
       }
-    });
+      throw persistenceError;
+    }
     if (result === "started_new_turn") this.busy.add(first.target_lane_id);
     if (result === "stored_pending")
       this.storedPending.add(first.target_lane_id);
+  }
+  private persistDispatchFences(rows: EligibleRow[], result: AdapterResult): void {
+    inTransaction(this.database, () => {
+      const statement = this.database.prepare(`
+        INSERT INTO dispatch_fence(
+          delivery_id,lane_id,adapter_outcome,fenced_at,reason_code
+        ) VALUES(?,?,?,?,'post_adapter_persistence_failed')
+      `);
+      for (const row of rows)
+        statement.run(row.id, row.target_lane_id, result, this.now());
+    });
+  }
+  private markFatal(persistenceError: unknown, fenceError: unknown): never {
+    this.fatal = new SchedulerFatalError(persistenceError, fenceError);
+    try {
+      this.onFatal(this.fatal);
+    } catch {
+      /* fatal state is retained even if its observer fails */
+    }
+    throw this.fatal;
   }
   private persist(delivery: Delivery, error: string | null): void {
     const kind =
@@ -264,4 +301,19 @@ export class Scheduler {
         delivery.id,
       );
   }
+}
+
+export class SchedulerFatalError extends Error {
+  readonly code = "SCHEDULER_FATAL";
+  constructor(
+    readonly persistenceError: unknown,
+    readonly fenceError: unknown,
+  ) {
+    super(`Scheduler fenced after dispatch fence persistence failed: ${errorMessage(fenceError)}`);
+    this.name = new.target.name;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

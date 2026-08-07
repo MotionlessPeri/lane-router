@@ -350,7 +350,31 @@ CREATE INDEX IF NOT EXISTS event_delivery_idx ON event(delivery_id);
 CREATE INDEX IF NOT EXISTS event_lane_idx ON event(lane_id);
 `;
 
-export const LATEST_MIGRATION_VERSION = 5;
+export const MIGRATION_V6_SQL = `
+CREATE TABLE IF NOT EXISTS dispatch_fence (
+  delivery_id TEXT PRIMARY KEY REFERENCES delivery(id) ON DELETE RESTRICT,
+  lane_id TEXT NOT NULL REFERENCES lane(id) ON DELETE RESTRICT,
+  adapter_outcome TEXT NOT NULL CHECK (adapter_outcome IN (
+    'started_new_turn','applied_current_turn','queued_next_turn',
+    'stored_pending','binding_not_found','adapter_failed'
+  )),
+  fenced_at INTEGER NOT NULL CHECK (
+    typeof(fenced_at)='integer' AND fenced_at BETWEEN -${MAX_SAFE_INTEGER} AND ${MAX_SAFE_INTEGER}
+  ),
+  reason_code TEXT NOT NULL CHECK (reason_code='post_adapter_persistence_failed'),
+  resolved_at INTEGER CHECK (
+    resolved_at IS NULL OR (typeof(resolved_at)='integer' AND resolved_at BETWEEN -${MAX_SAFE_INTEGER} AND ${MAX_SAFE_INTEGER})
+  ),
+  resolution TEXT CHECK (resolution IN ('retry','settled')),
+  resolution_operation_id TEXT,
+  CHECK ((resolved_at IS NULL) = (resolution IS NULL)),
+  CHECK ((resolved_at IS NULL) = (resolution_operation_id IS NULL))
+);
+CREATE INDEX IF NOT EXISTS dispatch_fence_active_lane_idx
+  ON dispatch_fence(lane_id) WHERE resolved_at IS NULL;
+`;
+
+export const LATEST_MIGRATION_VERSION = 6;
 
 export class DatabaseIntegrityError extends Error {
   constructor(message: string) {
@@ -407,6 +431,14 @@ export function migrateDatabase(database: Database.Database): void {
         database.exec(MIGRATION_V5_SQL);
         backfillEventLaneIds(database);
         database.pragma("user_version = 5");
+      })();
+    }
+    const versionAfterV5 = database.pragma("user_version", { simple: true }) as number;
+    if (versionAfterV5 === 5) {
+      assertV4Integrity(database);
+      database.transaction(() => {
+        database.exec(MIGRATION_V6_SQL);
+        database.pragma("user_version = 6");
       })();
     }
   })();

@@ -6,7 +6,9 @@ import { declarationDigest } from "../core/manifest.js";
 import type { JsonValue } from "../core/json.js";
 
 import type { AckOutcome, Delivery } from "../core/model.js";
+import type { AdapterResult } from "../core/adapter-contract.js";
 import {
+  applyAdapterResult,
   parkDelivery,
   renewClaim,
   unparkDelivery,
@@ -27,7 +29,7 @@ import {
   type CurrentBinding,
 } from "../storage/repositories.js";
 import { appendEvent, listEvents, type BrokerEvent } from "./events.js";
-import { validateRuntimeConfig, type RuntimeConfig } from "./runtime.js";
+import { retryDelay, validateRuntimeConfig, type RuntimeConfig } from "./runtime.js";
 
 export { validateRuntimeConfig } from "./runtime.js";
 export type BindingActor = Readonly<{ bindingId: string; generation: number }>;
@@ -771,6 +773,52 @@ export class BrokerService {
   }
   events(afterId = 0, limit = 100): BrokerEvent[] {
     return listEvents(this.database, afterId, limit);
+  }
+  resolveDispatchFence(input: {
+    operationId: string;
+    adminId: string;
+    deliveryId: string;
+    resolution: "retry" | "settled";
+  }): { deliveryId: string; resolution: "retry" | "settled" } {
+    if (!input.adminId.trim())
+      throw new BrokerContractError("Dispatch fence reconciliation requires an admin identity");
+    return this.mutate(
+      input.operationId,
+      { kind: "admin", id: input.adminId },
+      "resolve_dispatch_fence",
+      input,
+      () => {
+        const fence = this.database.prepare(`
+          SELECT adapter_outcome FROM dispatch_fence
+          WHERE delivery_id=? AND resolved_at IS NULL
+        `).get(input.deliveryId) as { adapter_outcome: AdapterResult } | undefined;
+        if (!fence)
+          throw new BrokerContractError("Dispatch fence is missing or already resolved");
+        if (input.resolution === "settled") {
+          const current = this.repositories.readDelivery(input.deliveryId);
+          const settled = applyAdapterResult(current, fence.adapter_outcome, {
+            claimDeadlineAt: this.now() + this.config.claimDeadlineMs,
+            queueDeadlineAt: this.now() + this.config.queueDeadlineMs,
+            failureLimit: this.config.failureLimit,
+            nextAttemptAt:
+              this.now() + retryDelay(this.config, current.failureCount, () => 0.5),
+          });
+          this.persistDelivery(settled);
+        }
+        this.database.prepare(`
+          UPDATE dispatch_fence SET resolved_at=?,resolution=?,resolution_operation_id=?
+          WHERE delivery_id=? AND resolved_at IS NULL
+        `).run(this.now(), input.resolution, input.operationId, input.deliveryId);
+        appendEvent(
+          this.database,
+          "dispatch_fence_resolved",
+          this.now(),
+          { resolution: input.resolution, adapterOutcome: fence.adapter_outcome },
+          { deliveryId: input.deliveryId },
+        );
+        return { deliveryId: input.deliveryId, resolution: input.resolution };
+      },
+    );
   }
   inbox(actor: BindingActor): InboxEntry[] {
     const binding = this.authenticate(actor);
