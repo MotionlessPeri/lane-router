@@ -15,12 +15,37 @@ const databases: RouterDatabase[] = [];
 afterEach(() => databases.splice(0).forEach((db) => db.close()));
 class FakeAdapter implements DeliveryAdapter {
   requests: AdapterDeliveryRequest[] = [];
-  constructor(private readonly result: AdapterResult) {}
+  constructor(
+    private readonly result: AdapterResult,
+    private turn: "idle" | "busy",
+  ) {}
   async deliver(request: AdapterDeliveryRequest): Promise<AdapterResult> {
     this.requests.push(request);
+    if (
+      this.result === "started_new_turn" ||
+      this.result === "applied_current_turn"
+    )
+      this.turn = "busy";
     return this.result;
   }
+  async getRuntimeState() {
+    return { availability: "online" as const, turn: this.turn };
+  }
+  setTurn(turn: "idle" | "busy"): void {
+    this.turn = turn;
+  }
 }
+
+test("DeliveryAdapter requires an explicit runtime-state capability", () => {
+  if (false) {
+    // @ts-expect-error scheduler adapters cannot omit runtime-state probing
+    const incomplete: DeliveryAdapter = {
+      deliver: async () => "stored_pending",
+    };
+    void incomplete;
+  }
+  expect(true).toBe(true);
+});
 function setup(result: AdapterResult) {
   const db = openDatabase(":memory:");
   databases.push(db);
@@ -62,7 +87,7 @@ function setup(result: AdapterResult) {
     adapter: "codex",
     conversationId: "b",
   });
-  const adapter = new FakeAdapter(result);
+  const adapter = new FakeAdapter(result, "idle");
   const scheduler = new Scheduler(
     db,
     { codex: adapter, claude: adapter },
@@ -230,6 +255,7 @@ test("a Router-started turn keeps its lane serialized until orchestration marks 
   await x.scheduler.runOnce();
   expect(x.adapter.requests).toHaveLength(1);
   x.scheduler.setLaneBusy("p/b", false);
+  x.adapter.setTurn("idle");
   const failed = x.scheduler.turnEndedBeforeClaim(first.deliveryId) as {
     nextAttemptAt: number;
   };
@@ -253,6 +279,7 @@ test("a started turn ending before claim records failure and releases lane seria
   expect(failed).toMatchObject({ status: "pending", failureCount: 1 });
   const nextAttempt = (failed as { nextAttemptAt: number }).nextAttemptAt;
   x.setNow(nextAttempt);
+  x.adapter.setTurn("idle");
   await x.scheduler.runOnce();
   expect(x.adapter.requests).toHaveLength(2);
 });
@@ -347,6 +374,7 @@ test("different lanes deliver in parallel", async () => {
       active -= 1;
       return "stored_pending";
     },
+    getRuntimeState: async () => ({ availability: "online", turn: "idle" }),
   };
   await new Scheduler(
     x.db,
@@ -412,6 +440,100 @@ test("a fresh scheduler respects durable notified work and adapter busy state", 
   expect(x.adapter.requests).toHaveLength(1);
 });
 
+test("acknowledged work does not erase a still-busy turn across scheduler restart", async () => {
+  const x = setup("started_new_turn");
+  const first = x.service.send({
+    operationId: "ack-busy-first",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "first",
+    metadata: {},
+  });
+  await x.scheduler.runOnce();
+  const claim = x.service.claim({
+    operationId: "ack-busy-claim",
+    actor: { bindingId: "bb", generation: 1 },
+    deliveryId: first.deliveryId,
+  });
+  x.service.ack({
+    operationId: "ack-busy-ack",
+    actor: { bindingId: "bb", generation: 1 },
+    deliveryId: first.deliveryId,
+    claimId: claim.claimId,
+    outcome: { kind: "recorded", summary: "done" },
+  });
+  x.service.send({
+    operationId: "ack-busy-second",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "second",
+    metadata: {},
+  });
+  let turn: "busy" | "idle" = "busy";
+  const adapter: DeliveryAdapter = {
+    deliver: (request) => x.adapter.deliver(request),
+    getRuntimeState: async () => ({ availability: "online", turn }),
+  };
+  const restarted = new Scheduler(
+    x.db,
+    { codex: adapter, claude: adapter },
+    x.service.config,
+    { now: () => 100, random: () => 0.5 },
+  );
+  await restarted.runOnce();
+  expect(x.adapter.requests).toHaveLength(1);
+  turn = "idle";
+  await restarted.runOnce();
+  expect(x.adapter.requests).toHaveLength(2);
+});
+
+test("runtime-state probe failures degrade a lane without failing its delivery", async () => {
+  const x = setup("started_new_turn");
+  const sent = x.service.send({
+    operationId: "probe-failure",
+    actor: { bindingId: "ba", generation: 1 },
+    target: "p/b",
+    kind: "normal",
+    body: "wait",
+    metadata: {},
+  });
+  let failuresRemaining = 2;
+  let deliveries = 0;
+  const adapter: DeliveryAdapter = {
+    deliver: async () => {
+      deliveries += 1;
+      return "started_new_turn";
+    },
+    getRuntimeState: async () => {
+      if (failuresRemaining-- > 0) throw new Error("SECRET PROBE FAILURE");
+      return { availability: "online", turn: "idle" };
+    },
+  };
+  const scheduler = new Scheduler(
+    x.db,
+    { codex: adapter, claude: adapter },
+    x.service.config,
+    { now: () => 100, random: () => 0.5 },
+  );
+  await expect(scheduler.runOnce()).resolves.toBe(1);
+  await expect(scheduler.runOnce()).resolves.toBe(1);
+  expect(deliveries).toBe(0);
+  expect(
+    x.db
+      .prepare("SELECT state,failure_count FROM delivery WHERE id=?")
+      .get(sent.deliveryId),
+  ).toEqual({ state: "pending", failure_count: 0 });
+  const failureEvents = x.service
+    .events()
+    .filter((event) => event.type === "adapter_runtime_state_failed");
+  expect(failureEvents).toHaveLength(2);
+  expect(JSON.stringify(failureEvents)).not.toContain("SECRET PROBE FAILURE");
+  await expect(scheduler.runOnce()).resolves.toBe(1);
+  expect(deliveries).toBe(1);
+});
+
 test("offline health polling suppresses delivery until reconnect", async () => {
   const x = setup("started_new_turn");
   x.service.send({
@@ -432,7 +554,9 @@ test("offline health polling suppresses delivery until reconnect", async () => {
     },
     getRuntimeState: async () => {
       healthChecks += 1;
-      return { availability: online ? "online" : "offline", turn: "idle" };
+      return online
+        ? { availability: "online", turn: "idle" }
+        : { availability: "offline", turn: "unknown" };
     },
   };
   const scheduler = new Scheduler(
@@ -474,7 +598,7 @@ test("an older claimed normal blocks later normals after scheduler restart", asy
     body: "second",
     metadata: {},
   });
-  const adapter = new FakeAdapter("started_new_turn");
+  const adapter = new FakeAdapter("started_new_turn", "idle");
   await new Scheduler(
     x.db,
     { codex: adapter, claude: adapter },

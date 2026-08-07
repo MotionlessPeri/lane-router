@@ -36,7 +36,8 @@ export class Scheduler {
   private readonly repositories: StorageRepositories;
   private readonly busy = new Set<string>();
   private readonly running = new Set<string>();
-  private readonly suppressed = new Set<string>();
+  private readonly unavailable = new Set<string>();
+  private readonly storedPending = new Set<string>();
   private readonly now: () => number;
   private readonly random: () => number;
   constructor(
@@ -54,8 +55,10 @@ export class Scheduler {
     else this.busy.delete(laneId);
   }
   setLaneAvailable(laneId: string, available: boolean): void {
-    if (available) this.suppressed.delete(laneId);
-    else this.suppressed.add(laneId);
+    if (available) {
+      this.unavailable.delete(laneId);
+      this.storedPending.delete(laneId);
+    } else this.unavailable.add(laneId);
   }
 
   turnEndedBeforeClaim(deliveryId: string): Delivery {
@@ -98,23 +101,34 @@ export class Scheduler {
       [...groups.entries()].map(async ([laneId, candidates]) => {
         if (this.running.has(laneId)) return;
         const adapter = this.adapters[candidates[0]!.adapter];
-        const runtime = adapter.getRuntimeState
-          ? await adapter.getRuntimeState({
-              targetLaneId: laneId,
-              bindingGeneration: candidates[0]!.generation,
-            })
-          : null;
-        if (runtime?.availability === "offline") {
-          this.suppressed.add(laneId);
+        let runtime: Awaited<ReturnType<DeliveryAdapter["getRuntimeState"]>>;
+        try {
+          runtime = await adapter.getRuntimeState({
+            targetLaneId: laneId,
+            bindingGeneration: candidates[0]!.generation,
+          });
+        } catch {
+          this.unavailable.add(laneId);
+          appendEvent(
+            this.database,
+            "adapter_runtime_state_failed",
+            this.now(),
+            { availability: "degraded" },
+          );
           return;
         }
-        if (runtime?.availability === "online") this.suppressed.delete(laneId);
-        if (this.suppressed.has(laneId)) return;
+        if (runtime.availability !== "online") {
+          this.unavailable.add(laneId);
+          return;
+        }
+        this.unavailable.delete(laneId);
+        if (this.unavailable.has(laneId) || this.storedPending.has(laneId))
+          return;
         const durableTurn = candidates.some(
           (row) => row.state === "notified" || row.state === "claimed",
         );
         const ended =
-          runtime?.turn === "idle" &&
+          runtime.turn === "idle" &&
           candidates.find(
             (row) => row.state === "notified" && row.deadline_kind === "claim",
           );
@@ -123,7 +137,7 @@ export class Scheduler {
           return;
         }
         const busy =
-          this.busy.has(laneId) || runtime?.turn === "busy" || durableTurn;
+          this.busy.has(laneId) || runtime.turn === "busy" || durableTurn;
         const corrections = candidates.filter(
           (row) => row.kind === "correction",
         );
@@ -212,7 +226,8 @@ export class Scheduler {
       }
     });
     if (result === "started_new_turn") this.busy.add(first.target_lane_id);
-    if (result === "stored_pending") this.suppressed.add(first.target_lane_id);
+    if (result === "stored_pending")
+      this.storedPending.add(first.target_lane_id);
   }
   private persist(delivery: Delivery, error: string | null): void {
     const kind =

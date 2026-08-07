@@ -21,12 +21,20 @@ export interface AdapterDeliveryRequest {
   readonly bindingGeneration: number;
 }
 
+export interface AdapterRuntimeStateRequest {
+  readonly targetLaneId: string;
+  readonly bindingGeneration: number;
+}
+export type AdapterRuntimeState =
+  | Readonly<{ availability: "online"; turn: "idle" | "busy" }>
+  | Readonly<{
+      availability: "offline" | "degraded";
+      turn: "unknown";
+    }>;
+
 export interface DeliveryAdapter {
   deliver(request: AdapterDeliveryRequest): Promise<AdapterResult>;
-  getRuntimeState?(request: {
-    readonly targetLaneId: string;
-    readonly bindingGeneration: number;
-  }): Promise<
-    Readonly<{ availability: "online" | "offline"; turn: "idle" | "busy" }>
-  >;
+  getRuntimeState(
+    request: AdapterRuntimeStateRequest,
+  ): Promise<AdapterRuntimeState>;
 }

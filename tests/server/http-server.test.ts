@@ -268,7 +268,10 @@ test("fake adapter drives a full lifecycle through loopback across a broker rest
       body: "hello",
       metadata: {},
     });
-  const adapter: DeliveryAdapter = { deliver: async () => "started_new_turn" };
+  const adapter: DeliveryAdapter = {
+    deliver: async () => "started_new_turn",
+    getRuntimeState: async () => ({ availability: "online", turn: "idle" }),
+  };
   await new Scheduler(db, { codex: adapter, claude: adapter }, service.config, {
     now: () => 100,
     random: () => 0.5,
@@ -358,6 +361,7 @@ test("real data directory reopens DB and lock across adapter error paths", async
     });
   const failedAdapter: DeliveryAdapter = {
     deliver: async () => "adapter_failed",
+    getRuntimeState: async () => ({ availability: "online", turn: "idle" }),
   };
   await new Scheduler(
     database,
@@ -390,6 +394,7 @@ test("real data directory reopens DB and lock across adapter error paths", async
   admin = new BrokerClient(server.url, "secret");
   const missingAdapter: DeliveryAdapter = {
     deliver: async () => "binding_not_found",
+    getRuntimeState: async () => ({ availability: "online", turn: "idle" }),
   };
   await new Scheduler(
     database,
