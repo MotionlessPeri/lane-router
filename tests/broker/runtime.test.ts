@@ -1,4 +1,5 @@
 import {
+  appendFile,
   mkdtemp,
   readFile,
   rename,
@@ -8,6 +9,15 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  writeSync,
+} from "node:fs";
 import { afterEach, expect, test } from "vitest";
 import { fork, type ChildProcess } from "node:child_process";
 import {
@@ -48,6 +58,72 @@ test("a live broker exclusively owns a data directory until release", async () =
     isPidAlive: () => true,
   });
   second.release();
+});
+
+test.each(["serialize", "truncate", "write", "fsync"] as const)(
+  "failed initial lock metadata %s closes and removes only the partial lock",
+  async (stage) => {
+    const dir = await temp();
+    await expect(acquireRuntimeLock(dir, {
+      instanceId: `failed-${stage}`,
+      metadataFault: (current, target) => {
+        if (current === stage && target === "lock") throw new Error(`injected ${stage}`);
+      },
+    })).rejects.toThrow(`injected ${stage}`);
+    expect(existsSync(join(dir, "broker.lock"))).toBe(false);
+    const retry = await acquireRuntimeLock(dir, { instanceId: `retry-${stage}` });
+    retry.release();
+  },
+);
+
+test("failed initial lock metadata never deletes a replacement identity", async () => {
+  const dir = await temp();
+  const path = join(dir, "broker.lock");
+  await expect(acquireRuntimeLock(dir, {
+    instanceId: "failed-owner",
+    metadataFault: (stage, target) => {
+      if (stage !== "write" || target !== "lock") return;
+      renameSync(path, join(dir, "failed-owner.partial"));
+      const replacement = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, 0o600);
+      try {
+        writeSync(replacement, JSON.stringify({ pid: process.pid, instanceId: "replacement", processStart: "replacement", createdAt: 1, heartbeatAt: 1 }));
+      } finally {
+        closeSync(replacement);
+      }
+      throw new Error("replaced");
+    },
+  })).rejects.toThrow("replaced");
+  expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ instanceId: "replacement" });
+});
+
+test("failed reclaim marker metadata is closed, cleaned, and immediately retryable", async () => {
+  const dir = await temp();
+  await writeFile(join(dir, "broker.lock"), JSON.stringify({ pid: 1, instanceId: "dead", processStart: "dead", createdAt: 1, heartbeatAt: 1 }));
+  await expect(acquireRuntimeLock(dir, {
+    instanceId: "failed-marker", now: () => 10_000, isPidAlive: () => false,
+    metadataFault: (stage, target) => {
+      if (stage === "fsync" && target === "marker") throw new Error("marker fsync failed");
+    },
+  })).rejects.toThrow("marker fsync failed");
+  expect(existsSync(join(dir, "broker.lock.reclaim"))).toBe(false);
+  const retry = await acquireRuntimeLock(dir, { instanceId: "marker-retry", now: () => 10_000, isPidAlive: () => false });
+  retry.release();
+});
+
+test("a partial heartbeat record preserves the prior live owner record", async () => {
+  const dir = await temp();
+  const path = join(dir, "broker.lock");
+  const owner = await acquireRuntimeLock(dir, {
+    instanceId: "journal-owner",
+    heartbeatIntervalMs: 60_000,
+  });
+  await appendFile(path, '\n{"pid":');
+  await expect(acquireRuntimeLock(dir, {
+    instanceId: "contender",
+    verifyOwner: (candidate) => candidate.instanceId === "journal-owner",
+  })).rejects.toMatchObject({ owner: { instanceId: "journal-owner" } });
+  owner.release();
+  expect(existsSync(path)).toBe(false);
 });
 
 test("release removes only the lock identity it acquired", async () => {

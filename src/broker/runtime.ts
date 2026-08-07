@@ -86,6 +86,9 @@ export interface BrokerLockOwner {
   readonly createdAt: number;
   readonly heartbeatAt: number;
 }
+type MetadataStage = "serialize" | "truncate" | "write" | "fsync";
+type MetadataTarget = "lock" | "marker";
+type MetadataFault = (stage: MetadataStage, target: MetadataTarget) => void;
 
 export async function acquireRuntimeLock(
   dataDir: string,
@@ -100,6 +103,7 @@ export async function acquireRuntimeLock(
     malformedStaleAfterMs?: number;
     heartbeatIntervalMs?: number;
     maxAttempts?: number;
+    metadataFault?: MetadataFault;
   } = {},
 ): Promise<BrokerRuntimeLock> {
   await mkdir(dataDir, { recursive: true });
@@ -151,6 +155,8 @@ export async function acquireRuntimeLock(
         options.heartbeatIntervalMs ??
           Math.max(250, Math.floor(staleAfterMs / 3)),
         now,
+        false,
+        options.metadataFault,
       );
       if (owned) return owned;
       await yieldTurn();
@@ -173,7 +179,8 @@ export async function acquireRuntimeLock(
       } else if (now() - statSync(path).mtimeMs < malformedStaleAfterMs) {
         throw new BrokerAlreadyRunningError({ pid: -1, instanceId: "unknown" });
       }
-      let marker: number;
+      let marker: number | undefined;
+      let markerIdentity: FileIdentity | undefined;
       const markerOwner: BrokerLockOwner = {
         pid,
         instanceId,
@@ -187,8 +194,13 @@ export async function acquireRuntimeLock(
           constants.O_CREAT | constants.O_EXCL | constants.O_RDWR,
           0o600,
         );
-        writeMetadata(marker, markerOwner);
+        markerIdentity = fileIdentity(marker);
+        writeInitialMetadata(marker, markerOwner, "marker", options.metadataFault);
       } catch (markerError) {
+        if (marker !== undefined) {
+          closeSync(marker);
+          if (markerIdentity) removeIfSameFile(markerPath, markerIdentity);
+        }
         if ((markerError as NodeJS.ErrnoException).code !== "EEXIST")
           throw markerError;
         await yieldTurn();
@@ -220,6 +232,7 @@ export async function acquireRuntimeLock(
                 Math.max(250, Math.floor(staleAfterMs / 3)),
               now,
               true,
+              options.metadataFault,
             );
             if (owned) return owned;
           } catch (createError) {
@@ -229,7 +242,7 @@ export async function acquireRuntimeLock(
           await yieldTurn();
         }
       } finally {
-        closeSync(marker!);
+        closeSync(marker);
         removeMarkerIfOwned(markerPath, instanceId);
         try {
           unlinkSync(tombstone);
@@ -284,14 +297,22 @@ function createOwnedLock(
   heartbeatIntervalMs: number,
   now: () => number,
   ignoreMarker = false,
+  metadataFault?: MetadataFault,
 ): BrokerRuntimeLock | null {
   const descriptor = openSync(
     path,
     constants.O_CREAT | constants.O_EXCL | constants.O_RDWR,
     0o600,
   );
+  const identity = fileIdentity(descriptor);
   let metadata = initial;
-  writeMetadata(descriptor, metadata);
+  try {
+    writeInitialMetadata(descriptor, metadata, "lock", metadataFault);
+  } catch (error) {
+    closeSync(descriptor);
+    removeIfSameFile(path, identity);
+    throw error;
+  }
   if (!ignoreMarker && existsSync(markerPath)) {
     closeSync(descriptor);
     removeIfOwned(path, initial.instanceId);
@@ -300,7 +321,7 @@ function createOwnedLock(
   const timer = setInterval(() => {
     metadata = { ...metadata, heartbeatAt: now() };
     try {
-      writeMetadata(descriptor, metadata);
+      appendMetadata(descriptor, metadata, "lock", metadataFault);
     } catch {
       /* releasing */
     }
@@ -319,10 +340,47 @@ function createOwnedLock(
     },
   };
 }
-function writeMetadata(descriptor: number, owner: BrokerLockOwner): void {
+function writeInitialMetadata(
+  descriptor: number,
+  owner: BrokerLockOwner,
+  target: MetadataTarget,
+  fault?: MetadataFault,
+): void {
+  fault?.("serialize", target);
   const value = JSON.stringify(owner);
+  fault?.("truncate", target);
   ftruncateSync(descriptor, 0);
-  writeSync(descriptor, value, 0, "utf8");
+  fault?.("write", target);
+  writeFully(descriptor, value, 0);
+  fault?.("fsync", target);
+  fsyncSync(descriptor);
+}
+function appendMetadata(
+  descriptor: number,
+  owner: BrokerLockOwner,
+  target: MetadataTarget,
+  fault?: MetadataFault,
+): void {
+  fault?.("serialize", target);
+  const value = `\n${JSON.stringify(owner)}`;
+  const position = fstatSync(descriptor).size;
+  fault?.("write", target);
+  writeFully(descriptor, value, position);
+  fault?.("fsync", target);
+  fsyncSync(descriptor);
+}
+function writeFully(descriptor: number, value: string, position: number): void {
+  const buffer = Buffer.from(value, "utf8");
+  let written = 0;
+  while (written < buffer.length) {
+    written += writeSync(
+      descriptor,
+      buffer,
+      written,
+      buffer.length - written,
+      position + written,
+    );
+  }
 }
 function removeIfOwned(path: string, instanceId: string): void {
   try {
@@ -333,8 +391,8 @@ function removeIfOwned(path: string, instanceId: string): void {
   }
 }
 function parseOwner(value: string): BrokerLockOwner | null {
-  try {
-    const owner = JSON.parse(value) as Partial<BrokerLockOwner>;
+  for (const record of value.split("\n").reverse()) try {
+    const owner = JSON.parse(record) as Partial<BrokerLockOwner>;
     return Number.isSafeInteger(owner.pid) &&
       typeof owner.instanceId === "string" &&
       typeof owner.processStart === "string" &&
@@ -343,7 +401,25 @@ function parseOwner(value: string): BrokerLockOwner | null {
       ? (owner as BrokerLockOwner)
       : null;
   } catch {
-    return null;
+    continue;
+  }
+  return null;
+}
+
+interface FileIdentity { readonly dev: number; readonly ino: number }
+function fileIdentity(descriptor: number): FileIdentity {
+  const value = fstatSync(descriptor);
+  return { dev: value.dev, ino: value.ino };
+}
+function removeIfSameFile(path: string, identity: FileIdentity): void {
+  try {
+    const current = statSync(path);
+    const sameIdentity = identity.ino !== 0 && current.ino !== 0
+      ? current.ino === identity.ino
+      : current.dev === identity.dev && current.ino === identity.ino;
+    if (sameIdentity) unlinkSync(path);
+  } catch {
+    /* replaced or already absent */
   }
 }
 function yieldTurn(): Promise<void> {
@@ -363,6 +439,8 @@ import {
   closeSync,
   constants,
   existsSync,
+  fstatSync,
+  fsyncSync,
   ftruncateSync,
   openSync,
   readFileSync,
