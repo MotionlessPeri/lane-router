@@ -93,19 +93,18 @@ export class MailboxStore {
   reconcile(state: RouterStateStore): { recovered: number; moved: number } {
     let recovered = 0;
     let moved = 0;
-    for (const absolutePath of this.pendingFiles()) {
+    const orphanFiles = this.pendingFiles().map((absolutePath) => {
       const contents = readFileSync(absolutePath, "utf8");
       const parsed = parseMessage(contents);
       const relativePath = this.relative(absolutePath);
       const existing = state.message(parsed.id) ?? state.messageByRequestKey(parsed.requestKey);
-      if (!existing) {
-        state.insertMessage({
-          ...parsed,
-          relativePath,
-          contentSha256: sha256(contents),
-        });
-        recovered += 1;
-      }
+      return existing ? undefined : { ...parsed, relativePath, contentSha256: sha256(contents) };
+    }).filter((message): message is NewMessageRecord => message !== undefined);
+    while (orphanFiles.length > 0) {
+      const index = orphanFiles.findIndex((message) => message.replyTo === null || state.message(message.replyTo) !== undefined);
+      if (index < 0) throw new MailboxCorruptionError("Orphan messages contain a missing or cyclic reply_to reference");
+      state.insertMessage(orphanFiles.splice(index, 1)[0]!);
+      recovered += 1;
     }
 
     for (const message of state.allMessages()) {

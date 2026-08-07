@@ -79,6 +79,22 @@ describe("file mailbox", () => {
     }
   });
 
+  it("recovers an orphan correction after its referenced orphan regardless of UUID filename order", () => {
+    const x = setup();
+    try {
+      x.mailbox.writePending({
+        id: "z-original", requestKey: "request:original", senderLane: "alpha/source", targetLane: "alpha/target",
+        kind: "normal", replyTo: null, createdAt: 100, body: "Original.",
+      });
+      x.mailbox.writePending({
+        id: "a-correction", requestKey: "request:correction", senderLane: "alpha/source", targetLane: "alpha/target",
+        kind: "correction", replyTo: "z-original", createdAt: 101, body: "Correction.",
+      });
+      expect(x.mailbox.reconcile(x.state)).toEqual({ recovered: 2, moved: 0 });
+      expect(x.state.requireMessage("a-correction").replyTo).toBe("z-original");
+    } finally { x.database.close(); }
+  });
+
   it("finishes a resolved database transition left in the pending directory", () => {
     const x = setup();
     try {
