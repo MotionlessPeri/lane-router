@@ -99,7 +99,7 @@ export class ChannelBridge {
     timer.unref?.();
     this.readinessProbe = { sink, nonce, expiresAt: this.now() + timeoutMs, timer };
     try {
-      await sink.notification({ method: "notifications/claude/channel", params: { content: JSON.stringify({ kind: "lane_router_readiness", nonce }), meta: { message_id: `readiness:${nonce}` } } });
+      await sink.notification({ method: "notifications/claude/channel", params: { content: JSON.stringify({ kind: "lane_router_readiness", readiness_nonce: nonce, instruction: "Call lane_whoami with readiness_nonce exactly as provided." }), meta: { message_id: `readiness:${nonce}` } } });
       return true;
     } catch {
       if (this.readinessProbe?.nonce === nonce) this.clearReadinessProbe();
@@ -107,14 +107,19 @@ export class ChannelBridge {
     }
   }
 
-  confirmReadiness(): boolean {
-    const probe = this.readinessProbe;
-    if (!probe || probe.sink !== this.sink || probe.expiresAt <= this.now()) { this.clearReadinessProbe(); return false; }
+  confirmReadiness(nonce: string | undefined, sink: ClaudeChannelSink): boolean {
+    if (!this.matchesReadiness(nonce, sink)) return false;
     this.clearReadinessProbe();
     this.schedulingCapable = true;
     this.busy = true;
     this.emitState();
     return true;
+  }
+
+  matchesReadiness(nonce: string | undefined, sink: ClaudeChannelSink): boolean {
+    const probe = this.readinessProbe;
+    if (!probe || probe.expiresAt <= this.now()) { this.clearReadinessProbe(); return false; }
+    return probe.sink === this.sink && probe.sink === sink && probe.nonce === nonce;
   }
 
   wake(request: AdapterDeliveryRequest): Promise<AdapterResult> {
@@ -195,10 +200,11 @@ interface ServerConnection {
   readonly generation: number;
   readonly laneAddress: string;
   state: AdapterRuntimeState;
+  stateRevision: number;
   schedulingCapable: boolean;
   connectionEpoch?: string;
   alive: boolean;
-  readonly pending: Map<string, { resolve: (result: AdapterResult) => void; timer: ReturnType<typeof setTimeout>; result: Extract<AdapterResult, "started_new_turn" | "queued_next_turn"> }>;
+  readonly pending: Map<string, { resolve: (result: AdapterResult) => void; timer: ReturnType<typeof setTimeout>; result: Extract<AdapterResult, "started_new_turn" | "queued_next_turn">; previousTurn: "idle" | "busy"; ownerRevision: number; connectionEpoch: string }>;
 }
 
 export function attachClaudeChannelWebSocket(server: HttpServer, service: BrokerService, sessionSecret: string, options: ClaudeChannelWebSocketOptions = {}): ClaudeChannelRegistry {
@@ -216,7 +222,7 @@ export function attachClaudeChannelWebSocket(server: HttpServer, service: Broker
     try { identity = service.whoami({ bindingId: session.id, generation: session.generation }); }
     catch { return rejectUpgrade(socket, 401, "Unauthorized"); }
     if (identity.adapter !== "claude") return rejectUpgrade(socket, 403, "Forbidden");
-    sweepConnections();
+    revalidateConnections();
     const key = connectionKey(session.id, session.generation);
     if (reserved.has(key) || connections.has(key)) return rejectUpgrade(socket, 409, "Conflict");
     if (connections.size + reserved.size >= (options.maxConnections ?? 256)) return rejectUpgrade(socket, 503, "Unavailable");
@@ -228,14 +234,14 @@ export function attachClaudeChannelWebSocket(server: HttpServer, service: Broker
   });
   websocket.on("connection", (socket: WebSocket, _request: IncomingMessage, bindingId: string, generation: number, laneAddress: string) => {
     const key = connectionKey(bindingId, generation);
-    const connection: ServerConnection = { socket, bindingId, generation, laneAddress, state: { availability: "degraded", turn: "unknown" }, schedulingCapable: false, alive: true, pending: new Map() };
+    const connection: ServerConnection = { socket, bindingId, generation, laneAddress, state: { availability: "degraded", turn: "unknown" }, stateRevision: 0, schedulingCapable: false, alive: true, pending: new Map() };
     connections.set(key, connection);
     socket.on("message", (data) => receiveBridgeMessage(connection, data.toString()));
     socket.on("close", () => removeConnection(key, connection));
     socket.on("error", () => undefined);
     socket.on("pong", () => { connection.alive = true; });
   });
-  const revalidateTimer = setInterval(sweepConnections, options.revalidateIntervalMs ?? 5_000);
+  const revalidateTimer = setInterval(heartbeatSweep, options.revalidateIntervalMs ?? 5_000);
   revalidateTimer.unref?.();
 
   function removeConnection(key: string, expected: ServerConnection): void {
@@ -255,7 +261,18 @@ export function attachClaudeChannelWebSocket(server: HttpServer, service: Broker
       connection.socket.terminate(); removeConnection(key, connection); return undefined;
     }
   }
-  function sweepConnections(): void {
+  function revalidateConnections(): void {
+    for (const [key, connection] of connections) {
+      try {
+        const identity = service.whoami({ bindingId: connection.bindingId, generation: connection.generation });
+        if (identity.adapter !== "claude") throw new Error("wrong adapter");
+      } catch {
+        connection.socket.terminate();
+        removeConnection(key, connection);
+      }
+    }
+  }
+  function heartbeatSweep(): void {
     for (const [key, connection] of connections) {
       try {
         const identity = service.whoami({ bindingId: connection.bindingId, generation: connection.generation });
@@ -277,16 +294,17 @@ export function attachClaudeChannelWebSocket(server: HttpServer, service: Broker
       if (connection.pending.size >= (options.maxInflightPerConnection ?? 64) || connection.socket.bufferedAmount > (options.maxBufferedBytes ?? 1_048_576)) return Promise.resolve("adapter_failed");
       const requestId = `wake-${++requestSequence}`;
       const result = connection.state.turn === "idle" ? "started_new_turn" : "queued_next_turn";
+      const previousTurn = connection.state.turn as "idle" | "busy";
       connection.state = { availability: "online", turn: "busy" };
+      const ownerRevision = ++connection.stateRevision;
+      const connectionEpoch = connection.connectionEpoch!;
       return new Promise<AdapterResult>((resolve) => {
-        const timer = setTimeout(() => { connection.pending.delete(requestId); resolve("adapter_failed"); }, options.acceptanceTimeoutMs ?? 5_000);
+        const timer = setTimeout(() => settlePending(connection, requestId, "adapter_failed", true), options.acceptanceTimeoutMs ?? 5_000);
         timer.unref?.();
-        connection.pending.set(requestId, { resolve, timer, result });
+        connection.pending.set(requestId, { resolve, timer, result, previousTurn, ownerRevision, connectionEpoch });
         connection.socket.send(JSON.stringify({ type: "wake", requestId, envelope: minimalEnvelope(request) }), (error) => {
           if (!error) return;
-          const pending = connection.pending.get(requestId);
-          if (!pending) return;
-          connection.pending.delete(requestId); clearTimeout(pending.timer); pending.resolve(connection.socket.readyState === WebSocket.OPEN ? "adapter_failed" : "stored_pending");
+          settlePending(connection, requestId, connection.socket.readyState === WebSocket.OPEN ? "adapter_failed" : "stored_pending", true);
         });
       });
     },
@@ -294,6 +312,7 @@ export function attachClaudeChannelWebSocket(server: HttpServer, service: Broker
       const connection = current(bindingId, generation);
       if (!connection || !connection.connectionEpoch || connection.connectionEpoch !== connectionEpoch || !connection.schedulingCapable) return false;
       connection.state = { availability: "online", turn: event === "Stop" ? "idle" : "busy" };
+      connection.stateRevision += 1;
       return true;
     },
     close: () => new Promise((resolve) => {
@@ -313,7 +332,8 @@ export function attachClaudeChannelWebSocket(server: HttpServer, service: Broker
       connection.connectionEpoch = message.connectionEpoch;
       const becameCapable = !connection.schedulingCapable && message.schedulingCapable && message.availability === "online" && (message.turn === "idle" || message.turn === "busy");
       connection.schedulingCapable = message.schedulingCapable && message.availability === "online";
-      connection.state = connection.schedulingCapable ? { availability: "online", turn: "busy" } : message.availability === "offline" ? { availability: "offline", turn: "unknown" } : { availability: "degraded", turn: "unknown" };
+      if (becameCapable) { connection.state = { availability: "online", turn: "busy" }; connection.stateRevision += 1; }
+      else if (!connection.schedulingCapable) { connection.state = message.availability === "offline" ? { availability: "offline", turn: "unknown" } : { availability: "degraded", turn: "unknown" }; connection.stateRevision += 1; }
       if (becameCapable) {
         try { service.notifyAdapterAvailable({ operationId: `claude-capable:${++reconnectSequence}:${connection.laneAddress}`, adminId: options.adminId ?? "claude-channel-bridge", laneId: connection.laneAddress }); }
         catch { /* capability observability cannot own the authenticated connection */ }
@@ -323,10 +343,21 @@ export function attachClaudeChannelWebSocket(server: HttpServer, service: Broker
     if (message.type === "accepted" && typeof message.requestId === "string" && typeof message.accepted === "boolean" && onlyKeys(message, ["type", "requestId", "accepted"])) {
       const pending = connection.pending.get(message.requestId);
       if (!pending) return;
-      connection.pending.delete(message.requestId); clearTimeout(pending.timer); pending.resolve(message.accepted ? pending.result : "adapter_failed");
+      settlePending(connection, message.requestId, message.accepted ? pending.result : "adapter_failed", !message.accepted);
       return;
     }
     connection.socket.close(1008, "invalid bridge message");
+  }
+
+  function settlePending(connection: ServerConnection, requestId: string, result: AdapterResult, rollback: boolean): void {
+    const pending = connection.pending.get(requestId);
+    if (!pending) return;
+    connection.pending.delete(requestId); clearTimeout(pending.timer);
+    if (rollback && pending.previousTurn === "idle" && connections.get(connectionKey(connection.bindingId, connection.generation)) === connection && connection.connectionEpoch === pending.connectionEpoch && connection.stateRevision === pending.ownerRevision) {
+      connection.state = { availability: "online", turn: "idle" };
+      connection.stateRevision += 1;
+    }
+    pending.resolve(result);
   }
 }
 
@@ -479,5 +510,5 @@ function decodeWake(raw: string, maxPayloadBytes: number, maxBatchCount: number,
 }
 function onlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean { return Object.keys(value).every((key) => allowed.includes(key)); }
 function abortError(): Error { return Object.assign(new Error("Operation aborted"), { name: "AbortError" }); }
-function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> { if (signal?.aborted) return Promise.reject(abortError()); return new Promise((resolve, reject) => { const timer = setTimeout(resolve, ms); timer.unref?.(); signal?.addEventListener("abort", () => { clearTimeout(timer); reject(abortError()); }, { once: true }); }); }
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> { if (signal?.aborted) return Promise.reject(abortError()); return new Promise((resolve, reject) => { const onAbort = () => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); reject(abortError()); }; const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms); timer.unref?.(); signal?.addEventListener("abort", onAbort, { once: true }); }); }
 function closeWebSocket(socket: WebSocket): Promise<void> { if (socket.readyState === WebSocket.CLOSED) return Promise.resolve(); return new Promise((resolve) => { const done = () => { clearTimeout(timer); resolve(); }; const timer = setTimeout(() => { socket.terminate(); resolve(); }, 1_000); timer.unref?.(); socket.once("close", done); socket.once("error", done); if (socket.readyState === WebSocket.CONNECTING) socket.terminate(); else socket.close(); }); }

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import WebSocket from "ws";
 import { BrokerService } from "../../../src/broker/broker-service.js";
 import { BrokerClient } from "../../../src/client/broker-client.js";
@@ -48,10 +48,45 @@ test("authenticated current binding accepts one body-free wake and reports runti
   socket.close();
 });
 
+test("failed wake rolls back only the idle state revision it owns", async () => {
+  const x = await setup({ acceptanceTimeoutMs: 30 });
+  const socket = await connect(x.server, x.bound.bindingCredential);
+  socket.send(JSON.stringify({ type: "state", availability: "online", turn: "busy", schedulingCapable: true, connectionEpoch: "rollback-epoch" }));
+  await expect.poll(() => x.server.claudeChannels.getRuntimeState("binding-a", 1)).toEqual({ availability: "online", turn: "busy" });
+  expect(x.server.claudeChannels.reportLifecycle("binding-a", 1, "rollback-epoch", "Stop")).toBe(true);
+  const failed = x.server.claudeChannels.deliver("binding-a", 1, delivery);
+  await new Promise<void>((resolve) => socket.once("message", () => resolve()));
+  await expect(failed).resolves.toBe("adapter_failed");
+  expect(x.server.claudeChannels.getRuntimeState("binding-a", 1)).toEqual({ availability: "online", turn: "idle" });
+
+  const directlyRejected = x.server.claudeChannels.deliver("binding-a", 1, { ...delivery, deliveryId: "delivery-direct-reject", messageId: "message-direct-reject" });
+  socket.once("message", (data) => {
+    const wake = JSON.parse(data.toString()) as { requestId: string };
+    socket.send(JSON.stringify({ type: "accepted", requestId: wake.requestId, accepted: false }));
+  });
+  await expect(directlyRejected).resolves.toBe("adapter_failed");
+  expect(x.server.claudeChannels.getRuntimeState("binding-a", 1)).toEqual({ availability: "online", turn: "idle" });
+
+  const rejected = x.server.claudeChannels.deliver("binding-a", 1, { ...delivery, deliveryId: "delivery-rejected", messageId: "message-rejected" });
+  socket.once("message", (data) => {
+    const wake = JSON.parse(data.toString()) as { requestId: string };
+    expect(x.server.claudeChannels.reportLifecycle("binding-a", 1, "rollback-epoch", "UserPromptSubmit")).toBe(true);
+    socket.send(JSON.stringify({ type: "accepted", requestId: wake.requestId, accepted: false }));
+  });
+  await expect(rejected).resolves.toBe("adapter_failed");
+  expect(x.server.claudeChannels.getRuntimeState("binding-a", 1)).toEqual({ availability: "online", turn: "busy" });
+  socket.close();
+});
+
 test("stale credentials and duplicate current connections are rejected deterministically", async () => {
   const x = await setup();
   const first = await connect(x.server, x.bound.bindingCredential);
-  await expect(connect(x.server, x.bound.bindingCredential)).rejects.toMatchObject({ statusCode: 409 });
+  const duplicates = await Promise.allSettled([connect(x.server, x.bound.bindingCredential), connect(x.server, x.bound.bindingCredential)]);
+  expect(duplicates).toEqual([
+    expect.objectContaining({ status: "rejected", reason: expect.objectContaining({ statusCode: 409 }) }),
+    expect.objectContaining({ status: "rejected", reason: expect.objectContaining({ statusCode: 409 }) }),
+  ]);
+  expect(first.readyState).toBe(WebSocket.OPEN);
   await x.admin.call("unbind", { operationId: "unbind", laneAddress: "p/a", reason: "rotate fixture" });
   await x.admin.call("rebuild", { operationId: "rebuild", bindingId: "binding-b", laneAddress: "p/a", workspaceId: "w", adapter: "claude", conversationId: "conversation-b", reason: "replace" });
   await expect(connect(x.server, x.bound.bindingCredential)).rejects.toMatchObject({ statusCode: 401 });
@@ -124,6 +159,18 @@ test("stdio-side bridge client uses bounded injected reconnect backoff", async (
   await expect(client.start()).rejects.toThrow(/connect|upgrade|unauthorized|exhausted/i);
   expect(delays).toEqual([50, 75]);
   expect(client.state).toBe("failed");
+  await client.stop();
+});
+
+test("completed reconnect delay removes its abort listener", async () => {
+  const added = vi.spyOn(AbortSignal.prototype, "addEventListener");
+  const removed = vi.spyOn(AbortSignal.prototype, "removeEventListener");
+  const client = new ClaudeChannelBridgeClient({ url: "http://127.0.0.1:1", credential: "invalid", channel: new ChannelBridge(), reconnectLimit: 2, retryBaseMs: 1, retryCapMs: 1, random: () => 1 });
+  await expect(client.start()).rejects.toThrow(/exhausted/i);
+  const addedAbort = added.mock.calls.filter(([type]) => type === "abort").length;
+  const removedAbort = removed.mock.calls.filter(([type]) => type === "abort").length;
+  expect(removedAbort).toBe(addedAbort);
+  added.mockRestore(); removed.mockRestore();
   await client.stop();
 });
 

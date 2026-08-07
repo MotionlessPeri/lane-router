@@ -134,7 +134,7 @@ async function writeIsolatedSettings(sourcePath, targetPath) {
   const command = `"${process.execPath}" "${hookPath}"`;
   const selected = {};
   for (const key of ["env", "apiKeyHelper", "model", "alwaysThinkingEnabled"]) if (source[key] !== undefined) selected[key] = source[key];
-  selected.hooks = Object.fromEntries(["UserPromptSubmit", "Stop"].map((event) => [event, [{ hooks: [{ type: "command", command, timeout: 5 }] }]]));
+  selected.hooks = Object.fromEntries(["UserPromptSubmit", "Stop", "StopFailure"].map((event) => [event, [{ hooks: [{ type: "command", command, timeout: 5 }] }]]));
   await writeFile(targetPath, JSON.stringify(selected), { mode: 0o600 });
 }
 

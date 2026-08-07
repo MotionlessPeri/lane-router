@@ -5,6 +5,7 @@ import { z } from "zod";
 import { createLaneMcpServer, type LaneBrokerClient } from "../../src/mcp/lane-mcp-server.js";
 import { ChannelBridge } from "../../src/adapters/claude/channel-bridge.js";
 import { LANE_TOOL_NAMES } from "../../src/tools/tool-contract.js";
+import { LANE_MCP_TOOLS } from "../../src/mcp/tool-schemas.js";
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => { await Promise.all(closers.splice(0).map((close) => close())); });
@@ -34,6 +35,7 @@ async function connected(input = broker()) {
 }
 
 test("lane MCP advertises exactly eight logical tools with no caller-controlled identity", async () => {
+  expect(LANE_MCP_TOOLS.find((tool) => tool.name === "lane_whoami")?.inputSchema.properties).not.toHaveProperty("readiness_nonce");
   const x = await connected();
   const listed = await x.client.listTools();
   expect(listed.tools.map((tool) => tool.name)).toEqual(LANE_TOOL_NAMES);
@@ -88,8 +90,18 @@ test("lane MCP advertises Channel capability without treating ack as platform tu
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   expect(client.getServerCapabilities()?.experimental).toEqual({ "claude/channel": {} });
   await vi.waitFor(() => expect(notifications).toHaveLength(1));
+  const readiness = JSON.parse((notifications[0] as { params: { content: string } }).params.content) as { readiness_nonce: string };
+  const listed = await client.listTools();
+  expect(listed.tools).toHaveLength(8);
+  expect(listed.tools.find((tool) => tool.name === "lane_whoami")?.inputSchema.properties).toHaveProperty("readiness_nonce");
   expect(channel.getRuntimeState()).toEqual({ availability: "degraded", turn: "unknown" });
   await client.callTool({ name: "lane_whoami", arguments: {} });
+  expect(channel.getRuntimeState()).toEqual({ availability: "degraded", turn: "unknown" });
+  const callsBeforeWrongNonce = x.call.mock.calls.length;
+  expect((await client.callTool({ name: "lane_whoami", arguments: { readiness_nonce: "wrong" } })).isError).toBe(true);
+  expect(x.call).toHaveBeenCalledTimes(callsBeforeWrongNonce);
+  expect(channel.getRuntimeState()).toEqual({ availability: "degraded", turn: "unknown" });
+  await client.callTool({ name: "lane_whoami", arguments: { readiness_nonce: readiness.readiness_nonce } });
   await vi.waitFor(() => expect(channel.getRuntimeState()).toEqual({ availability: "online", turn: "busy" }));
   expect(await channel.wake({ deliveryId: "d", messageId: "m", targetLaneId: "p/a", sequence: 1, kind: "normal", bindingGeneration: 4 })).toBe("queued_next_turn");
   await vi.waitFor(() => expect(notifications).toHaveLength(2));

@@ -50,5 +50,18 @@ async function readStdin(): Promise<string | undefined> {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  void readStdin().then((input) => input === undefined ? false : reportClaudeLifecycle({ input })).then(() => { process.exitCode = 0; }, () => { process.exitCode = 0; });
+  void readStdin().then(async (input) => {
+    if (input === undefined) return 0;
+    const event = parseHookEvent(input);
+    if (event === "StopFailure" || event === undefined) return 0;
+    const accepted = await reportClaudeLifecycle({ input });
+    return event === "UserPromptSubmit" && !accepted ? 2 : 0;
+  }).then((code) => { process.exitCode = code; }, () => { process.exitCode = 0; });
+}
+
+function parseHookEvent(input: string): "Stop" | "StopFailure" | "UserPromptSubmit" | undefined {
+  try {
+    const value = JSON.parse(input) as Record<string, unknown>;
+    return value.hook_event_name === "Stop" || value.hook_event_name === "StopFailure" || value.hook_event_name === "UserPromptSubmit" ? value.hook_event_name : undefined;
+  } catch { return undefined; }
 }

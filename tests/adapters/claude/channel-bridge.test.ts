@@ -64,6 +64,25 @@ test("busy Channel delivery is sent for the next turn and disconnected delivery 
   expect(send).toHaveBeenCalledOnce();
 });
 
+test("readiness promotion requires the active sink exact nonce before expiry", async () => {
+  let now = 10;
+  const send = vi.fn(async (_notification: ClaudeChannelNotification) => undefined);
+  const activeSink = sink(send);
+  const bridge = new ChannelBridge({ now: () => now, readinessTimeoutMs: 20, randomId: () => "nonce-a" });
+  bridge.attach(activeSink);
+  await bridge.beginReadinessProbe();
+  expect(JSON.parse(send.mock.calls[0]![0].params.content)).toMatchObject({ readiness_nonce: "nonce-a" });
+  expect((bridge.confirmReadiness as unknown as (nonce: string, owner: typeof activeSink) => boolean)("wrong", activeSink)).toBe(false);
+  expect((bridge.confirmReadiness as unknown as (nonce: string, owner: typeof activeSink) => boolean)("nonce-a", sink())).toBe(false);
+  expect((bridge.confirmReadiness as unknown as (nonce: string, owner: typeof activeSink) => boolean)("nonce-a", activeSink)).toBe(true);
+
+  bridge.detach(activeSink);
+  bridge.attach(activeSink);
+  await bridge.beginReadinessProbe();
+  now = 31;
+  expect((bridge.confirmReadiness as unknown as (nonce: string, owner: typeof activeSink) => boolean)("nonce-a", activeSink)).toBe(false);
+});
+
 test("Channel wake coalesces concurrency and retries with injected bounded jitter", async () => {
   const delays: number[] = [];
   let attempts = 0;

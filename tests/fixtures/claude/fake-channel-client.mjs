@@ -22,7 +22,7 @@ export async function connectFakeClaude(server) {
     let content;
     try { content = JSON.parse(notification.params.content); } catch { content = undefined; }
     if (content?.kind === "lane_router_readiness") {
-      await client.callTool({ name: "lane_whoami", arguments: {} });
+      await client.callTool({ name: "lane_whoami", arguments: { readiness_nonce: content.readiness_nonce } });
       return;
     }
     const waiter = waiters.shift();

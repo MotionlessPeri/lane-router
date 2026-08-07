@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { BrokerClient } from "../client/broker-client.js";
 import { ChannelBridge, ClaudeChannelBridgeClient, type ClaudeChannelSink } from "../adapters/claude/channel-bridge.js";
 import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
-import { LANE_MCP_TOOLS, parseLaneToolArguments } from "./tool-schemas.js";
+import { CLAUDE_CHANNEL_MCP_TOOLS, parseClaudeChannelToolArguments } from "./tool-schemas.js";
 
 export type LaneBrokerClient = Pick<BrokerClient, "call" | "status">;
 export interface LaneMcpIdentity { readonly bindingId: string; readonly generation: number }
@@ -20,7 +20,7 @@ export class LaneMcpServer {
   constructor(private readonly options: { broker: LaneBrokerClient; identity: LaneMcpIdentity; channel?: ChannelBridge; onClose?: () => void | Promise<void> }) {
     this.protocol = new Server(
       { name: "lane-router", version: "0.1.0" },
-      { capabilities: { tools: {}, experimental: { "claude/channel": {} } }, instructions: "When a Lane Router readiness notification arrives, call lane_whoami once. For every delivery wake, fetch each message ID with lane_message_get, claim its delivery before acting, and acknowledge the claim with the actual outcome when work finishes." },
+      { capabilities: { tools: {}, experimental: { "claude/channel": {} } }, instructions: "When a Lane Router readiness notification arrives, call lane_whoami once and copy its readiness_nonce exactly. For every delivery wake, fetch each message ID with lane_message_get, claim its delivery before acting, and acknowledge the claim with the actual outcome when work finishes." },
     );
     this.channelSink = { notification: (value) => this.protocol.notification(value as never) };
     this.protocol.oninitialized = () => {
@@ -28,7 +28,7 @@ export class LaneMcpServer {
       void this.options.channel?.beginReadinessProbe();
     };
     this.protocol.onclose = () => { this.options.channel?.detach(this.channelSink); this.connected = false; void Promise.resolve(this.options.onClose?.()).catch(() => undefined); };
-    this.protocol.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...LANE_MCP_TOOLS] }));
+    this.protocol.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...CLAUDE_CHANNEL_MCP_TOOLS] }));
     this.protocol.setRequestHandler(CallToolRequestSchema, async (request) => this.callTool(request.params.name, request.params.arguments));
   }
 
@@ -50,9 +50,10 @@ export class LaneMcpServer {
     if (!LANE_TOOL_NAMES.includes(name as LaneToolName)) return toolError("Unknown Lane Router tool");
     const tool = name as LaneToolName;
     try {
-      const args = parseLaneToolArguments(tool, input ?? {});
+      const { args, readinessNonce } = parseClaudeChannelToolArguments(tool, input ?? {});
+      if (tool === "lane_whoami" && readinessNonce !== undefined && !this.options.channel?.matchesReadiness(readinessNonce, this.channelSink)) return toolError("readiness_nonce is not active for this Channel connection");
       const result = await dispatch(this.options.broker, tool, args);
-      if (tool === "lane_whoami") this.options.channel?.confirmReadiness();
+      if (tool === "lane_whoami") this.options.channel?.confirmReadiness(readinessNonce, this.channelSink);
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
     } catch (error) {
       return toolError(error instanceof Error ? error.message : "Lane Router tool call failed");
