@@ -15,8 +15,13 @@ interface EnsureOptions {
   readonly platform?: NodeJS.Platform;
   readonly readSystemProxy?: () => Promise<string | undefined>;
   readonly timeoutMs?: number;
-  readonly start?: (environment: NodeJS.ProcessEnv) => void | Promise<void>;
+  readonly start?: (environment: NodeJS.ProcessEnv) => void | RouterStartAttempt | Promise<void | RouterStartAttempt>;
   readonly health?: (discovery: RouterDiscovery) => Promise<RouterDiscovery | undefined>;
+}
+
+interface RouterStartAttempt {
+  readonly failure: Promise<Error>;
+  detach(): void;
 }
 
 const execFileAsync = promisify(execFile);
@@ -35,8 +40,9 @@ export async function ensureRouter(options: EnsureOptions = {}): Promise<RouterD
       const raced = await readLive(discoveryPath, health);
       if (raced) return raced;
       const environment = await routerEnvironment(options);
-      await (options.start ?? ((childEnvironment) => spawnRouter(dataRoot, childEnvironment)))(environment);
-      return await waitForRouter(discoveryPath, health, options.timeoutMs ?? 15_000);
+      const attempt = (await (options.start ?? ((childEnvironment) => spawnRouter(dataRoot, childEnvironment)))(environment)) ?? undefined;
+      try { return await waitForRouter(discoveryPath, health, options.timeoutMs ?? 15_000, attempt); }
+      finally { attempt?.detach(); }
     } finally { lock.release(); }
   }
   return waitForRouter(discoveryPath, health, options.timeoutMs ?? 15_000);
@@ -48,12 +54,21 @@ async function readLive(path: string, health: NonNullable<EnsureOptions["health"
   catch { return undefined; }
 }
 
-async function waitForRouter(path: string, health: NonNullable<EnsureOptions["health"]>, timeoutMs: number): Promise<RouterDiscovery> {
+async function waitForRouter(
+  path: string,
+  health: NonNullable<EnsureOptions["health"]>,
+  timeoutMs: number,
+  attempt?: RouterStartAttempt,
+): Promise<RouterDiscovery> {
   const deadline = Date.now() + timeoutMs;
+  let failure: Error | undefined;
+  const observedFailure = attempt?.failure.then((error) => { failure = error; });
   while (Date.now() < deadline) {
     const discovery = await readLive(path, health);
     if (discovery) return discovery;
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+    if (failure) throw failure;
+    const delay = new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 25));
+    await (observedFailure ? Promise.race([delay, observedFailure]) : delay);
   }
   throw new Error("Router process did not become ready");
 }
@@ -135,8 +150,31 @@ async function readWindowsSystemProxy(): Promise<string | undefined> {
   } catch { return undefined; }
 }
 
-function spawnRouter(dataRoot: string, environment: NodeJS.ProcessEnv): void {
+function spawnRouter(dataRoot: string, environment: NodeJS.ProcessEnv): RouterStartAttempt {
   const main = resolve(dirname(fileURLToPath(import.meta.url)), "main.js");
-  const child = spawn(process.execPath, [main], { env: { ...environment, LANE_ROUTER_DATA_ROOT: dataRoot }, detached: true, windowsHide: true, stdio: "ignore" });
+  const child = spawn(process.execPath, [main], {
+    env: { ...environment, LANE_ROUTER_DATA_ROOT: dataRoot },
+    detached: true,
+    windowsHide: true,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  const onData = (chunk: Buffer) => { stderr += chunk.toString("utf8"); };
+  child.stderr?.on("data", onData);
+  let resolveFailure!: (error: Error) => void;
+  const failure = new Promise<Error>((resolveError) => { resolveFailure = resolveError; });
+  const onError = (error: Error) => resolveFailure(error);
+  const onClose = (code: number | null) => resolveFailure(new Error(stderr.trim() || `Router process exited before ready with code ${code ?? "unknown"}`));
+  child.once("error", onError);
+  child.once("close", onClose);
   child.unref();
+  return {
+    failure,
+    detach: () => {
+      child.off("error", onError);
+      child.off("close", onClose);
+      child.stderr?.off("data", onData);
+      child.stderr?.destroy();
+    },
+  };
 }

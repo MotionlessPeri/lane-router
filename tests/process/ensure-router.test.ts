@@ -51,6 +51,19 @@ test("concurrent callers start one Router process and share its discovery", asyn
   expect(start).toHaveBeenCalledTimes(1);
 });
 
+test("reports Router stderr when the child exits before ready", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-ensure-")); roots.push(dataRoot);
+  await expect(ensureRouter({
+    dataRoot,
+    start: () => ({
+      failure: Promise.resolve(new Error("Router process failed: Another Router process is already running")),
+      detach: vi.fn(),
+    }),
+    health: async () => undefined,
+    timeoutMs: 50,
+  } as never)).rejects.toThrow("Router process failed: Another Router process is already running");
+});
+
 test("uses a live discovery without starting another process", async () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-ensure-")); roots.push(dataRoot);
   const discovery = { pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "live" };
