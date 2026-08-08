@@ -6,6 +6,8 @@ import { expect, test, vi } from "vitest";
 
 import { launchCodex } from "../../src/process/codex-launcher.js";
 
+const codexExecutable = process.env.CODEX_EXE ?? "codex";
+
 test("runs the CLI entrypoint when the package is reached through a symlink", () => {
   const root = mkdtempSync(join(tmpdir(), "lane-router-codex-link-"));
   try {
@@ -31,7 +33,24 @@ test("lets the remote TUI start a new thread instead of resuming an unmaterializ
     ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
     spawnTui,
   })).resolves.toBe(0);
-  expect(spawnTui).toHaveBeenCalledWith("codex", ["--remote", "ws://127.0.0.1:3"]);
+  expect(spawnTui).toHaveBeenCalledWith(codexExecutable, ["-C", process.cwd(), "--remote", "ws://127.0.0.1:3"]);
+});
+
+test("pins new threads to the directory where the launcher was invoked", async () => {
+  const invocationRoot = mkdtempSync(join(tmpdir(), "lane-router-codex-project-"));
+  const previousRoot = process.cwd();
+  const spawnTui = vi.fn(async () => 0);
+  try {
+    process.chdir(invocationRoot);
+    await launchCodex([], {
+      ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+      spawnTui,
+    });
+    expect(spawnTui).toHaveBeenCalledWith(codexExecutable, ["-C", invocationRoot, "--remote", "ws://127.0.0.1:3"]);
+  } finally {
+    process.chdir(previousRoot);
+    rmSync(invocationRoot, { recursive: true, force: true });
+  }
 });
 
 test("resume only resumes a Router-owned thread and exposes no management subcommands", async () => {
@@ -41,6 +60,6 @@ test("resume only resumes a Router-owned thread and exposes no management subcom
     spawnTui,
   };
   await launchCodex(["resume", "thread-old"], dependencies);
-  expect(spawnTui).toHaveBeenCalledWith("codex", ["--remote", "ws://127.0.0.1:3", "resume", "thread-old"]);
+  expect(spawnTui).toHaveBeenCalledWith(codexExecutable, ["--remote", "ws://127.0.0.1:3", "resume", "thread-old"]);
   await expect(launchCodex(["status"], dependencies)).rejects.toThrow(/usage/i);
 });

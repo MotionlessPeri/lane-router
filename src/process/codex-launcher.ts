@@ -14,7 +14,10 @@ interface LauncherDependencies {
 export async function launchCodex(args: readonly string[], dependencies: LauncherDependencies = defaults): Promise<number> {
   if (args.length !== 0 && !(args.length === 2 && args[0] === "resume" && args[1])) throw new Error("Usage: lane-router-codex [resume <thread-id>]");
   const discovery = await dependencies.ensure();
-  return dependencies.spawnTui(process.env.CODEX_EXE ?? "codex", ["--remote", discovery.codexEndpoint, ...args]);
+  const tuiArgs = args.length === 0
+    ? ["-C", process.cwd(), "--remote", discovery.codexEndpoint]
+    : ["--remote", discovery.codexEndpoint, ...args];
+  return dependencies.spawnTui(process.env.CODEX_EXE ?? "codex", tuiArgs);
 }
 
 const defaults: LauncherDependencies = {
