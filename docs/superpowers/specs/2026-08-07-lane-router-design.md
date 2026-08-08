@@ -301,6 +301,10 @@ Claude/Codex 接入进程连接时先确保 Router process 存在；若不存在
 
 用户不需要单独启动或管理 Router process。Claude MCP 接入会直接确保它存在；Codex 使用单用途 `lane-router-codex` launcher 完成同一件事。launcher 将 Codex 自带 TUI 连接到 Router 的本地 App Server adapter；新对话仍由 TUI 正常调用 `thread/start`，adapter 只向该请求注入四项 dynamic tools 和 Router instructions，并从响应取得权威 `threadId`。这样避免在首个真实 turn 前恢复尚未落盘的 thread。恢复已有 Router-owned thread 时，adapter 校验所有权后转发 TUI 的 `thread/resume`。该 adapter 不执行 lane 注册或管理。
 
+Windows 上的 Codex 0.147 已验证会在 system proxy 的 Responses WebSocket 路径超时或收到连接重置，随后退回 HTTPS；同一环境显式设置标准 `HTTP_PROXY` 和 `HTTPS_PROXY` 后，WebSocket 一次成功。代理环境补全只在创建新 Router process 时执行。调用环境显式设置的 `HTTP_PROXY` 和 `HTTPS_PROXY` 原样优先；只有两者均未设置时，启动路径才读取当前已启用且可识别的静态 Windows system proxy，并推导这两项变量。如果两者只设置了一项，另一项保持未设置，不与 system proxy 混用。
+
+新 Windows Router 只要使用了显式或推导的代理，就保留已有 `NO_PROXY` 条目并补齐 `localhost` 和 `127.0.0.1`。这些环境变量只传给新 Router 及其启动的 shared App Server。非 Windows、未启用代理、仅有自动代理脚本、配置无法识别或已经运行的 Router 都保持原行为。该修复不增加代理配置文件、命令行参数、自动重启或运行时配置迁移。
+
 这是 V1 唯一的命令行例外。它没有 lane 注册、查询、状态、诊断或管理子命令，也不改变“lane 操作全部由对话工具完成”的边界。V1 不注册 Windows 服务，也不暴露运行时重试和 deadline 调参项。
 
 消息在目标离线时保持 pending。目标重新连接、Router 重启或未 ack 的处理被中断后，pending 消息再次获得处理机会。通知可以合并；系统承诺至少一次提醒，不宣称 exactly-once。V1 不设置失败计数、自动 poison park 或人工 retry 控制台。
@@ -341,6 +345,7 @@ V1 完成必须证明：
 7. lane 离线、Router 重启或处理未 ack 时，pending 消息不会丢失，并会再次获得处理机会。
 8. Claude MCP 或 Codex launcher 都可以按需启动 Router process；Codex remote TUI 通过本地 adapter 创建带四项 dynamic tools 的 thread，不需要预创建后 resume。用户不需要 Lane Router 管理 CLI 或 Windows 服务。
 9. 数据模型和公开接口中不存在本设计明确删除的 project/workspace、管理面和安全扩展。
+10. Windows 创建新 Router 时，显式 `HTTP_PROXY` 和 `HTTPS_PROXY` 不被覆盖；两者均缺失且启用了可识别的静态 system proxy 时，只有新 Router 及其 shared App Server 获得推导出的代理环境。使用代理时，`NO_PROXY` 保留已有条目并包含 `localhost` 和 `127.0.0.1`。非 Windows、未启用代理、仅有自动代理脚本、配置无法识别以及已经运行的 Router 均保持原行为。该修复不增加配置、CLI、自动重启或运行时更新入口。
 
 ## 实施前置条件
 
