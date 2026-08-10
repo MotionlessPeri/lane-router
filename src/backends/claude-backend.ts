@@ -1,12 +1,17 @@
-import type { Notification, NotificationOutcome, PlatformBackend } from "../router/backend.js";
+import type { Notification, NotificationOutcome, PlatformBackend, ReachSnapshot } from "../router/backend.js";
 import type { BindingRecord } from "../router/types.js";
 
-export type ClaudeChannelOutcome = "started_new_turn" | "queued_next_turn" | "offline" | "failed";
+/**
+ * What the Claude channel can actually establish. There is deliberately no value meaning
+ * "the receiver saw it": the hub writes a frame into a socket and learns nothing more.
+ */
+export type ClaudeChannelOutcome = "sent" | "no_channel" | "send_failed";
 
 export interface ClaudeChannelPort {
   notify(binding: BindingRecord, notification: Notification): Promise<ClaudeChannelOutcome>;
   waitUntilReplaceable(binding: BindingRecord): Promise<void>;
   onAttentionOpportunity(handler: (binding: BindingRecord) => void): () => void;
+  reach(conversationId: string): ReachSnapshot;
 }
 
 export class ClaudeBackend implements PlatformBackend {
@@ -20,11 +25,11 @@ export class ClaudeBackend implements PlatformBackend {
   }
 
   notifyNormal(binding: BindingRecord, notification: Notification): Promise<NotificationOutcome> {
-    return this.notify(binding, notification);
+    return this.channel.notify(binding, notification);
   }
 
   notifyCorrection(binding: BindingRecord, notification: Notification): Promise<NotificationOutcome> {
-    return this.notify(binding, notification);
+    return this.channel.notify(binding, notification);
   }
 
   waitUntilReplaceable(binding: BindingRecord): Promise<void> {
@@ -36,10 +41,7 @@ export class ClaudeBackend implements PlatformBackend {
     return () => this.attentionHandlers.delete(handler);
   }
 
-  private async notify(binding: BindingRecord, notification: Notification): Promise<NotificationOutcome> {
-    const outcome = await this.channel.notify(binding, notification);
-    if (outcome === "offline") return "offline";
-    if (outcome === "failed") return "deferred";
-    return "delivered";
+  reach(binding: BindingRecord): ReachSnapshot {
+    return this.channel.reach(binding.conversationId);
   }
 }

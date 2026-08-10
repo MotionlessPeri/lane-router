@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { Notification, NotificationOutcome, PlatformBackend } from "../../src/router/backend.js";
+import type { Notification, NotificationOutcome, PlatformBackend, ReachSnapshot } from "../../src/router/backend.js";
 import { BackendRegistry } from "../../src/router/backend.js";
 import { openRouterDatabase } from "../../src/router/database.js";
 import { MailboxStore } from "../../src/router/mailbox-store.js";
@@ -21,7 +21,7 @@ class RecordingBackend implements PlatformBackend {
   readonly name = "codex" as const;
   readonly normal: Notification[] = [];
   readonly corrections: Notification[] = [];
-  outcome: NotificationOutcome = "delivered";
+  outcome: NotificationOutcome = "sent";
   async notifyNormal(_binding: BindingRecord, notification: Notification): Promise<NotificationOutcome> {
     this.normal.push(notification); return this.outcome;
   }
@@ -30,6 +30,9 @@ class RecordingBackend implements PlatformBackend {
   }
   onAttentionOpportunity(): () => void { return () => undefined; }
   async waitUntilReplaceable(): Promise<void> {}
+  reach(): ReachSnapshot {
+    return { state: "live", connectedAt: 1, lastLifecycleAt: 2, lastNotifiedAt: 3, believedBusy: false };
+  }
 }
 
 function setup() {
@@ -65,17 +68,48 @@ describe("NotificationPump", () => {
     } finally { x.database.close(); }
   });
 
-  it("keeps deferred and offline messages pending for a later opportunity", async () => {
+  it("records every outcome as itself rather than leaving the undelivered ones indistinguishable", async () => {
     const x = setup();
     try {
       addMessage(x, "normal-1", "normal");
-      x.backend.outcome = "deferred";
-      await x.pump.notifyLane("alpha/target");
+      // Before any attempt, 'pending' means exactly that: nothing has been tried yet.
       expect(x.state.requireMessage("normal-1").notificationState).toBe("pending");
-      x.backend.outcome = "delivered";
-      await x.pump.notifyLane("alpha/target");
-      expect(x.state.requireMessage("normal-1").notificationState).toBe("notified");
+      for (const outcome of ["deferred", "no_channel", "send_failed", "sent"] as const) {
+        x.backend.outcome = outcome;
+        await x.pump.notifyLane("alpha/target");
+        expect(x.state.requireMessage("normal-1").notificationState).toBe(outcome);
+      }
     } finally { x.database.close(); }
+  });
+
+  it("keeps an undelivered message eligible for a later opportunity", async () => {
+    const x = setup();
+    try {
+      addMessage(x, "normal-1", "normal");
+      x.backend.outcome = "no_channel";
+      await x.pump.notifyLane("alpha/target");
+      expect(x.state.requireMessage("normal-1").state).toBe("pending");
+      x.backend.outcome = "sent";
+      await x.pump.notifyLane("alpha/target");
+      expect(x.backend.normal).toHaveLength(2);
+    } finally { x.database.close(); }
+  });
+
+  // Acceptance criterion: the recorded outcome is observational. Which messages a notification
+  // covers must not depend on it, or changing the vocabulary would have changed delivery.
+  it("selects the same messages whatever outcome was recorded before", async () => {
+    for (const previous of ["pending", "sent", "deferred", "no_channel", "send_failed"] as const) {
+      const x = setup();
+      try {
+        addMessage(x, "normal-1", "normal");
+        addMessage(x, "normal-2", "normal");
+        x.state.recordNotificationOutcome(["normal-1"], previous === "pending" ? "sent" : previous);
+        if (previous === "pending") x.database.prepare("UPDATE message SET notification_state='pending'").run();
+        x.backend.outcome = "sent";
+        await x.pump.notifyLane("alpha/target");
+        expect(x.backend.normal.at(-1)?.messageIds).toEqual(["normal-1", "normal-2"]);
+      } finally { x.database.close(); }
+    }
   });
 
   it("retries pending mail on startup, reconnect, and turn-end opportunities", async () => {

@@ -103,8 +103,10 @@ test("bridges body-free Claude notifications and waits for lifecycle Stop before
   const binding: BindingRecord = { id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, activeAt: 1, inactiveAt: null };
   const notification = { laneAddress: "alpha/design", pendingPath: "C:/mailbox/pending", kind: "normal" as const, messageIds: ["message-1"] };
   try {
-    await expect(server.claude.notify(binding, notification)).resolves.toBe("started_new_turn");
-    await expect(server.claude.notify(binding, notification)).resolves.toBe("queued_next_turn");
+    // Claude Code queues a mid-turn notification itself, so a busy target is not a different
+    // outcome here: both calls only establish that the frame left the Router.
+    await expect(server.claude.notify(binding, notification)).resolves.toBe("sent");
+    await expect(server.claude.notify(binding, notification)).resolves.toBe("sent");
     await vi.waitFor(() => expect(notifications).toHaveLength(2));
     expect(JSON.stringify(notifications)).not.toContain("message body");
     let replaced = false;

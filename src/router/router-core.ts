@@ -3,7 +3,7 @@ import { parseLaneAddress } from "./address.js";
 import type { MailboxStore } from "./mailbox-store.js";
 import type { NotificationPump } from "./notification-pump.js";
 import type { RouterStateStore } from "./state-store.js";
-import type { CallerContext, LaneRecord, MessageKind, MessageRecord } from "./types.js";
+import type { CallerContext, LaneRecord, MessageKind, MessageRecord, ReachSnapshot } from "./types.js";
 
 export class RouterError extends Error {
   constructor(readonly code: string, message: string) {
@@ -12,11 +12,22 @@ export class RouterError extends Error {
   }
 }
 
+export interface DirectoryBinding {
+  readonly generation: number;
+  readonly attachedAt: number;
+}
+
+/**
+ * `binding` answers "does this lane have an owner", `reach` answers "can the Router still get
+ * to that owner". A single boolean was answering both, and the two only disagree during a
+ * failure — which is exactly when someone is reading this.
+ */
 export interface DirectoryEntry {
   readonly address: string;
   readonly roleDescription: string;
-  readonly bound: boolean;
   readonly backend: "claude" | "codex" | null;
+  readonly binding: DirectoryBinding | null;
+  readonly reach: ReachSnapshot | null;
 }
 
 interface RouterCoreDependencies {
@@ -35,7 +46,19 @@ export class RouterCore {
     if (!project.trim() || project.includes("/")) throw new RouterError("INVALID_PROJECT", "Project must be one non-empty segment");
     return this.dependencies.state.listLanes(project).map((lane) => {
       const binding = this.dependencies.state.activeBindingForLane(lane.address);
-      return { address: lane.address, roleDescription: lane.roleDescription, bound: binding !== undefined, backend: binding?.backend ?? null };
+      if (!binding) {
+        return { address: lane.address, roleDescription: lane.roleDescription, backend: null, binding: null, reach: null };
+      }
+      // find, not require: a lane may name a backend this Router does not run, and a query
+      // tool must not throw for that. A missing backend means no reachability claim at all.
+      const backend = this.dependencies.backends.find(binding.backend);
+      return {
+        address: lane.address,
+        roleDescription: lane.roleDescription,
+        backend: binding.backend,
+        binding: { generation: binding.generation, attachedAt: binding.activeAt },
+        reach: backend?.reach(binding) ?? null,
+      };
     });
   }
 

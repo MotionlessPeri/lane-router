@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { PlatformBackend } from "../../src/router/backend.js";
+import type { PlatformBackend, ReachSnapshot } from "../../src/router/backend.js";
 import { BackendRegistry } from "../../src/router/backend.js";
 import { openRouterDatabase } from "../../src/router/database.js";
 import { MailboxStore } from "../../src/router/mailbox-store.js";
@@ -24,9 +24,12 @@ class FakeBackend implements PlatformBackend {
   readonly notified: BindingRecord[] = [];
   wait?: () => Promise<void>;
 
-  async notifyNormal(binding: BindingRecord): Promise<"delivered"> { this.notified.push(binding); return "delivered"; }
-  async notifyCorrection(binding: BindingRecord): Promise<"delivered"> { this.notified.push(binding); return "delivered"; }
+  reachState: ReachSnapshot = { state: "live", connectedAt: 10, lastLifecycleAt: 20, lastNotifiedAt: 30, believedBusy: false };
+
+  async notifyNormal(binding: BindingRecord): Promise<"sent"> { this.notified.push(binding); return "sent"; }
+  async notifyCorrection(binding: BindingRecord): Promise<"sent"> { this.notified.push(binding); return "sent"; }
   onAttentionOpportunity(): () => void { return () => undefined; }
+  reach(): ReachSnapshot { return this.reachState; }
   async waitUntilReplaceable(binding: BindingRecord): Promise<void> {
     this.waited.push(binding);
     await this.wait?.();
@@ -65,8 +68,42 @@ describe("RouterCore directory and attach", () => {
       x.state.createLane({ address: "alpha/design", project: "alpha", roleDescription: "Own design.", now: 1 });
       x.state.createLane({ address: "beta/test", project: "beta", roleDescription: "Own tests.", now: 1 });
       expect(await x.core.directory("alpha")).toEqual([
-        { address: "alpha/design", roleDescription: "Own design.", bound: false, backend: null },
+        { address: "alpha/design", roleDescription: "Own design.", backend: null, binding: null, reach: null },
       ]);
+    } finally { x.database.close(); }
+  });
+
+  it("reports ownership and reachability as separate answers", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("thread-a"), { address: "alpha/design", roleDescription: "Design." });
+      x.backend.reachState = { state: "no_channel", connectedAt: null, lastLifecycleAt: null, lastNotifiedAt: null, believedBusy: null };
+
+      // The lane still has an owner; what changed is that the Router can no longer get to it.
+      // One boolean used to answer both, and it answered the wrong one during a failure.
+      expect(x.core.directory("alpha")).toEqual([expect.objectContaining({
+        address: "alpha/design",
+        backend: "codex",
+        binding: { generation: 1, attachedAt: expect.any(Number) },
+        reach: expect.objectContaining({ state: "no_channel" }),
+      })]);
+    } finally { x.database.close(); }
+  });
+
+  it("still answers for a lane whose backend this Router does not run", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("thread-a"), { address: "alpha/design", roleDescription: "Design." });
+      // A Router with no Claude backend registered must not make lane_directory throw.
+      const withoutBackends = new RouterCore({
+        state: x.state, mailbox: x.mailbox, backends: new BackendRegistry([]), pump: x.pump,
+        newId: (kind) => `${kind}-x`, now: () => 1,
+      });
+      expect(withoutBackends.directory("alpha")).toEqual([expect.objectContaining({
+        address: "alpha/design",
+        binding: { generation: 1, attachedAt: expect.any(Number) },
+        reach: null,
+      })]);
     } finally { x.database.close(); }
   });
 
@@ -81,7 +118,11 @@ describe("RouterCore directory and attach", () => {
       expect(result).toEqual(expect.objectContaining({
         lane: expect.objectContaining({ address: "alpha/design", roleDescription: "Own design decisions." }),
         generation: 1,
-        directory: [expect.objectContaining({ address: "alpha/design", bound: true })],
+        directory: [expect.objectContaining({
+          address: "alpha/design",
+          binding: { generation: 1, attachedAt: expect.any(Number) },
+          reach: expect.objectContaining({ state: "live" }),
+        })],
       }));
       expect(result.pendingPath.replaceAll("\\", "/")).toContain("/mailboxes/alpha/design/pending");
     } finally { x.database.close(); }

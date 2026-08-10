@@ -1,7 +1,27 @@
 export type BackendName = "claude" | "codex";
 export type MessageKind = "normal" | "correction";
 export type MessageState = "pending" | "resolved";
-export type NotificationState = "pending" | "notified";
+
+/**
+ * What a notification attempt actually achieved. The Router never claims the receiver saw
+ * anything: on the Claude side it can only observe that a frame left the process, so there is
+ * no `delivered`. Whether a notification produced a turn is answered by comparing
+ * `ReachSnapshot.lastNotifiedAt` with `lastLifecycleAt`, which rests on observed evidence.
+ */
+export type NotificationOutcome = "sent" | "deferred" | "no_channel" | "send_failed";
+export type NotificationState = "pending" | NotificationOutcome;
+
+/** Whether the Router can still reach a lane's bound conversation, and what that claim rests on. */
+export type ReachState = "live" | "unconfirmed" | "no_channel";
+
+export interface ReachSnapshot {
+  readonly state: ReachState;
+  readonly connectedAt: number | null;
+  readonly lastLifecycleAt: number | null;
+  readonly lastNotifiedAt: number | null;
+  /** The Router's belief, not an observation; null when a backend keeps no such belief. */
+  readonly believedBusy: boolean | null;
+}
 
 export interface LaneRecord {
   readonly address: string;

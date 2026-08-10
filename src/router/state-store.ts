@@ -6,6 +6,8 @@ import type {
   MessageKind,
   MessageRecord,
   NewMessageRecord,
+  NotificationOutcome,
+  NotificationState,
 } from "./types.js";
 
 interface LaneRow {
@@ -41,7 +43,7 @@ interface MessageRow {
   resolved_at: number | null;
   ack_lane: string | null;
   ack_generation: number | null;
-  notification_state: "pending" | "notified";
+  notification_state: NotificationState;
 }
 
 export class RouterStateStore {
@@ -255,12 +257,12 @@ export class RouterStateStore {
     `).all() as Array<{ target_lane: string }>).map((row) => row.target_lane);
   }
 
-  markMessagesNotified(messageIds: readonly string[]): void {
+  recordNotificationOutcome(messageIds: readonly string[], outcome: NotificationOutcome): void {
     const statement = this.database.prepare(`
-      UPDATE message SET notification_state='notified' WHERE id=? AND state='pending'
+      UPDATE message SET notification_state=? WHERE id=? AND state='pending'
     `);
     this.database.transaction(() => {
-      for (const id of messageIds) statement.run(id);
+      for (const id of messageIds) statement.run(outcome, id);
     })();
   }
 

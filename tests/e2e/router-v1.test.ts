@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, expect, test } from "vitest";
 
-import { BackendRegistry, type Notification, type PlatformBackend } from "../../src/router/backend.js";
+import { BackendRegistry, type Notification, type PlatformBackend, type ReachSnapshot } from "../../src/router/backend.js";
 import { openRouterDatabase } from "../../src/router/database.js";
 import { MailboxStore } from "../../src/router/mailbox-store.js";
 import { NotificationPump } from "../../src/router/notification-pump.js";
@@ -18,10 +18,13 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 class FakeBackend implements PlatformBackend {
   readonly notifications: Notification[] = [];
   constructor(readonly name: BackendName) {}
-  async notifyNormal(_binding: BindingRecord, notification: Notification) { this.notifications.push(notification); return "delivered" as const; }
-  async notifyCorrection(_binding: BindingRecord, notification: Notification) { this.notifications.push(notification); return "delivered" as const; }
+  async notifyNormal(_binding: BindingRecord, notification: Notification) { this.notifications.push(notification); return "sent" as const; }
+  async notifyCorrection(_binding: BindingRecord, notification: Notification) { this.notifications.push(notification); return "sent" as const; }
   async waitUntilReplaceable() {}
   onAttentionOpportunity() { return () => undefined; }
+  reach(): ReachSnapshot {
+    return { state: "live", connectedAt: 1, lastLifecycleAt: 2, lastNotifiedAt: 3, believedBusy: false };
+  }
 }
 
 function stack(root: string, ids: { value: number }) {
@@ -46,8 +49,8 @@ test("V1 coordinates two lanes through durable files, correction history, ack, r
     await first.core.attachCurrent(source, { address: "alpha/source", roleDescription: "Coordinates work." });
     await first.core.attachCurrent(target, { address: "alpha/target", roleDescription: "Implements work." });
     expect(first.core.directory("alpha")).toEqual([
-      expect.objectContaining({ address: "alpha/source", bound: true }),
-      expect.objectContaining({ address: "alpha/target", bound: true }),
+      expect.objectContaining({ address: "alpha/source", binding: expect.objectContaining({ generation: 1 }) }),
+      expect.objectContaining({ address: "alpha/target", binding: expect.objectContaining({ generation: 1 }) }),
     ]);
 
     const normal = await first.core.send({ ...source, requestKey: "send-normal" }, { target: "alpha/target", kind: "normal", body: "Original task." });

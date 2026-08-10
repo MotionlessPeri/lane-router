@@ -5,7 +5,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { ClaudeChannelPort, ClaudeChannelOutcome } from "../backends/claude-backend.js";
 import { CodexTuiBridge, type CodexTuiBridgeHost } from "../adapters/codex/tui-bridge.js";
 import type { Notification } from "../router/backend.js";
-import type { CallerContext, BindingRecord } from "../router/types.js";
+import type { CallerContext, BindingRecord, ReachSnapshot } from "../router/types.js";
 import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
 import type { ToolService } from "../tools/tool-service.js";
 
@@ -17,18 +17,29 @@ export interface RouterDiscovery {
   readonly instanceId: string;
 }
 
+interface ChannelConnection {
+  readonly socket: WebSocket;
+  readonly connectedAt: number;
+  busy: boolean;
+  lastLifecycleAt: number | null;
+  lastNotifiedAt: number | null;
+}
+
 export class ClaudeChannelHub implements ClaudeChannelPort {
-  private readonly connections = new Map<string, { socket: WebSocket; busy: boolean }>();
+  private readonly connections = new Map<string, ChannelConnection>();
   private readonly bindings = new Map<string, BindingRecord>();
   private readonly attentionHandlers = new Set<(binding: BindingRecord) => void>();
   private readonly waiters = new Map<string, Set<() => void>>();
 
-  constructor(private readonly resolveBinding: (conversationId: string) => BindingRecord | undefined = () => undefined) {}
+  constructor(
+    private readonly resolveBinding: (conversationId: string) => BindingRecord | undefined = () => undefined,
+    private readonly now: () => number = Date.now,
+  ) {}
 
   connect(conversationId: string, socket: WebSocket): void {
     const previous = this.connections.get(conversationId);
     previous?.socket.close(1000, "replaced");
-    this.connections.set(conversationId, { socket, busy: false });
+    this.connections.set(conversationId, { socket, connectedAt: this.now(), busy: false, lastLifecycleAt: null, lastNotifiedAt: null });
     socket.on("message", (raw) => this.receive(conversationId, raw.toString()));
     socket.on("close", () => {
       if (this.connections.get(conversationId)?.socket !== socket) return;
@@ -41,16 +52,36 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     this.signal(conversationId);
   }
 
+  // Claude Code queues a notification that arrives mid-turn, so the frame goes out either way
+  // and the Router has no evidence about what the receiver did with it. The only honest report
+  // is whether the frame left this process.
   async notify(binding: BindingRecord, notification: Notification): Promise<ClaudeChannelOutcome> {
     this.bindings.set(binding.conversationId, binding);
     const connection = this.connections.get(binding.conversationId);
-    if (!connection || connection.socket.readyState !== connection.socket.OPEN) return "offline";
-    const outcome = connection.busy ? "queued_next_turn" : "started_new_turn";
+    if (!connection || connection.socket.readyState !== connection.socket.OPEN) return "no_channel";
     try {
       await sendWebSocket(connection.socket, JSON.stringify({ type: "notification", notification }));
-      connection.busy = true;
-      return outcome;
-    } catch { return "offline"; }
+    } catch { return "send_failed"; }
+    connection.lastNotifiedAt = this.now();
+    connection.busy = true;
+    return "sent";
+  }
+
+  reach(conversationId: string): ReachSnapshot {
+    const connection = this.connections.get(conversationId);
+    if (!connection || connection.socket.readyState !== connection.socket.OPEN) {
+      return { state: "no_channel", connectedAt: null, lastLifecycleAt: null, lastNotifiedAt: null, believedBusy: null };
+    }
+    return {
+      // A channel whose lifecycle events never arrived cannot be called live: it is exactly the
+      // shape a diverged session identity leaves behind, and it also covers a session that has
+      // simply not run a turn yet. connectedAt is what separates the two.
+      state: connection.lastLifecycleAt === null ? "unconfirmed" : "live",
+      connectedAt: connection.connectedAt,
+      lastLifecycleAt: connection.lastLifecycleAt,
+      lastNotifiedAt: connection.lastNotifiedAt,
+      believedBusy: connection.busy,
+    };
   }
 
   async waitUntilReplaceable(binding: BindingRecord): Promise<void> {
@@ -73,6 +104,7 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     const connection = this.connections.get(conversationId);
     if (!connection) return false;
     connection.busy = event === "UserPromptSubmit";
+    connection.lastLifecycleAt = this.now();
     if (event === "Stop") this.signal(conversationId);
     return true;
   }

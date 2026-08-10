@@ -44,7 +44,11 @@ export class NotificationPump {
     };
   }
 
+  // Every outcome is recorded, including the ones that delivered nothing. Leaving those at
+  // 'pending' was what made "never attempted" and "attempted, nobody home" look identical.
+  // This is observational only: notifyLane still selects by message state, so the recorded
+  // outcome never changes when a notification is sent.
   private recordOutcome(messages: readonly MessageRecord[], outcome: NotificationOutcome): void {
-    if (outcome === "delivered") this.state.markMessagesNotified(messages.map((message) => message.id));
+    this.state.recordNotificationOutcome(messages.map((message) => message.id), outcome);
   }
 }

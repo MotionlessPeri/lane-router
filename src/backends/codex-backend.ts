@@ -4,7 +4,7 @@ import {
   decodeTurnSteerResult,
   type ThreadResult,
 } from "../adapters/codex/protocol.js";
-import type { Notification, NotificationOutcome, PlatformBackend } from "../router/backend.js";
+import type { Notification, NotificationOutcome, PlatformBackend, ReachSnapshot } from "../router/backend.js";
 import type { BindingRecord } from "../router/types.js";
 
 interface CodexNotification {
@@ -22,11 +22,15 @@ export class CodexBackend implements PlatformBackend {
   readonly name = "codex" as const;
   private readonly attentionHandlers = new Set<(laneAddress: string) => void>();
   private readonly replaceWaiters = new Map<string, Set<() => void>>();
+  private readonly observed = new Map<string, { lastLifecycleAt: number | null; lastNotifiedAt: number | null }>();
+  private readonly now: () => number;
 
   constructor(private readonly dependencies: {
     readonly client: CodexClient;
     readonly resolveLane: (threadId: string) => string | undefined;
+    readonly now?: () => number;
   }) {
+    this.now = dependencies.now ?? Date.now;
     dependencies.client.onNotification((message) => this.observeNotification(message));
   }
 
@@ -84,13 +88,13 @@ export class CodexBackend implements PlatformBackend {
   }
 
   private async notify(binding: BindingRecord, notification: Notification, allowSteer: boolean): Promise<NotificationOutcome> {
-    if (!this.dependencies.client.isConnected()) return "offline";
+    if (!this.dependencies.client.isConnected()) return "no_channel";
     try {
       const response = decodeThreadReadResult(await this.dependencies.client.request("thread/read", {
         threadId: binding.conversationId,
         includeTurns: allowSteer,
       }));
-      if (response.thread.status.type === "notLoaded") return "offline";
+      if (response.thread.status.type === "notLoaded") return "no_channel";
       if (response.thread.status.type === "active") {
         if (!allowSteer) return "deferred";
         const turnId = activeTurnId(response);
@@ -99,19 +103,51 @@ export class CodexBackend implements PlatformBackend {
           expectedTurnId: turnId,
           input: [{ type: "text", text: notificationText(notification) }],
         }));
-        return "delivered";
+        this.observe(binding.conversationId, "notified");
+        return "sent";
       }
       decodeTurnStartResult(await this.dependencies.client.request("turn/start", {
         threadId: binding.conversationId,
         input: [{ type: "text", text: notificationText(notification) }],
       }));
-      return "delivered";
+      this.observe(binding.conversationId, "notified");
+      return "sent";
     } catch (error) {
-      return isMissingThread(error) || !this.dependencies.client.isConnected() ? "offline" : "deferred";
+      // A thread the App Server no longer knows, or a link that dropped mid-request, means
+      // nothing was delivered and nothing is wrong with the request itself.
+      return isMissingThread(error) || !this.dependencies.client.isConnected() ? "no_channel" : "send_failed";
     }
   }
 
+  reach(binding: BindingRecord): ReachSnapshot {
+    const observed = this.observed.get(binding.conversationId);
+    if (!this.dependencies.client.isConnected()) {
+      return { state: "no_channel", connectedAt: null, lastLifecycleAt: null, lastNotifiedAt: null, believedBusy: null };
+    }
+    return {
+      // Thread status is authoritative but only on request, and a query tool must not make one.
+      // So this reports what has already been observed for the thread, exactly as the Claude
+      // side does: connected with nothing observed yet is not a claim that it is live.
+      state: (observed?.lastLifecycleAt ?? null) === null ? "unconfirmed" : "live",
+      connectedAt: null,
+      lastLifecycleAt: observed?.lastLifecycleAt ?? null,
+      lastNotifiedAt: observed?.lastNotifiedAt ?? null,
+      // The Codex backend keeps no busy belief; it asks the App Server when it needs the answer.
+      believedBusy: null,
+    };
+  }
+
+  private observe(threadId: string, event: "notified" | "lifecycle"): void {
+    const current = this.observed.get(threadId) ?? { lastLifecycleAt: null, lastNotifiedAt: null };
+    if (event === "notified") current.lastNotifiedAt = this.now();
+    else current.lastLifecycleAt = this.now();
+    this.observed.set(threadId, current);
+  }
+
   private signalOpportunity(threadId: string): void {
+    // A turn ending or a status change is the Codex-side counterpart of a Claude lifecycle
+    // event: it is the App Server telling us this thread is really there and really running.
+    this.observe(threadId, "lifecycle");
     const waiters = this.replaceWaiters.get(threadId);
     if (waiters) {
       this.replaceWaiters.delete(threadId);

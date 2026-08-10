@@ -16,7 +16,7 @@ export interface LogicalToolDefinition {
 const ATTACH_CONFIRMATION = "Before creating, replacing, rotating, or changing the role description of a lane, explain the proposed topology change and obtain the user's explicit confirmation in the conversation. Do not add a confirmation argument.";
 
 export const LANE_TOOLS: readonly LogicalToolDefinition[] = [
-  { name: "lane_directory", description: "List the lanes and role descriptions in one project. This query does not require user confirmation.", mutating: false },
+  { name: "lane_directory", description: "List the lanes in one project with their role descriptions, current binding, and reachability. Call it when a lane does not respond: `reach` separates a lane with no live channel from one whose channel is open but has never reported a turn, and its timestamps show whether notifications are actually waking the target. This query does not require user confirmation.", mutating: false },
   { name: "lane_attach_current", description: `Attach the current conversation to a lane. ${ATTACH_CONFIRMATION}`, mutating: true },
   { name: "lane_send", description: "Write an immutable message to another lane's pending mailbox. Use correction with reply_to to amend an earlier message.", mutating: true },
   { name: "lane_ack", description: "Resolve one or more pending mailbox messages after the current lane has processed them.", mutating: true },
