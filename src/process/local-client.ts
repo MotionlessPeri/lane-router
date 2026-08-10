@@ -26,28 +26,63 @@ export class LocalRouterClient {
   }
 }
 
-export async function connectClaudeChannel(baseUrl: string, conversationId: string): Promise<ClaudeChannelConnection> {
-  const websocketUrl = new URL(baseUrl);
-  websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
-  websocketUrl.pathname = "/claude";
-  websocketUrl.searchParams.set("conversationId", conversationId);
-  const socket = new WebSocket(websocketUrl);
+const RECONNECT_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 5_000];
+
+export async function connectClaudeChannel(resolveRouterUrl: () => Promise<string>, conversationId: string): Promise<ClaudeChannelConnection> {
   let sink: ClaudeChannelSink | undefined;
-  socket.on("message", (raw) => {
-    try {
-      const frame = JSON.parse(raw.toString()) as { type?: unknown; notification?: unknown };
-      if (frame.type === "notification" && sink) void sink.notification(toClaudeNotification(frame.notification));
-    } catch { /* malformed local notification is ignored */ }
-  });
-  await new Promise<void>((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
+  let socket: WebSocket | undefined;
+  let retry: NodeJS.Timeout | undefined;
+  let failures = 0;
+  let closed = false;
+
+  const open = async (): Promise<void> => {
+    const next = new WebSocket(channelUrl(await resolveRouterUrl(), conversationId));
+    try { await new Promise<void>((resolve, reject) => { next.once("open", resolve); next.once("error", reject); }); }
+    catch (error) { next.terminate(); throw error; }
+    if (closed) { next.close(); return; }
+    socket = next;
+    failures = 0;
+    next.on("message", (raw) => {
+      try {
+        const frame = JSON.parse(raw.toString()) as { type?: unknown; notification?: unknown };
+        if (frame.type === "notification" && sink) void sink.notification(toClaudeNotification(frame.notification));
+      } catch { /* malformed local notification is ignored */ }
+    });
+    next.on("error", () => undefined);
+    // A Router dies with the session that started it, and its successor listens on a different
+    // port. Reconnecting through the resolver keeps this session reachable; without it the
+    // channel stays silently dead while tool calls, which use the RPC path, keep working.
+    next.on("close", () => { if (!closed && socket === next) scheduleReconnect(); });
+  };
+
+  const scheduleReconnect = (): void => {
+    if (closed || retry) return;
+    const delay = RECONNECT_DELAYS_MS[Math.min(failures, RECONNECT_DELAYS_MS.length - 1)] ?? 5_000;
+    failures += 1;
+    retry = setTimeout(() => { retry = undefined; void open().catch(() => scheduleReconnect()); }, delay);
+    retry.unref();
+  };
+
+  await open();
   return {
     attach(value) { sink = value; },
     detach(value) { if (sink === value) sink = undefined; },
     close: () => new Promise<void>((resolve) => {
-      if (socket.readyState === WebSocket.CLOSED) return resolve();
-      socket.once("close", () => resolve()); socket.close();
+      closed = true;
+      if (retry) { clearTimeout(retry); retry = undefined; }
+      const current = socket;
+      if (!current || current.readyState === WebSocket.CLOSED) return resolve();
+      current.once("close", () => resolve()); current.close();
     }),
   };
+}
+
+function channelUrl(baseUrl: string, conversationId: string): URL {
+  const url = new URL(baseUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = "/claude";
+  url.searchParams.set("conversationId", conversationId);
+  return url;
 }
 
 function toClaudeNotification(value: unknown): ClaudeChannelNotification {

@@ -88,7 +88,9 @@ export async function runLaneMcpStdio(): Promise<{ close(): Promise<void> }> {
   const discovery = await ensureRouter();
   const conversationId = process.env.CLAUDE_CODE_SESSION_ID ?? randomUUID();
   const router = new LocalRouterClient(discovery.url);
-  const channel = await connectClaudeChannel(discovery.url, conversationId);
+  // Re-resolving through ensureRouter lets a reconnect find the replacement Router, whose port
+  // differs, and restart one that is gone entirely.
+  const channel = await connectClaudeChannel(async () => (await ensureRouter()).url, conversationId);
   let closing: Promise<void> | undefined;
   const server = createLaneMcpServer({ router, conversationId, channel, onClose: () => close() });
   const close = (): Promise<void> => closing ??= (async () => {

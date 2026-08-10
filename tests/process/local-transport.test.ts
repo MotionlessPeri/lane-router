@@ -97,7 +97,7 @@ test("rejects non-loopback binding configuration and unknown RPC methods", async
 test("bridges body-free Claude notifications and waits for lifecycle Stop before replacement", async () => {
   const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x" });
   const discovery = await server.start();
-  const channel = await connectClaudeChannel(discovery.url, "session-1");
+  const channel = await connectClaudeChannel(async () => discovery.url, "session-1");
   const notifications: unknown[] = [];
   channel.attach({ notification: async (value) => { notifications.push(value); } });
   const binding: BindingRecord = { id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, activeAt: 1, inactiveAt: null };
@@ -124,10 +124,40 @@ test("a Claude reconnect after Router restart resolves its durable binding and e
   hub.onAttentionOpportunity((current) => { attention.push(current.laneAddress); });
   const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x", claude: hub });
   const discovery = await server.start();
-  const channel = await connectClaudeChannel(discovery.url, "session-1");
+  const channel = await connectClaudeChannel(async () => discovery.url, "session-1");
   try { await vi.waitFor(() => expect(attention).toEqual(["alpha/design"])); }
   finally { await channel.close(); await server.close(); }
 });
+
+test("a Claude channel follows the Router that replaced the one it was connected to", async () => {
+  const binding: BindingRecord = { id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, activeAt: 1, inactiveAt: null };
+  const notification = { laneAddress: "alpha/design", pendingPath: "C:/mailbox/pending", kind: "normal" as const, messageIds: ["message-1"] };
+  const startRouter = async () => {
+    const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x" });
+    return { server, discovery: await server.start() };
+  };
+
+  const original = await startRouter();
+  const replacement = await startRouter();
+  let routerUrl = original.discovery.url;
+  const channel = await connectClaudeChannel(async () => routerUrl, "session-1");
+  const notifications: unknown[] = [];
+  channel.attach({ notification: async (value) => { notifications.push(value); } });
+  try {
+    await original.server.claude.notify(binding, notification);
+    await vi.waitFor(() => expect(notifications).toHaveLength(1));
+
+    // A Router dies with the session that started it, so a session that stays open has to follow
+    // the replacement instead of holding a socket that will never carry another notification.
+    await original.server.close();
+    routerUrl = replacement.discovery.url;
+
+    await vi.waitFor(async () => {
+      await replacement.server.claude.notify(binding, notification);
+      expect(notifications.length).toBeGreaterThan(1);
+    }, { timeout: 5_000, interval: 50 });
+  } finally { await channel.close(); await replacement.server.close(); }
+}, 15_000);
 
 function nextJson(socket: WebSocket): Promise<unknown> {
   return new Promise((resolve, reject) => {
