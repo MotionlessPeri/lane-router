@@ -81,6 +81,9 @@ export class RouterCore {
       throw error;
     }
     if (!binding) throw new RouterError("BINDING_CHANGED", "The lane binding changed while attach was waiting");
+    // The bootstrap names the pending directory, but a lane that takes over a backlog would
+    // otherwise wait for the next incoming message before anything offers it a turn.
+    await this.dependencies.pump.notifyLane(parsed.address);
     return this.bootstrap(state.requireLane(parsed.address), binding);
   }
 

@@ -21,10 +21,11 @@ afterEach(() => {
 class FakeBackend implements PlatformBackend {
   readonly name = "codex" as const;
   readonly waited: BindingRecord[] = [];
+  readonly notified: BindingRecord[] = [];
   wait?: () => Promise<void>;
 
-  async notifyNormal(): Promise<"delivered"> { return "delivered"; }
-  async notifyCorrection(): Promise<"delivered"> { return "delivered"; }
+  async notifyNormal(binding: BindingRecord): Promise<"delivered"> { this.notified.push(binding); return "delivered"; }
+  async notifyCorrection(binding: BindingRecord): Promise<"delivered"> { this.notified.push(binding); return "delivered"; }
   onAttentionOpportunity(): () => void { return () => undefined; }
   async waitUntilReplaceable(binding: BindingRecord): Promise<void> {
     this.waited.push(binding);
@@ -183,6 +184,20 @@ describe("RouterCore send and ack", () => {
       expect(result.resolved).toEqual([first.id, second.id]);
       expect(x.state.requireMessage(first.id)).toEqual(expect.objectContaining({ state: "resolved", ackGeneration: 1 }));
       expect(join(x.root, x.state.requireMessage(first.id).relativePath).replaceAll("\\", "/")).toContain("/resolved/");
+    } finally { x.database.close(); }
+  });
+
+  it("offers a backlog to the conversation that just took the lane over", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("source"), { address: "alpha/source", roleDescription: "Source." });
+      await x.core.attachCurrent(caller("target", "attach:target"), { address: "alpha/target", roleDescription: "Target." });
+      await x.core.send(caller("source", "send:1"), { target: "alpha/target", body: "One", kind: "normal" });
+      x.backend.notified.length = 0;
+
+      await x.core.attachCurrent(caller("successor", "attach:successor"), { address: "alpha/target" });
+
+      expect(x.backend.notified.map((binding) => binding.conversationId)).toEqual(["successor"]);
     } finally { x.database.close(); }
   });
 });
