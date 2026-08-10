@@ -121,15 +121,16 @@
 
 **目标：** 验证 `unconfirmed` 能标出这种状态；同时这是**验证成因假说**的机会。
 
-**背景：** 2026-08-10 已确认四条 binding 的 conversationId 在 `~/.claude/projects/` 下都没有对应 transcript，而本会话（会话启动时才起的 MCP server）两边一致。**成因尚未验证**，当前假说是「会话中途重连 MCP server 会拿到新的会话 id」。
+**背景（2026-08-10 已查明成因，此前的假说是错的）：** 分叉**不是**「中途重连 MCP server」引起的，干净的会话启动就会发生——MCP server 拿到的 `CLAUDE_CODE_SESSION_ID` 跟会话其余部分（Bash 工具、hook）看到的不是同一个值。实测同一条对话里两者并存：hook 侧 `bb75097f…`，MCP server 侧 `ce334584…`。设计与修法见 `specs/2026-08-10-durable-conversation-identity.md`。
 
-**步骤：**
+**步骤（验证 join 是否修好了它）：**
 
-1. 在一条已 attach 的会话里，中途重连它的 MCP server（不是重启整个会话）。
-2. 从另一条 lane 发一条消息给它。
-3. 调 `lane_directory` 看它的 `reach`；同时用 `find ~/.claude/projects -name "<binding 的 conversationId>.jsonl"` 核对该 id 有没有 transcript。
+1. 一条已 attach 的会话，记下 `lane_directory` 给出的 `binding.generation`。
+2. 重启这条会话，**不要**重新 attach。
+3. 让它跑一个 turn（随便发一句话），使 hook 上报一次。
+4. 再调 `lane_directory`。
 
-**预期：** 若假说成立，重连后 `reach.state` 变成 `unconfirmed`，`connectedAt` 是重连时刻，之后无论收到多少通知 `lastLifecycleAt` 都不前进，且那个 conversationId 查不到 transcript。**若重连后 `reach.state` 仍是 `live`，说明假说不成立**，那就要另找成因——此时不要把假说写进任何文档。
+**预期：** `binding.generation` 未变、`reach.state` 为 `live`。此时从另一条 lane 发一条消息，目标应能收到。**若 generation 变了或 `reach` 是 `no_channel`，说明 join 没成**——检查 hook 是否仍在 `settings.json` 里、以及 `CLAUDE_PID` 在 hook 进程中是否存在。
 
 **放行卡死的接替：** 分叉状态下 `waitUntilReplaceable` 会一直等。对**确知空闲**的那条会话报一次 Stop 即可放行：
 
