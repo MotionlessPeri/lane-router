@@ -63,11 +63,87 @@
 
 **最后验证：** 2026-08-08 在 `d7c3f8c` 上由用户通过真实 `lane-router-codex` 新 conversation 验证。调用 shell 未手动设置代理变量；Codex WebSocket 正常连接，没有再次出现连接失败、`10054` 或 HTTPS fallback。修复前，environment-validation 已在同一环境复现 timeout/`10054`，并验证手动设置标准代理变量后可以成功。
 
+### Router 不随启动它的会话一起死
+
+**目标：** 直接回答「结束一条会话，Router 活不活」。这是 gap B 唯一无法自动化的一步——自动测试用真实进程验过启动器的机制（对照组被杀、处理组存活），但「Claude Code 关闭 MCP server 走的是不是杀树」只能由真实会话回答。
+
+**前提：** 已构建 `dist/`，且所有旧 Router 已停止（按 `discovery.json` 的 pid 核对后停止，不要硬编码历史 pid）。
+
+**步骤：**
+
+1. 只开一条会话，调一次任意 lane 工具，让它冷启动 Router。
+2. 记下 Router 的 pid 与 ppid：
+
+   ```powershell
+   $pat = 'dist' + [char]92 + 'process' + [char]92 + 'ma' + 'in.js'
+   Get-CimInstance Win32_Process |
+     Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -like "*$pat*" } |
+     ForEach-Object { 'pid={0} ppid={1}' -f $_.ProcessId, $_.ParentProcessId }
+   ```
+
+   确认那个 ppid 对应的进程**已经不存在**（`Get-Process -Id <ppid>` 查不到）——它是已经退出的启动器。
+3. 另开一条会话并 attach 一条 lane，作为观察者。
+4. 结束第 1 步那条会话。
+5. 检查 Router 的 pid 是否仍在；从观察者那条会话发一条消息，确认通知照常。
+
+**预期：** Router 存活，观察者发送成功。
+
+**失败时的含义（重要）：** 若 Router 仍随会话消失，说明 MCP server 的关闭路径**不是**杀树（例如用了带 kill-on-close 的 Job 对象）。此时**不要去加启动器的层数**——三组对照实验已经排除该方向（中间进程只要还活着，孙进程照样被杀，多一层不改变这一点）。应当回来重新取证。
+
 ### Router 启动失败诊断
 
 **目标：** 新 Router 在 ready 前退出时，`lane-router-codex` 显示子进程 stderr，而不是等待 15 秒后只报告 `Router process did not become ready`。
 
 **最后验证：** 2026-08-08 在本提交上使用独立临时 data root，把当前 probe PID 写入 `router.lock` 后调用构建产物的 `ensureRouter`。真实 detached Router 在 219ms 后返回 `Router process failed: Another Router process is already running`。验证没有连接、停止或重启用户正在使用的 Router；其 instance ID 保持不变。
+
+2026-08-10 加入启动器之后按同样方式复验：同一句原文在 **490ms** 后返回，`router-start.log` 已写入。多出的时长是启动器那一次 Node 启动。这条用例现在同时覆盖「Router 的 stderr 经由启动日志而非直连管道回到调用方」这条新链路。
+
+### 带原因的健康检查：真实客户端才能验的两类原因
+
+自动测试覆盖了四种通知结果、`reach` 三态、schema 1 → 2 迁移，以及「记录结果不改变投递时机」这条不变量。下面两类原因依赖真实 Claude 客户端与真实 hook，fake backend 代替不了。
+
+**前提：** 已构建 `dist/`，Router 进程已重启到包含本改动的版本（`lane_directory` 返回 `binding` 与 `reach` 两个字段即说明生效）。
+
+#### 组织策略在客户端丢弃通知
+
+**目标：** 通知发得出去、但从来没有引发 turn 时，`reach` 能把它跟「链路正常」分开。
+
+**步骤：**
+
+1. 确认 `C:\Program Files\ClaudeCode\managed-settings.json` 当前是 `{ "channelsEnabled": true }`，目标会话在运行且已 attach 一条 lane。
+2. 临时把该文件改名（需管理员），重启目标会话，让它在 channel 被关掉的状态下重连。
+3. 从另一条 lane 发一条 normal 消息。
+4. 调 `lane_directory`，看目标 lane 的 `reach`。
+
+**预期：** 消息的 `notification_state` 是 `sent`（帧确实发出去了），而 `reach.lastNotifiedAt` 持续前进、`reach.lastLifecycleAt` 始终停在通知之前或为空。判据是这两个时间戳的先后，不是任何单一字段。恢复该文件并重启会话后，`lastLifecycleAt` 应重新跟上。
+
+#### 身份分叉：channel 身份与 lifecycle 身份不一致
+
+**目标：** 验证 `unconfirmed` 能标出这种状态；同时这是**验证成因假说**的机会。
+
+**背景：** 2026-08-10 已确认四条 binding 的 conversationId 在 `~/.claude/projects/` 下都没有对应 transcript，而本会话（会话启动时才起的 MCP server）两边一致。**成因尚未验证**，当前假说是「会话中途重连 MCP server 会拿到新的会话 id」。
+
+**步骤：**
+
+1. 在一条已 attach 的会话里，中途重连它的 MCP server（不是重启整个会话）。
+2. 从另一条 lane 发一条消息给它。
+3. 调 `lane_directory` 看它的 `reach`；同时用 `find ~/.claude/projects -name "<binding 的 conversationId>.jsonl"` 核对该 id 有没有 transcript。
+
+**预期：** 若假说成立，重连后 `reach.state` 变成 `unconfirmed`，`connectedAt` 是重连时刻，之后无论收到多少通知 `lastLifecycleAt` 都不前进，且那个 conversationId 查不到 transcript。**若重连后 `reach.state` 仍是 `live`，说明假说不成立**，那就要另找成因——此时不要把假说写进任何文档。
+
+**放行卡死的接替：** 分叉状态下 `waitUntilReplaceable` 会一直等。对**确知空闲**的那条会话报一次 Stop 即可放行：
+
+```bash
+curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
+  -H "content-type: application/json" \
+  -d '{"conversationId":"<binding 里的 id>","event":"Stop"}'
+```
+
+返回 `{"accepted":true}` 说明 Router 确实持有那条连接；拿一个不存在的 id 作对照应返回 `false`。只在确知目标没有在跑 turn 时用，否则可能让接替落在别人的 turn 中间。
+
+#### 判别路径整体走通
+
+对当前每条 lane 各调一次 `lane_directory`，按设计稿《带原因的健康检查》的判别流程图核对给出的原因与实际情况一致。这一步是人按图判断，没有机器 oracle。
 
 ## 当前记录
 
