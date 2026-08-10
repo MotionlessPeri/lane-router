@@ -63,3 +63,14 @@ test("resume only resumes a Router-owned thread and exposes no management subcom
   expect(spawnTui).toHaveBeenCalledWith(codexExecutable, ["--remote", "ws://127.0.0.1:3", "resume", "thread-old"]);
   await expect(launchCodex(["status"], dependencies)).rejects.toThrow(/usage/i);
 });
+
+test("passes an initial prompt after the Codex option terminator", async () => {
+  const spawnTui = vi.fn(async () => 0);
+  await launchCodex(["--prompt", "take over alpha/design"], {
+    ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+    spawnTui,
+  });
+  expect(spawnTui).toHaveBeenCalledWith(codexExecutable, [
+    "-C", process.cwd(), "--remote", "ws://127.0.0.1:3", "--", "take over alpha/design",
+  ]);
+});

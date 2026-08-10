@@ -20,10 +20,12 @@ afterEach(() => {
 });
 
 class FakeBackend implements PlatformBackend {
-  readonly name = "codex" as const;
+  readonly name: "claude" | "codex";
   readonly waited: BindingRecord[] = [];
   readonly notified: BindingRecord[] = [];
   wait?: () => Promise<void>;
+
+  constructor(name: "claude" | "codex" = "codex") { this.name = name; }
 
   reachState: ReachSnapshot = { state: "live", connectedAt: 10, lastLifecycleAt: 20, lastNotifiedAt: 30, believedBusy: false };
 
@@ -36,6 +38,7 @@ class FakeBackend implements PlatformBackend {
     const joined = context.joinKey === undefined ? undefined : this.identities.get(context.joinKey);
     return joined === undefined ? { value: context.conversationId, source: "caller" } : { value: joined, source: "joined" };
   }
+  validateAttach?(context: CallerContext): string | undefined;
   async waitUntilReplaceable(binding: BindingRecord): Promise<void> {
     this.waited.push(binding);
     await this.wait?.();
@@ -65,6 +68,24 @@ const caller = (conversationId: string, requestKey = `request:${conversationId}`
   backend: "codex" as const,
   conversationId,
   requestKey,
+});
+
+describe("Claude attach readiness", () => {
+  it("rejects an unjoined Claude caller before creating a lane", async () => {
+    const x = setup();
+    try {
+      const claude = new FakeBackend("claude");
+      claude.validateAttach = () => "Claude conversation identity is not joined and live";
+      const core = new RouterCore({
+        state: x.state, mailbox: x.mailbox, backends: new BackendRegistry([claude]), pump: x.pump,
+        newId: () => "binding-claude", now: () => 1,
+      });
+      await expect(core.attachCurrent({ backend: "claude", conversationId: "mcp", requestKey: "attach" }, {
+        address: "alpha/design", roleDescription: "Design.",
+      })).rejects.toMatchObject({ code: "ATTACH_PRECONDITION_FAILED" });
+      expect(x.state.lane("alpha/design")).toBeUndefined();
+    } finally { x.database.close(); }
+  });
 });
 
 describe("RouterCore directory and attach", () => {

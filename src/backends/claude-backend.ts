@@ -49,4 +49,12 @@ export class ClaudeBackend implements PlatformBackend {
   resolveIdentity(context: CallerContext): ResolvedIdentity {
     return this.channel.resolveIdentity(context);
   }
+
+  validateAttach(context: CallerContext): string | undefined {
+    const identity = this.resolveIdentity(context);
+    if (identity.source !== "joined") return "Claude conversation identity has not joined its lifecycle channel";
+    const reach = this.channel.reach(identity.value);
+    if (reach.state !== "live" || reach.believedBusy !== true) return "Claude conversation lifecycle channel is not live for the current turn";
+    return undefined;
+  }
 }

@@ -65,6 +65,8 @@ export class RouterCore {
   async attachCurrent(context: CallerContext, input: { address: string; roleDescription?: string }) {
     const parsed = parseLaneAddress(input.address);
     const state = this.dependencies.state;
+    const precondition = this.dependencies.backends.require(context.backend).validateAttach?.(context);
+    if (precondition) throw new RouterError("ATTACH_PRECONDITION_FAILED", precondition);
     const identity = this.identity(context);
     const conversationBinding = state.activeBindingForConversation(context.backend, identity.value);
     if (conversationBinding) {

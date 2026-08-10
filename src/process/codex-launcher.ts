@@ -12,11 +12,13 @@ interface LauncherDependencies {
 }
 
 export async function launchCodex(args: readonly string[], dependencies: LauncherDependencies = defaults): Promise<number> {
-  if (args.length !== 0 && !(args.length === 2 && args[0] === "resume" && args[1])) throw new Error("Usage: lane-router-codex [resume <thread-id>]");
+  const prompt = args.length === 2 && args[0] === "--prompt" && args[1] ? args[1] : undefined;
+  const resume = args.length === 2 && args[0] === "resume" && args[1] ? args : undefined;
+  if (args.length !== 0 && !prompt && !resume) throw new Error("Usage: lane-router-codex [--prompt <initial-prompt> | resume <thread-id>]");
   const discovery = await dependencies.ensure();
-  const tuiArgs = args.length === 0
-    ? ["-C", process.cwd(), "--remote", discovery.codexEndpoint]
-    : ["--remote", discovery.codexEndpoint, ...args];
+  const tuiArgs = resume
+    ? ["--remote", discovery.codexEndpoint, ...resume]
+    : ["-C", process.cwd(), "--remote", discovery.codexEndpoint, ...(prompt ? ["--", prompt] : [])];
   return dependencies.spawnTui(process.env.CODEX_EXE ?? "codex", tuiArgs);
 }
 

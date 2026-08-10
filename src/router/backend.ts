@@ -27,6 +27,8 @@ export interface PlatformBackend {
    * conversation it belongs to and has to be attached again after every restart.
    */
   resolveIdentity(context: CallerContext): ResolvedIdentity;
+  /** Return a user-facing reason when this caller cannot safely attach yet. */
+  validateAttach?(context: CallerContext): string | undefined;
 }
 
 export class BackendRegistry {

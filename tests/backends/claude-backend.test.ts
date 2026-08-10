@@ -59,4 +59,14 @@ describe("ClaudeBackend", () => {
     expect(handler).toHaveBeenCalledWith("alpha/design");
     expect(x.backend).not.toHaveProperty("getRuntimeState");
   });
+
+  it("allows attach only after the stable identity joins a live busy lifecycle channel", () => {
+    const x = setup("sent", { ...live, believedBusy: true });
+    expect(x.backend.validateAttach({ backend: "claude", conversationId: "mcp", requestKey: "r" }))
+      .toMatch(/identity.*not joined/i);
+
+    vi.mocked(x.channel.resolveIdentity).mockReturnValue({ value: "conversation", source: "joined" });
+    expect(x.backend.validateAttach({ backend: "claude", conversationId: "mcp", requestKey: "r" })).toBeUndefined();
+    expect(x.channel.reach).toHaveBeenLastCalledWith("conversation");
+  });
 });
