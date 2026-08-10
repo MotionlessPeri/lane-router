@@ -33,6 +33,9 @@ class RecordingBackend implements PlatformBackend {
   reach(): ReachSnapshot {
     return { state: "live", connectedAt: 1, lastLifecycleAt: 2, lastNotifiedAt: 3, believedBusy: false };
   }
+  resolveIdentity(context: { conversationId: string }) {
+    return { value: context.conversationId, source: "caller" as const };
+  }
 }
 
 function setup() {

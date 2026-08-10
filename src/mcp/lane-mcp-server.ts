@@ -21,6 +21,17 @@ export interface ClaudeChannelConnection {
   close(): Promise<void>;
 }
 
+/**
+ * A value every process of one Claude session can see, used to join this server's channel to the
+ * lifecycle hook that knows which conversation they both belong to. CLAUDE_PID is the pid of the
+ * claude process hosting the session; this server is its direct child, so process.ppid is the
+ * same number and works even when the variable is not exported. It is a join key, never an
+ * identity: a pid is only unique while its process lives, so it is never stored.
+ */
+export function claudeJoinKey(env: NodeJS.ProcessEnv = process.env): string {
+  return env.CLAUDE_PID ?? String(process.ppid);
+}
+
 export class LaneMcpServer {
   private readonly protocol: Server;
   private readonly channelSink: ClaudeChannelSink;
@@ -29,6 +40,7 @@ export class LaneMcpServer {
   constructor(private readonly options: {
     readonly router: LaneRouterClient;
     readonly conversationId: string;
+    readonly joinKey?: string;
     readonly channel?: ClaudeChannelConnection;
     readonly newRequestKey?: () => string;
     readonly onClose?: () => void | Promise<void>;
@@ -67,6 +79,7 @@ export class LaneMcpServer {
       const result = await this.options.router.call(tool, args, {
         backend: "claude",
         conversationId: this.options.conversationId,
+        ...(this.options.joinKey === undefined ? {} : { joinKey: this.options.joinKey }),
         requestKey: `claude:${(this.options.newRequestKey ?? randomUUID)()}`,
       });
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
@@ -90,9 +103,10 @@ export async function runLaneMcpStdio(): Promise<{ close(): Promise<void> }> {
   const router = new LocalRouterClient(discovery.url);
   // Re-resolving through ensureRouter lets a reconnect find the replacement Router, whose port
   // differs, and restart one that is gone entirely.
-  const channel = await connectClaudeChannel(async () => (await ensureRouter()).url, conversationId);
+  const joinKey = claudeJoinKey();
+  const channel = await connectClaudeChannel(async () => (await ensureRouter()).url, conversationId, joinKey);
   let closing: Promise<void> | undefined;
-  const server = createLaneMcpServer({ router, conversationId, channel, onClose: () => close() });
+  const server = createLaneMcpServer({ router, conversationId, joinKey, channel, onClose: () => close() });
   const close = (): Promise<void> => closing ??= (async () => {
     await channel.close();
     await server.close();

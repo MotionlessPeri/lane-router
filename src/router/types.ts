@@ -71,8 +71,22 @@ export interface NewMessageRecord {
   readonly createdAt: number;
 }
 
+/**
+ * What a caller can say about itself. `conversationId` is only what the calling process happens
+ * to hold, which on Claude is the MCP server's own id and changes every time that process
+ * restarts; `joinKey` is a platform-scoped value that is stable for one session and visible to
+ * every process belonging to it. Turning this into a conversation identity is the backend's job -
+ * see PlatformBackend.resolveIdentity - and only the identity is ever stored.
+ */
 export interface CallerContext {
   readonly backend: BackendName;
   readonly conversationId: string;
+  readonly joinKey?: string;
   readonly requestKey: string;
+}
+
+/** Where a resolved conversation identity came from, so a conversation can check its own. */
+export interface ResolvedIdentity {
+  readonly value: string;
+  readonly source: "joined" | "caller";
 }

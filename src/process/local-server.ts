@@ -5,7 +5,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { ClaudeChannelPort, ClaudeChannelOutcome } from "../backends/claude-backend.js";
 import { CodexTuiBridge, type CodexTuiBridgeHost } from "../adapters/codex/tui-bridge.js";
 import type { Notification } from "../router/backend.js";
-import type { CallerContext, BindingRecord, ReachSnapshot } from "../router/types.js";
+import type { CallerContext, BindingRecord, ReachSnapshot, ResolvedIdentity } from "../router/types.js";
 import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
 import type { ToolService } from "../tools/tool-service.js";
 
@@ -20,6 +20,7 @@ export interface RouterDiscovery {
 interface ChannelConnection {
   readonly socket: WebSocket;
   readonly connectedAt: number;
+  readonly joinKey: string | undefined;
   busy: boolean;
   lastLifecycleAt: number | null;
   lastNotifiedAt: number | null;
@@ -31,25 +32,66 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
   private readonly attentionHandlers = new Set<(binding: BindingRecord) => void>();
   private readonly waiters = new Map<string, Set<() => void>>();
 
+  /**
+   * joinKey -> the identity a lifecycle report claimed for it. A channel only knows the id of the
+   * process that opened it, which is not the conversation's; the hook knows the conversation's id
+   * but not where the channel is. The key both of them can see is what puts the two together.
+   * It is never stored: it lives exactly as long as the session whose processes share it, which
+   * is why a reused pid cannot make two conversations look like one.
+   */
+  private readonly identityByJoinKey = new Map<string, string>();
+
   constructor(
     private readonly resolveBinding: (conversationId: string) => BindingRecord | undefined = () => undefined,
     private readonly now: () => number = Date.now,
   ) {}
 
-  connect(conversationId: string, socket: WebSocket): void {
-    const previous = this.connections.get(conversationId);
+  connect(conversationId: string, socket: WebSocket, joinKey?: string): void {
+    // A channel always starts out answering to the id of the process that opened it, never to an
+    // identity a join key claimed earlier. A pid is only unique among live processes, so trusting
+    // a remembered mapping here would let a brand new session that happened to reuse the number
+    // be handed another conversation's notifications before its own hook ever reported in.
+    const key = conversationId;
+    const previous = this.connections.get(key);
     previous?.socket.close(1000, "replaced");
-    this.connections.set(conversationId, { socket, connectedAt: this.now(), busy: false, lastLifecycleAt: null, lastNotifiedAt: null });
-    socket.on("message", (raw) => this.receive(conversationId, raw.toString()));
+    this.connections.set(key, { socket, connectedAt: this.now(), joinKey, busy: false, lastLifecycleAt: null, lastNotifiedAt: null });
+    socket.on("message", (raw) => this.receive(this.currentKey(socket) ?? key, raw.toString()));
     socket.on("close", () => {
-      if (this.connections.get(conversationId)?.socket !== socket) return;
-      this.connections.delete(conversationId);
-      this.signal(conversationId);
+      const current = this.currentKey(socket);
+      if (current === undefined) return;
+      this.connections.delete(current);
+      this.forgetJoinKey(joinKey);
+      this.signal(current);
     });
     socket.on("error", () => undefined);
-    const binding = this.resolveBinding(conversationId);
-    if (binding) this.bindings.set(conversationId, binding);
-    this.signal(conversationId);
+    const binding = this.resolveBinding(key);
+    if (binding) this.bindings.set(key, binding);
+    this.signal(key);
+  }
+
+  /** The identity this caller's lane should be stored under, and whether a join established it. */
+  resolveIdentity(context: { conversationId: string; joinKey?: string }): ResolvedIdentity {
+    const joined = context.joinKey === undefined ? undefined : this.identityByJoinKey.get(context.joinKey);
+    return joined === undefined
+      ? { value: context.conversationId, source: "caller" }
+      : { value: joined, source: "joined" };
+  }
+
+  /** A channel is keyed by whatever identity it currently answers to, which a join can change. */
+  private currentKey(socket: WebSocket): string | undefined {
+    for (const [key, connection] of this.connections) if (connection.socket === socket) return key;
+    return undefined;
+  }
+
+  /**
+   * A join key outlives nothing: once the channel carrying it is gone, the session it named is
+   * gone too, and keeping the mapping would let a later process that reuses the number speak for
+   * a conversation it has nothing to do with.
+   */
+  private forgetJoinKey(joinKey: string | undefined): void {
+    if (joinKey === undefined) return;
+    for (const connection of this.connections.values()) if (connection.joinKey === joinKey) return;
+    this.identityByJoinKey.delete(joinKey);
   }
 
   // Claude Code queues a notification that arrives mid-turn, so the frame goes out either way
@@ -100,13 +142,38 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     return () => this.attentionHandlers.delete(handler);
   }
 
-  reportLifecycle(conversationId: string, event: "Stop" | "UserPromptSubmit"): boolean {
-    const connection = this.connections.get(conversationId);
+  reportLifecycle(conversationId: string, event: "Stop" | "UserPromptSubmit", joinKey?: string): boolean {
+    if (joinKey !== undefined) this.identityByJoinKey.set(joinKey, conversationId);
+    // The join key names the session that is reporting right now, so a channel carrying it wins
+    // over whatever is filed under the conversation — which, just after a restart, is the dead
+    // predecessor whose socket has not finished closing.
+    const connection = this.adoptByJoinKey(conversationId, joinKey) ?? this.connections.get(conversationId);
     if (!connection) return false;
     connection.busy = event === "UserPromptSubmit";
     connection.lastLifecycleAt = this.now();
     if (event === "Stop") this.signal(conversationId);
     return true;
+  }
+
+  /**
+   * The report names a conversation the channel had never heard of, because the channel opened
+   * under the id of the process that made it. If they share a join key they are the same session,
+   * so the channel starts answering to the conversation instead.
+   */
+  private adoptByJoinKey(conversationId: string, joinKey: string | undefined): ChannelConnection | undefined {
+    if (joinKey === undefined) return undefined;
+    for (const [key, connection] of this.connections) {
+      if (connection.joinKey !== joinKey) continue;
+      if (key === conversationId) return connection;
+      this.connections.get(conversationId)?.socket.close(1000, "replaced");
+      this.connections.delete(key);
+      this.connections.set(conversationId, connection);
+      const waiters = this.waiters.get(key);
+      if (waiters) { this.waiters.delete(key); this.waiters.set(conversationId, waiters); }
+      this.bindings.delete(key);
+      return connection;
+    }
+    return undefined;
   }
 
   close(): void {
@@ -160,8 +227,9 @@ export class LocalRouterServer {
     this.http.on("upgrade", (request, socket, head) => {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       const conversationId = url.searchParams.get("conversationId");
+      const joinKey = url.searchParams.get("joinKey") ?? undefined;
       if (url.pathname === "/claude" && conversationId) {
-        this.websocket.handleUpgrade(request, socket, head, (client) => this.claude.connect(conversationId, client));
+        this.websocket.handleUpgrade(request, socket, head, (client) => this.claude.connect(conversationId, client, joinKey));
         return;
       }
       socket.destroy();
@@ -192,9 +260,9 @@ export class LocalRouterServer {
     try {
       if (request.method === "GET" && request.url === "/health") return json(response, 200, this.discovery());
       if (request.method === "POST" && request.url === "/claude/lifecycle") {
-        const body = await readJson(request) as { conversationId?: unknown; event?: unknown };
+        const body = await readJson(request) as { conversationId?: unknown; event?: unknown; joinKey?: unknown };
         const accepted = typeof body.conversationId === "string" && (body.event === "Stop" || body.event === "UserPromptSubmit")
-          ? this.claude.reportLifecycle(body.conversationId, body.event) : false;
+          ? this.claude.reportLifecycle(body.conversationId, body.event, typeof body.joinKey === "string" ? body.joinKey : undefined) : false;
         return json(response, accepted ? 200 : 400, { accepted });
       }
       if (request.method !== "POST" || request.url !== "/rpc") return json(response, 404, { error: "not found" });
@@ -219,7 +287,10 @@ function callerContext(value: unknown): CallerContext | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const context = value as Record<string, unknown>;
   if ((context.backend !== "claude" && context.backend !== "codex") || typeof context.conversationId !== "string" || typeof context.requestKey !== "string") return undefined;
-  return { backend: context.backend, conversationId: context.conversationId, requestKey: context.requestKey };
+  return {
+    backend: context.backend, conversationId: context.conversationId, requestKey: context.requestKey,
+    ...(typeof context.joinKey === "string" ? { joinKey: context.joinKey } : {}),
+  };
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {

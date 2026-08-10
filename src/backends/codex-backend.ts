@@ -5,7 +5,7 @@ import {
   type ThreadResult,
 } from "../adapters/codex/protocol.js";
 import type { Notification, NotificationOutcome, PlatformBackend, ReachSnapshot } from "../router/backend.js";
-import type { BindingRecord } from "../router/types.js";
+import type { BindingRecord, CallerContext, ResolvedIdentity } from "../router/types.js";
 
 interface CodexNotification {
   readonly method: string;
@@ -135,6 +135,12 @@ export class CodexBackend implements PlatformBackend {
       // The Codex backend keeps no busy belief; it asks the App Server when it needs the answer.
       believedBusy: null,
     };
+  }
+
+  // A Codex threadId is issued by the App Server and outlives every process on this side, so
+  // there is nothing to join: it already is the conversation identity.
+  resolveIdentity(context: CallerContext): ResolvedIdentity {
+    return { value: context.conversationId, source: "caller" };
   }
 
   private observe(threadId: string, event: "notified" | "lifecycle"): void {

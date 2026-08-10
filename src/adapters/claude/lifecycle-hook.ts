@@ -21,7 +21,13 @@ export async function reportClaudeLifecycle(options: {
     const response = await (options.fetch ?? globalThis.fetch)(`${baseUrl.replace(/\/$/u, "")}/claude/lifecycle`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ conversationId: value.session_id, event: value.hook_event_name }),
+      // session_id is the conversation's own identity and survives a restart; the join key is
+      // what lets the Router match this report to a channel opened by a different process.
+      body: JSON.stringify({
+        conversationId: value.session_id,
+        event: value.hook_event_name,
+        ...(env.CLAUDE_PID === undefined ? {} : { joinKey: env.CLAUDE_PID }),
+      }),
       signal: AbortSignal.timeout(2_000),
     });
     if (!response.ok) return false;

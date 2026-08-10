@@ -28,7 +28,7 @@ export class LocalRouterClient {
 
 const RECONNECT_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 5_000];
 
-export async function connectClaudeChannel(resolveRouterUrl: () => Promise<string>, conversationId: string): Promise<ClaudeChannelConnection> {
+export async function connectClaudeChannel(resolveRouterUrl: () => Promise<string>, conversationId: string, joinKey?: string): Promise<ClaudeChannelConnection> {
   let sink: ClaudeChannelSink | undefined;
   let socket: WebSocket | undefined;
   let retry: NodeJS.Timeout | undefined;
@@ -36,7 +36,7 @@ export async function connectClaudeChannel(resolveRouterUrl: () => Promise<strin
   let closed = false;
 
   const open = async (): Promise<void> => {
-    const next = new WebSocket(channelUrl(await resolveRouterUrl(), conversationId));
+    const next = new WebSocket(channelUrl(await resolveRouterUrl(), conversationId, joinKey));
     try { await new Promise<void>((resolve, reject) => { next.once("open", resolve); next.once("error", reject); }); }
     catch (error) { next.terminate(); throw error; }
     if (closed) { next.close(); return; }
@@ -77,11 +77,12 @@ export async function connectClaudeChannel(resolveRouterUrl: () => Promise<strin
   };
 }
 
-function channelUrl(baseUrl: string, conversationId: string): URL {
+function channelUrl(baseUrl: string, conversationId: string, joinKey?: string): URL {
   const url = new URL(baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.pathname = "/claude";
   url.searchParams.set("conversationId", conversationId);
+  if (joinKey !== undefined) url.searchParams.set("joinKey", joinKey);
   return url;
 }
 

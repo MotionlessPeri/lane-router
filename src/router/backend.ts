@@ -1,6 +1,6 @@
-import type { BackendName, BindingRecord, MessageKind, NotificationOutcome, ReachSnapshot } from "./types.js";
+import type { BackendName, BindingRecord, CallerContext, MessageKind, NotificationOutcome, ReachSnapshot, ResolvedIdentity } from "./types.js";
 
-export type { NotificationOutcome, ReachSnapshot, ReachState } from "./types.js";
+export type { NotificationOutcome, ReachSnapshot, ReachState, ResolvedIdentity } from "./types.js";
 
 export interface Notification {
   readonly laneAddress: string;
@@ -21,6 +21,12 @@ export interface PlatformBackend {
    * make a platform round trip and must never block.
    */
   reach(binding: BindingRecord): ReachSnapshot;
+  /**
+   * Turn what a caller claims about itself into the identity a binding is stored under. It must
+   * be stable across restarts of the calling process, or a lane stops recognising the
+   * conversation it belongs to and has to be attached again after every restart.
+   */
+  resolveIdentity(context: CallerContext): ResolvedIdentity;
 }
 
 export class BackendRegistry {

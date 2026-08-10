@@ -130,3 +130,107 @@ test("a closed socket stops being reachable even before the close event is proce
   socket.readyState = 3;
   expect(hub.reach("conv-1").state).toBe("no_channel");
 });
+
+// The defect this join exists for: the channel opens under the id of the process that made it,
+// the hook reports the conversation's own id, and nothing connected the two. Every session
+// restart then produced a binding nobody could reach, and no lifecycle event ever matched.
+test("a lifecycle report adopts the channel that shares its join key", () => {
+  const time = clock();
+  const hub = new ClaudeChannelHub(() => undefined, time.now);
+  hub.connect("mcp-server-id", sendableSocket(), "session-key");
+
+  // Before the join the channel answers only to the process id that opened it.
+  expect(hub.reach("mcp-server-id").state).toBe("unconfirmed");
+  expect(hub.reach("conversation-id").state).toBe("no_channel");
+
+  time.advance(100);
+  expect(hub.reportLifecycle("conversation-id", "Stop", "session-key")).toBe(true);
+
+  // Afterwards it answers to the conversation, which is what bindings are stored under.
+  expect(hub.reach("conversation-id")).toMatchObject({ state: "live", lastLifecycleAt: 1_100 });
+  expect(hub.reach("mcp-server-id").state).toBe("no_channel");
+});
+
+test("a report whose join key matches nothing is still refused", () => {
+  const hub = new ClaudeChannelHub();
+  hub.connect("mcp-server-id", sendableSocket(), "session-key");
+  expect(hub.reportLifecycle("conversation-id", "Stop", "another-session-key")).toBe(false);
+  expect(hub.reach("conversation-id").state).toBe("no_channel");
+});
+
+test("the identity a caller resolves to comes from the join, not from what it calls itself", () => {
+  const hub = new ClaudeChannelHub();
+  hub.connect("mcp-server-id", sendableSocket(), "session-key");
+
+  expect(hub.resolveIdentity({ conversationId: "mcp-server-id", joinKey: "session-key" }))
+    .toEqual({ value: "mcp-server-id", source: "caller" });
+
+  hub.reportLifecycle("conversation-id", "UserPromptSubmit", "session-key");
+
+  expect(hub.resolveIdentity({ conversationId: "mcp-server-id", joinKey: "session-key" }))
+    .toEqual({ value: "conversation-id", source: "joined" });
+  // A caller that offers no join key can only be taken at its word.
+  expect(hub.resolveIdentity({ conversationId: "mcp-server-id" }))
+    .toEqual({ value: "mcp-server-id", source: "caller" });
+});
+
+// This is the whole point: the process that opens the channel changes on every restart, the
+// conversation does not, so the lane must still be reachable without being attached again — and
+// the notification must go to the process that is actually running now.
+test("a channel opened by a restarted process is recognised as the same conversation", async () => {
+  const hub = new ClaudeChannelHub();
+  const before = sendableSocket();
+  hub.connect("mcp-server-before", before, "session-key-before");
+  hub.reportLifecycle("conversation-id", "Stop", "session-key-before");
+  expect(hub.reach("conversation-id").state).toBe("live");
+
+  // The session restarts: new MCP server, new join key, same conversation. The predecessor's
+  // socket may not have finished closing, so the join key has to decide which one is current.
+  const after = sendableSocket();
+  hub.connect("mcp-server-after", after, "session-key-after");
+  hub.reportLifecycle("conversation-id", "UserPromptSubmit", "session-key-after");
+
+  expect(hub.reach("conversation-id").state).toBe("live");
+  await expect(hub.notify(binding("conversation-id"), notification)).resolves.toBe("sent");
+  expect(after.send).toHaveBeenCalledOnce();
+  expect(before.send).not.toHaveBeenCalled();
+  // The superseded channel is closed rather than left open with nothing routed to it.
+  expect(before.close).toHaveBeenCalledWith(1000, "replaced");
+  expect(hub.resolveIdentity({ conversationId: "mcp-server-after", joinKey: "session-key-after" }))
+    .toEqual({ value: "conversation-id", source: "joined" });
+});
+
+test("a reconnecting channel does not inherit an identity until its own hook reports again", () => {
+  const hub = new ClaudeChannelHub();
+  const first = sendableSocket();
+  hub.connect("mcp-server-id", first, "session-key");
+  hub.reportLifecycle("conversation-id", "Stop", "session-key");
+  expect(hub.reach("conversation-id").state).toBe("live");
+
+  // A pid is only unique among live processes. A channel must therefore never be handed an
+  // identity on the strength of a remembered key alone, or a session that reused the number
+  // would start receiving another conversation's notifications.
+  hub.connect("mcp-server-id", sendableSocket(), "session-key");
+  expect(hub.reach("mcp-server-id").state).toBe("unconfirmed");
+  hub.reportLifecycle("conversation-id", "UserPromptSubmit", "session-key");
+  expect(hub.reach("conversation-id").state).toBe("live");
+});
+
+test("a join key stops meaning anything once its channel is gone", () => {
+  const hub = new ClaudeChannelHub();
+  const socket = sendableSocket();
+  let onClose = () => undefined as void;
+  (socket.on as unknown as { mock: { calls: Array<[string, () => void]> } });
+  hub.connect("mcp-server-id", socket, "session-key");
+  for (const [event, handler] of (socket.on as unknown as { mock: { calls: Array<[string, () => void]> } }).mock.calls) {
+    if (event === "close") onClose = handler;
+  }
+  hub.reportLifecycle("conversation-id", "Stop", "session-key");
+  expect(hub.resolveIdentity({ conversationId: "mcp-server-id", joinKey: "session-key" }))
+    .toEqual({ value: "conversation-id", source: "joined" });
+
+  onClose();
+
+  expect(hub.resolveIdentity({ conversationId: "someone-else", joinKey: "session-key" }))
+    .toEqual({ value: "someone-else", source: "caller" });
+});

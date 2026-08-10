@@ -3,7 +3,7 @@ import { parseLaneAddress } from "./address.js";
 import type { MailboxStore } from "./mailbox-store.js";
 import type { NotificationPump } from "./notification-pump.js";
 import type { RouterStateStore } from "./state-store.js";
-import type { CallerContext, LaneRecord, MessageKind, MessageRecord, ReachSnapshot } from "./types.js";
+import type { CallerContext, LaneRecord, MessageKind, MessageRecord, ReachSnapshot, ResolvedIdentity } from "./types.js";
 
 export class RouterError extends Error {
   constructor(readonly code: string, message: string) {
@@ -65,7 +65,8 @@ export class RouterCore {
   async attachCurrent(context: CallerContext, input: { address: string; roleDescription?: string }) {
     const parsed = parseLaneAddress(input.address);
     const state = this.dependencies.state;
-    const conversationBinding = state.activeBindingForConversation(context.backend, context.conversationId);
+    const identity = this.identity(context);
+    const conversationBinding = state.activeBindingForConversation(context.backend, identity.value);
     if (conversationBinding) {
       if (conversationBinding.laneAddress !== parsed.address) {
         throw new RouterError("CONVERSATION_ALREADY_BOUND", "The current conversation is already bound to another lane");
@@ -73,7 +74,7 @@ export class RouterCore {
       if (input.roleDescription !== undefined && input.roleDescription !== state.requireLane(parsed.address).roleDescription) {
         state.updateLaneRole(parsed.address, input.roleDescription, this.dependencies.now());
       }
-      return this.bootstrap(state.requireLane(parsed.address), conversationBinding);
+      return this.bootstrap(state.requireLane(parsed.address), conversationBinding, identity);
     }
 
     let lane = state.lane(parsed.address);
@@ -91,7 +92,7 @@ export class RouterCore {
         id: this.dependencies.newId("binding"),
         laneAddress: parsed.address,
         backend: context.backend,
-        conversationId: context.conversationId,
+        conversationId: identity.value,
         generation,
         startup: {},
         roleDescription: input.roleDescription,
@@ -107,7 +108,7 @@ export class RouterCore {
     // The bootstrap names the pending directory, but a lane that takes over a backlog would
     // otherwise wait for the next incoming message before anything offers it a turn.
     await this.dependencies.pump.notifyLane(parsed.address);
-    return this.bootstrap(state.requireLane(parsed.address), binding);
+    return this.bootstrap(state.requireLane(parsed.address), binding, identity);
   }
 
   async send(context: CallerContext, input: { target: string; body: string; kind: MessageKind; replyTo?: string }): Promise<MessageRecord> {
@@ -151,16 +152,27 @@ export class RouterCore {
     return { resolved: uniqueIds };
   }
 
+  // The identity a backend resolves, never what the calling process happens to call itself:
+  // on Claude the latter changes with every restart, which is what used to make a lane stop
+  // recognising the conversation that owns it.
+  private identity(context: CallerContext): ResolvedIdentity {
+    return this.dependencies.backends.find(context.backend)?.resolveIdentity(context)
+      ?? { value: context.conversationId, source: "caller" };
+  }
+
   private requireCallerBinding(context: CallerContext) {
-    const binding = this.dependencies.state.activeBindingForConversation(context.backend, context.conversationId);
+    const binding = this.dependencies.state.activeBindingForConversation(context.backend, this.identity(context).value);
     if (!binding) throw new RouterError("NOT_ATTACHED", "The current conversation is not attached to a lane");
     return binding;
   }
 
-  private bootstrap(lane: LaneRecord, binding: NonNullable<ReturnType<RouterStateStore["activeBindingForLane"]>>) {
+  private bootstrap(lane: LaneRecord, binding: NonNullable<ReturnType<RouterStateStore["activeBindingForLane"]>>, identity: ResolvedIdentity) {
     return {
       lane,
       binding,
+      // So a conversation can check, after a restart, which identity it was recognised under and
+      // whether that came from a join or from the calling process naming itself.
+      identity,
       generation: binding.generation,
       directory: this.directory(lane.project),
       pendingPath: this.dependencies.mailbox.pendingPath(lane.address),

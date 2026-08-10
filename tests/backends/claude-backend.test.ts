@@ -22,6 +22,7 @@ function setup(result: ClaudeChannelOutcome = "sent", reach: ReachSnapshot = liv
     waitUntilReplaceable: vi.fn(async () => undefined),
     onAttentionOpportunity(handler) { attention = handler; return () => { attention = undefined; }; },
     reach: vi.fn(() => reach),
+    resolveIdentity: vi.fn((context: { conversationId: string }) => ({ value: context.conversationId, source: "caller" as const })),
   };
   return { backend: new ClaudeBackend(channel), channel, emit: () => attention?.(binding) };
 }

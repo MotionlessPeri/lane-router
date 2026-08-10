@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { PlatformBackend, ReachSnapshot } from "../../src/router/backend.js";
+import type { CallerContext, ResolvedIdentity } from "../../src/router/types.js";
 import { BackendRegistry } from "../../src/router/backend.js";
 import { openRouterDatabase } from "../../src/router/database.js";
 import { MailboxStore } from "../../src/router/mailbox-store.js";
@@ -30,6 +31,11 @@ class FakeBackend implements PlatformBackend {
   async notifyCorrection(binding: BindingRecord): Promise<"sent"> { this.notified.push(binding); return "sent"; }
   onAttentionOpportunity(): () => void { return () => undefined; }
   reach(): ReachSnapshot { return this.reachState; }
+  identities = new Map<string, string>();
+  resolveIdentity(context: CallerContext): ResolvedIdentity {
+    const joined = context.joinKey === undefined ? undefined : this.identities.get(context.joinKey);
+    return joined === undefined ? { value: context.conversationId, source: "caller" } : { value: joined, source: "joined" };
+  }
   async waitUntilReplaceable(binding: BindingRecord): Promise<void> {
     this.waited.push(binding);
     await this.wait?.();
@@ -70,6 +76,45 @@ describe("RouterCore directory and attach", () => {
       expect(await x.core.directory("alpha")).toEqual([
         { address: "alpha/design", roleDescription: "Own design.", backend: null, binding: null, reach: null },
       ]);
+    } finally { x.database.close(); }
+  });
+
+  // Acceptance: a lane must still recognise its conversation after the process that speaks for
+  // it restarts. Before this, the binding held that process's own id, so every restart produced
+  // a binding nobody could reach and the lane had to be attached again.
+  it("keeps the lane bound to the conversation when the calling process restarts", async () => {
+    const x = setup();
+    try {
+      x.backend.identities.set("session-key-before", "conversation-1");
+      const first = await x.core.attachCurrent(
+        { backend: "codex", conversationId: "process-before", joinKey: "session-key-before", requestKey: "attach-1" },
+        { address: "alpha/design", roleDescription: "Design." },
+      );
+      expect(first.binding.conversationId).toBe("conversation-1");
+      expect(first.identity).toEqual({ value: "conversation-1", source: "joined" });
+
+      // The session restarts: new process, new join key, same conversation.
+      x.backend.identities.set("session-key-after", "conversation-1");
+      const restarted = { backend: "codex" as const, conversationId: "process-after", joinKey: "session-key-after", requestKey: "send-1" };
+      await x.core.attachCurrent({ ...restarted, requestKey: "attach-2" }, { address: "alpha/design" });
+
+      // Same generation: nothing was taken over, the conversation was simply recognised.
+      expect(x.state.activeBindingForLane("alpha/design")).toMatchObject({ generation: 1, conversationId: "conversation-1" });
+      x.state.createLane({ address: "alpha/other", project: "alpha", roleDescription: "Other.", now: 1 });
+      await expect(x.core.send(restarted, { target: "alpha/other", kind: "normal", body: "still me" }))
+        .resolves.toMatchObject({ senderLane: "alpha/design" });
+    } finally { x.database.close(); }
+  });
+
+  it("falls back to what the caller names itself when nothing has joined yet", async () => {
+    const x = setup();
+    try {
+      const result = await x.core.attachCurrent(
+        { backend: "codex", conversationId: "process-only", joinKey: "unjoined-key", requestKey: "attach-1" },
+        { address: "alpha/design", roleDescription: "Design." },
+      );
+      expect(result.identity).toEqual({ value: "process-only", source: "caller" });
+      expect(result.binding.conversationId).toBe("process-only");
     } finally { x.database.close(); }
   });
 

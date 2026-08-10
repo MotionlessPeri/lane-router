@@ -1,5 +1,5 @@
 import type { Notification, NotificationOutcome, PlatformBackend, ReachSnapshot } from "../router/backend.js";
-import type { BindingRecord } from "../router/types.js";
+import type { BindingRecord, CallerContext, ResolvedIdentity } from "../router/types.js";
 
 /**
  * What the Claude channel can actually establish. There is deliberately no value meaning
@@ -12,6 +12,7 @@ export interface ClaudeChannelPort {
   waitUntilReplaceable(binding: BindingRecord): Promise<void>;
   onAttentionOpportunity(handler: (binding: BindingRecord) => void): () => void;
   reach(conversationId: string): ReachSnapshot;
+  resolveIdentity(context: { conversationId: string; joinKey?: string }): ResolvedIdentity;
 }
 
 export class ClaudeBackend implements PlatformBackend {
@@ -43,5 +44,9 @@ export class ClaudeBackend implements PlatformBackend {
 
   reach(binding: BindingRecord): ReachSnapshot {
     return this.channel.reach(binding.conversationId);
+  }
+
+  resolveIdentity(context: CallerContext): ResolvedIdentity {
+    return this.channel.resolveIdentity(context);
   }
 }
