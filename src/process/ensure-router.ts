@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -150,31 +150,95 @@ async function readWindowsSystemProxy(): Promise<string | undefined> {
   } catch { return undefined; }
 }
 
+export const ROUTER_START_LOG = "router-start.log";
+
 function spawnRouter(dataRoot: string, environment: NodeJS.ProcessEnv): RouterStartAttempt {
-  const main = resolve(dirname(fileURLToPath(import.meta.url)), "main.js");
-  const child = spawn(process.execPath, [main], {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const logPath = join(dataRoot, ROUTER_START_LOG);
+  // The launcher, not the Router, is this process's child, and it is deliberately not detached:
+  // it exits on its own within milliseconds, and until it does its pipes are how a failed start
+  // reports itself. See detach-router.ts for why the Router cannot be spawned directly.
+  const child = spawn(process.execPath, [resolve(here, "detach-router.js"), resolve(here, "main.js"), logPath], {
     env: { ...environment, LANE_ROUTER_DATA_ROOT: dataRoot },
-    detached: true,
     windowsHide: true,
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  let stderr = "";
-  const onData = (chunk: Buffer) => { stderr += chunk.toString("utf8"); };
-  child.stderr?.on("data", onData);
+  return observeRouterStart(child, logPath);
+}
+
+interface StartObservation {
+  readonly pollMs?: number;
+  readonly isAlive?: (pid: number) => boolean;
+  readonly readLog?: () => string;
+}
+
+/**
+ * Turns a launcher process into the single "this attempt is doomed" signal `waitForRouter` races
+ * against. Two failures have to be told apart, because the launcher exiting is the success path:
+ *
+ *   - the launcher itself never ran, or gave up before naming a Router: its own pipes carry that;
+ *   - the Router started but died before writing discovery: its pid stops answering, and the
+ *     reason is in the startup log.
+ *
+ * Watching the pid rather than treating a non-empty log as failure keeps this from resting on
+ * "the Router never writes to stderr when it succeeds", which is true today and would break
+ * silently the first time someone logs a warning.
+ */
+export function observeRouterStart(child: ChildProcess, logPath: string, options: StartObservation = {}): RouterStartAttempt {
+  const isAlive = options.isAlive ?? processIsAlive;
+  const readLog = options.readLog ?? (() => { try { return readFileSync(logPath, "utf8"); } catch { return ""; } });
   let resolveFailure!: (error: Error) => void;
   const failure = new Promise<Error>((resolveError) => { resolveFailure = resolveError; });
-  const onError = (error: Error) => resolveFailure(error);
-  const onClose = (code: number | null) => resolveFailure(new Error(stderr.trim() || `Router process exited before ready with code ${code ?? "unknown"}`));
+
+  let announced = "";
+  let launcherStderr = "";
+  let routerPid: number | undefined;
+  let watch: NodeJS.Timeout | undefined;
+
+  const stopWatching = (): void => { if (watch) { clearInterval(watch); watch = undefined; } };
+  const takePid = (): number | undefined => {
+    if (routerPid !== undefined) return routerPid;
+    const parsed = Number.parseInt(announced.trim(), 10);
+    if (!Number.isInteger(parsed) || parsed <= 0) return undefined;
+    routerPid = parsed;
+    watch = setInterval(() => {
+      if (isAlive(parsed)) return;
+      stopWatching();
+      resolveFailure(new Error(readLog().trim() || "Router process exited before it was ready"));
+    }, options.pollMs ?? 25);
+    watch.unref();
+    return routerPid;
+  };
+
+  const onStdout = (chunk: Buffer) => { announced += chunk.toString("utf8"); takePid(); };
+  const onStderr = (chunk: Buffer) => { launcherStderr += chunk.toString("utf8"); };
+  const onError = (error: Error) => { stopWatching(); resolveFailure(error); };
+  const onClose = (code: number | null) => {
+    if (code === 0 && takePid() !== undefined) return;
+    stopWatching();
+    resolveFailure(new Error(launcherStderr.trim() || `Router launcher exited with code ${code ?? "unknown"} before starting a Router`));
+  };
+
+  child.stdout?.on("data", onStdout);
+  child.stderr?.on("data", onStderr);
   child.once("error", onError);
   child.once("close", onClose);
-  child.unref();
+
   return {
     failure,
     detach: () => {
+      stopWatching();
       child.off("error", onError);
       child.off("close", onClose);
-      child.stderr?.off("data", onData);
+      child.stdout?.off("data", onStdout);
+      child.stderr?.off("data", onStderr);
+      child.stdout?.destroy();
       child.stderr?.destroy();
     },
   };
+}
+
+function processIsAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
 }
