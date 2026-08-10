@@ -97,7 +97,10 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
       this.waiters.delete(conversationId);
       for (const resolve of waiters) resolve();
     }
-    const binding = this.bindings.get(conversationId);
+    // A channel connects when the session starts, before the conversation attaches to any lane,
+    // so a binding cached at connect time would be missing for exactly the lanes that just
+    // attached. Resolving first also keeps a takeover from being announced under its old generation.
+    const binding = this.resolveBinding(conversationId) ?? this.bindings.get(conversationId);
     if (binding) for (const handler of this.attentionHandlers) handler(binding);
   }
 }
