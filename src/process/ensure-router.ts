@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { LocalRouterClient } from "./local-client.js";
+import { probeRouterHealth } from "./local-client.js";
 import type { RouterDiscovery } from "./local-server.js";
 import { RuntimeLock } from "./runtime-lock.js";
 
@@ -75,7 +75,7 @@ async function waitForRouter(
 
 async function checkHealth(discovery: RouterDiscovery): Promise<RouterDiscovery | undefined> {
   try {
-    const current = await new LocalRouterClient(discovery.url).health();
+    const current = await probeRouterHealth(discovery.url);
     return current.instanceId === discovery.instanceId ? current : undefined;
   } catch { return undefined; }
 }

@@ -1,7 +1,7 @@
 import { expect, test, vi } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
 
-import { connectClaudeChannel, LocalRouterClient } from "../../src/process/local-client.js";
+import { connectClaudeChannel, LocalRouterClient, probeRouterHealth } from "../../src/process/local-client.js";
 import { ClaudeChannelHub, LocalRouterServer } from "../../src/process/local-server.js";
 import type { BindingRecord } from "../../src/router/types.js";
 
@@ -73,8 +73,8 @@ test("serves health and four lane calls on loopback", async () => {
   const discovery = await server.start();
   try {
     expect(discovery.url).toMatch(/^http:\/\/127\.0\.0\.1:/u);
-    const client = new LocalRouterClient(discovery.url);
-    await expect(client.health()).resolves.toMatchObject({ instanceId: "instance-1", codexEndpoint: expect.stringMatching(/^ws:\/\/127\.0\.0\.1:\d+$/u) });
+    const client = new LocalRouterClient(async () => discovery.url);
+    await expect(probeRouterHealth(discovery.url)).resolves.toMatchObject({ instanceId: "instance-1", codexEndpoint: expect.stringMatching(/^ws:\/\/127\.0\.0\.1:\d+$/u) });
     await expect(client.call("lane_directory", { project: "alpha" }, {
       backend: "claude", conversationId: "session-1", requestKey: "request-1",
     })).resolves.toEqual({ name: "lane_directory" });
@@ -162,6 +162,113 @@ test("a Claude channel follows the Router that replaced the one it was connected
     }, { timeout: 5_000, interval: 50 });
   } finally { await channel.close(); await replacement.server.close(); }
 }, 15_000);
+
+const CALLER = { backend: "claude" as const, conversationId: "session-1", requestKey: "request-1" };
+
+async function startNamedRouter(instanceId: string) {
+  const server = new LocalRouterServer({
+    tools: { call: vi.fn(async (name: string) => ({ name, instanceId })) } as never,
+    codex: { endpoint: "ws://127.0.0.1:1" } as never,
+    instanceId,
+  });
+  return { server, discovery: await server.start() };
+}
+
+test("a Router client follows the Router that replaced the one it was pinned to", async () => {
+  const original = await startNamedRouter("instance-1");
+  const replacement = await startNamedRouter("instance-2");
+  let routerUrl = original.discovery.url;
+  const client = new LocalRouterClient(async () => routerUrl);
+  try {
+    await expect(client.call("lane_directory", { project: "alpha" }, CALLER))
+      .resolves.toEqual({ name: "lane_directory", instanceId: "instance-1" });
+
+    // The pinned URL stops answering the way a replaced Router does: nothing listens on it any
+    // more, so the connection is refused before a single request byte is delivered.
+    await original.server.close();
+    routerUrl = replacement.discovery.url;
+
+    await expect(client.call("lane_directory", { project: "alpha" }, CALLER))
+      .resolves.toEqual({ name: "lane_directory", instanceId: "instance-2" });
+  } finally { await replacement.server.close(); }
+});
+
+test("the connection-refused signature the rebind depends on", async () => {
+  // The retry rule rests on this exact value coming out of Node's fetch, which is a detail of the
+  // runtime rather than a documented contract. A Node upgrade that changes it must fail here
+  // loudly instead of leaving the rebind silently dead.
+  const router = await startNamedRouter("instance-1");
+  let closed = false;
+  try {
+    // Control: a listening port must succeed, or a probe broken for its own reasons would score
+    // full marks on the assertion below.
+    await expect(fetch(`${router.discovery.url}/health`)).resolves.toMatchObject({ ok: true });
+    await router.server.close();
+    closed = true;
+    await expect(fetch(`${router.discovery.url}/rpc`, { method: "POST", body: "{}" }))
+      .rejects.toMatchObject({ cause: { code: "ECONNREFUSED" } });
+  } finally { if (!closed) await router.server.close(); }
+});
+
+test("a Router client retries only a failure that proves the request never reached a Router", async () => {
+  const attempts: string[] = [];
+  const rejectWith = (cause: unknown) => vi.stubGlobal("fetch", async (input: unknown) => {
+    attempts.push(String(input));
+    throw Object.assign(new TypeError("fetch failed"), { cause });
+  });
+  let resolutions = 0;
+  const client = new LocalRouterClient(async () => `http://127.0.0.1:${9000 + resolutions++}`);
+  try {
+    // Connected and then something went wrong: the Router may already have acted on the request,
+    // and `lane_ack` is not idempotent — resolving an already-resolved message throws — so this
+    // must reach the caller as a failure rather than be tried again.
+    rejectWith({ code: "ECONNRESET" });
+    await expect(client.call("lane_ack", { message_ids: ["message-1"] }, CALLER)).rejects.toThrow(/fetch failed/u);
+    expect(attempts).toHaveLength(1);
+
+    attempts.length = 0;
+    rejectWith(undefined);
+    await expect(client.call("lane_ack", { message_ids: ["message-1"] }, CALLER)).rejects.toThrow(/fetch failed/u);
+    expect(attempts).toHaveLength(1);
+
+    attempts.length = 0;
+    vi.stubGlobal("fetch", async (input: unknown) => {
+      attempts.push(String(input));
+      return new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } });
+    });
+    await expect(client.call("lane_ack", { message_ids: ["message-1"] }, CALLER)).rejects.toThrow(/boom/u);
+    expect(attempts).toHaveLength(1);
+  } finally { vi.unstubAllGlobals(); }
+});
+
+test("a Router client does not re-resolve while its Router keeps answering", async () => {
+  const router = await startNamedRouter("instance-1");
+  let resolutions = 0;
+  const client = new LocalRouterClient(async () => { resolutions += 1; return router.discovery.url; });
+  try {
+    for (let call = 0; call < 3; call += 1) {
+      await expect(client.call("lane_directory", { project: "alpha" }, CALLER)).resolves.toMatchObject({ name: "lane_directory" });
+    }
+    expect(resolutions).toBe(1);
+  } finally { await router.server.close(); }
+});
+
+test("a Router client gives up when re-resolution names the same dead address", async () => {
+  const attempts: string[] = [];
+  vi.stubGlobal("fetch", async (input: unknown) => {
+    attempts.push(String(input));
+    throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+  });
+  let resolutions = 0;
+  const client = new LocalRouterClient(async () => { resolutions += 1; return "http://127.0.0.1:9001"; });
+  try {
+    await expect(client.call("lane_directory", { project: "alpha" }, CALLER)).rejects.toThrow(/fetch failed/u);
+    // Re-resolved once and found the same address, which means discovery still believes that
+    // Router is alive; trying it again would fail identically and hide the real problem.
+    expect(resolutions).toBe(2);
+    expect(attempts).toHaveLength(1);
+  } finally { vi.unstubAllGlobals(); }
+});
 
 function nextJson(socket: WebSocket): Promise<unknown> {
   return new Promise((resolve, reject) => {

@@ -98,13 +98,18 @@ export async function runLaneMcpStdio(): Promise<{ close(): Promise<void> }> {
     import("../process/ensure-router.js"),
     import("../process/local-client.js"),
   ]);
-  const discovery = await ensureRouter();
+  // Started here rather than on the first tool call so that a broken install fails at startup.
+  // What it returns is deliberately not handed to anything below: both paths have to keep asking
+  // who the current Router is, not remember who it was this moment.
+  await ensureRouter();
   const conversationId = process.env.CLAUDE_CODE_SESSION_ID ?? randomUUID();
-  const router = new LocalRouterClient(discovery.url);
-  // Re-resolving through ensureRouter lets a reconnect find the replacement Router, whose port
-  // differs, and restart one that is gone entirely.
+  // Re-resolving through ensureRouter lets either path find the replacement Router, whose port
+  // differs, and restart one that is gone entirely. The RPC client used to take a fixed address,
+  // which left every lane tool in this session dead after a restart the channel recovered from.
+  const resolveRouterUrl = async (): Promise<string> => (await ensureRouter()).url;
+  const router = new LocalRouterClient(resolveRouterUrl);
   const joinKey = claudeJoinKey();
-  const channel = await connectClaudeChannel(async () => (await ensureRouter()).url, conversationId, joinKey);
+  const channel = await connectClaudeChannel(resolveRouterUrl, conversationId, joinKey);
   let closing: Promise<void> | undefined;
   const server = createLaneMcpServer({ router, conversationId, joinKey, channel, onClose: () => close() });
   const close = (): Promise<void> => closing ??= (async () => {
