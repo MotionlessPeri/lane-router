@@ -229,7 +229,8 @@ test("titles the window with the generation the successor is about to become", a
 
   const environment = spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
   expect(environment.LANE_ROUTER_ROTATION_TITLE).toBe("alpha/design gen5");
-  expect(environment.LANE_ROUTER_ROTATION_COMMAND).toContain("WindowTitle");
+  // The title reaches the terminal from the child process, not through this command line.
+  expect(environment.LANE_ROUTER_ROTATION_COMMAND).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_ROTATION_CHILD");
 });
 
 test("falls back to the bare address when the Router cannot say which generation is next", async () => {
@@ -237,4 +238,14 @@ test("falls back to the bare address when the Router cannot say which generation
   roots.push(dataRoot);
   // No discovery.json at all: a rotation must not fail because the title would be plainer.
   await expect(terminalTitle("alpha/design", dataRoot)).resolves.toBe("alpha/design");
+});
+
+// Windows Terminal splits its command line on `;`. A two-statement command therefore made wt try
+// to launch everything after the semicolon as a program: 0x80070002, file not found.
+test("keeps the terminal command free of anything Windows Terminal would split on", () => {
+  const request = { backend: "claude" as const, cwd: "D:\p", prompt: "p", statusPath: "D:\s.txt" };
+  const environment = rotationChildEnvironment(request, {}, "alpha/design gen5");
+  expect(environment.LANE_ROUTER_ROTATION_COMMAND).not.toContain(";");
+  // The title still has to travel, just not through the shell.
+  expect(environment.LANE_ROUTER_ROTATION_TITLE).toBe("alpha/design gen5");
 });

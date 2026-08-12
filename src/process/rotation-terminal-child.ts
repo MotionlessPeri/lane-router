@@ -25,6 +25,12 @@ function report(status: string): void {
   try { writeFileSync(request.statusPath, status, "utf8"); } catch { /* the launcher will time out */ }
 }
 
+// Naming the window from here rather than from the shell that opened it: the launcher's command
+// line is parsed by Windows Terminal, which treats `;` as its own separator, so a title assignment
+// there broke the launch. This escape reaches the real terminal because stdio is inherited.
+const title = process.env.LANE_ROUTER_ROTATION_TITLE;
+if (title) process.stdout.write(`\u001B]0;${title}\u0007`);
+
 const child = spawn(executable, args, { cwd: request.cwd, env: process.env, stdio: "inherit", windowsHide: false });
 child.once("spawn", () => report("ok"));
 child.once("error", (error) => {

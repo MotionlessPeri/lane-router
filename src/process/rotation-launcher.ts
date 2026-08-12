@@ -129,10 +129,11 @@ export function rotationChildEnvironment(request: RotationRequest, source: NodeJ
     LANE_ROUTER_ROTATION_CHILD: resolve(dirname(fileURLToPath(import.meta.url)), "rotation-terminal-child.js"),
     LANE_ROUTER_ROTATION_CWD: request.cwd,
     LANE_ROUTER_ROTATION_TITLE: title,
-    // Setting the console title rather than passing wt --title: Windows Terminal follows the
-    // console title, a plain console honours it too, and it keeps a lane address with a slash in
-    // it out of wt's argument parsing.
-    LANE_ROUTER_ROTATION_COMMAND: "$host.UI.RawUI.WindowTitle = $env:LANE_ROUTER_ROTATION_TITLE; & $env:LANE_ROUTER_NODE $env:LANE_ROUTER_ROTATION_CHILD",
+    // One statement, and above all no semicolon: Windows Terminal splits its own command line on
+    // `;`, so a two-statement command made wt treat everything after it as a separate program to
+    // launch and fail with "the system cannot find the file specified". The title is therefore
+    // set by the child process, which needs no shell at all.
+    LANE_ROUTER_ROTATION_COMMAND: "& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_ROTATION_CHILD",
   };
 }
 
