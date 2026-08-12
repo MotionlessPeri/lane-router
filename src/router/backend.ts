@@ -13,7 +13,12 @@ export interface PlatformBackend {
   readonly name: BackendName;
   notifyNormal(binding: BindingRecord, notification: Notification): Promise<NotificationOutcome>;
   notifyCorrection(binding: BindingRecord, notification: Notification): Promise<NotificationOutcome>;
-  waitUntilReplaceable(binding: BindingRecord): Promise<void>;
+  /**
+   * Wait until the current binding can be replaced. `signal` ends the wait: without it the wait
+   * outlived the caller, so an attach that had already been reported as failed could still
+   * replace the binding minutes later, with nobody listening. Measured twice on 2026-08-10/12.
+   */
+  waitUntilReplaceable(binding: BindingRecord, signal?: AbortSignal): Promise<void>;
   onAttentionOpportunity(handler: (laneAddress: string) => void): () => void;
   /**
    * Report reachability from state the backend already holds. Deliberately synchronous:

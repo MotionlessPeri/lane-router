@@ -78,9 +78,11 @@ test("serves health and four lane calls on loopback", async () => {
     await expect(client.call("lane_directory", { project: "alpha" }, {
       backend: "claude", conversationId: "session-1", requestKey: "request-1",
     })).resolves.toEqual({ name: "lane_directory" });
+    // The fourth argument is the caller's lifetime: the Router stops working on a request once
+    // the caller is gone, so a takeover can no longer complete after its attach was reported failed.
     expect(tools.call).toHaveBeenCalledWith("lane_directory", { project: "alpha" }, {
       backend: "claude", conversationId: "session-1", requestKey: "request-1",
-    });
+    }, expect.any(AbortSignal));
   } finally { await server.close(); }
 });
 

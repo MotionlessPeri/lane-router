@@ -234,3 +234,34 @@ test("a join key stops meaning anything once its channel is gone", () => {
   expect(hub.resolveIdentity({ conversationId: "someone-else", joinKey: "session-key" }))
     .toEqual({ value: "someone-else", source: "caller" });
 });
+
+// The wait used to be unbounded on this side while the caller's transport gave up at two minutes.
+// The caller saw `fetch failed`, and the waiter left behind could still release later and let a
+// takeover complete that had already been reported as failed.
+test("a caller that gives up takes its waiter with it", async () => {
+  const hub = new ClaudeChannelHub();
+  hub.connect("busy-conv", sendableSocket());
+  hub.reportLifecycle("busy-conv", "UserPromptSubmit");
+  expect(hub.reach("busy-conv").believedBusy).toBe(true);
+
+  const abandoned = new AbortController();
+  const waiting = hub.waitUntilReplaceable(binding("busy-conv"), abandoned.signal);
+  const reason = new Error("the caller disconnected");
+  abandoned.abort(reason);
+  await expect(waiting).rejects.toBe(reason);
+
+  // The predecessor finishing its turn afterwards must not resurrect the abandoned takeover.
+  let resurrected = false;
+  const second = hub.waitUntilReplaceable(binding("busy-conv")).then(() => { resurrected = true; });
+  hub.reportLifecycle("busy-conv", "Stop");
+  await second;
+  expect(resurrected).toBe(true);
+});
+
+test("an already-abandoned caller never joins the queue at all", async () => {
+  const hub = new ClaudeChannelHub();
+  hub.connect("busy-conv", sendableSocket());
+  hub.reportLifecycle("busy-conv", "UserPromptSubmit");
+  await expect(hub.waitUntilReplaceable(binding("busy-conv"), AbortSignal.abort(new Error("gone"))))
+    .rejects.toThrow(/gone/u);
+});

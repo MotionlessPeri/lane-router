@@ -46,7 +46,7 @@ describe("ClaudeBackend", () => {
   it("delegates safe replacement and reachability to the channel", async () => {
     const x = setup("no_channel", { ...live, state: "unconfirmed", lastLifecycleAt: null });
     await x.backend.waitUntilReplaceable(binding);
-    expect(x.channel.waitUntilReplaceable).toHaveBeenCalledWith(binding);
+    expect(x.channel.waitUntilReplaceable).toHaveBeenCalledWith(binding, undefined);
     expect(x.backend.reach(binding)).toMatchObject({ state: "unconfirmed", lastLifecycleAt: null });
     expect(x.channel.reach).toHaveBeenCalledWith("session-1");
   });

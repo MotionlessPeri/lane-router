@@ -62,7 +62,7 @@ export class RouterCore {
     });
   }
 
-  async attachCurrent(context: CallerContext, input: { address: string; roleDescription?: string }) {
+  async attachCurrent(context: CallerContext, input: { address: string; roleDescription?: string }, signal?: AbortSignal) {
     const parsed = parseLaneAddress(input.address);
     const state = this.dependencies.state;
     const precondition = this.dependencies.backends.require(context.backend).validateAttach?.(context);
@@ -85,7 +85,17 @@ export class RouterCore {
       lane = state.createLane({ address: parsed.address, project: parsed.project, roleDescription: input.roleDescription, now: this.dependencies.now() });
     }
     const observed = state.activeBindingForLane(parsed.address) ?? null;
-    if (observed) await this.dependencies.backends.require(observed.backend).waitUntilReplaceable(observed);
+    if (observed) {
+      try { await this.dependencies.backends.require(observed.backend).waitUntilReplaceable(observed, signal); }
+      catch (error) {
+        // Without this the wait was unbounded on one side and bounded on the other: the caller's
+        // transport gave up first and reported `fetch failed`, saying nothing about what was
+        // being waited for, while the waiter lived on and could still replace the binding.
+        throw new RouterError("ATTACH_WAIT_ENDED", (error as { name?: string }).name === "TimeoutError"
+          ? "The conversation that holds this lane is still running a turn. Nothing was changed; attach again once it goes idle."
+          : "The attach request ended before the conversation that holds this lane finished its turn. Nothing was changed.");
+      }
+    }
     const generation = (observed?.generation ?? 0) + 1;
     let binding;
     try {

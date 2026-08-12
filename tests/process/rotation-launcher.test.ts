@@ -1,10 +1,19 @@
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { afterEach, expect, test, vi } from "vitest";
 
-import { launchRotation } from "../../src/process/rotation-launcher.js";
+import {
+  awaitSuccessorStart, claudeExecutable, launchRotation, rotationChildEnvironment,
+  terminalTitle, withoutVendorSessionIdentity,
+} from "../../src/process/rotation-launcher.js";
+
+/** Stands in for a terminal that came up and whose CLI reported for itself. */
+const terminalThatStarts = (status = "ok") =>
+  vi.fn(async (request: { statusPath: string }) => { writeFileSync(request.statusPath, status, "utf8"); });
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -16,7 +25,7 @@ test("opens a Codex terminal from a one-shot handoff file and deletes it after s
   mkdirSync(handoffRoot);
   const handoff = join(handoffRoot, "00000000-0000-4000-8000-000000000000.md");
   writeFileSync(handoff, "继续处理 Unicode：你好", "utf8");
-  const spawnTerminal = vi.fn(async () => undefined);
+  const spawnTerminal = terminalThatStarts();
 
   await launchRotation(["codex", "alpha/design", "--handoff-file", handoff], {
     dataRoot,
@@ -55,4 +64,177 @@ test("keeps the handoff file when terminal creation fails", async () => {
     spawnTerminal: async () => { throw new Error("terminal failed"); },
   })).rejects.toThrow(/terminal failed/i);
   expect(readFileSync(handoff, "utf8")).toBe("retry me");
+});
+
+test("retires a delivered handoff instead of destroying it", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  const handoffRoot = join(dataRoot, "rotation-handoffs");
+  mkdirSync(handoffRoot);
+  const name = "00000000-0000-4000-8000-000000000002.md";
+  const handoff = join(handoffRoot, name);
+  writeFileSync(handoff, "写了一次的交接内容", "utf8");
+
+  await launchRotation(["claude", "alpha/design", "--handoff-file", handoff], {
+    dataRoot, spawnTerminal: terminalThatStarts(),
+  });
+
+  // A handoff is written once, by hand. Losing it because a later step failed is worse than
+  // leaving a stale file behind, so the delivered copy survives where it can be found.
+  expect(() => readFileSync(handoff)).toThrow();
+  expect(readFileSync(join(dataRoot, "rotation-handoffs-consumed", name), "utf8")).toBe("写了一次的交接内容");
+});
+
+// The defect this scrub exists for: with the outgoing session's identity in its environment the
+// successor resolved to the very conversation it was replacing, attach took the already-bound
+// branch, the generation never moved, and two processes spoke for one lane.
+test("strips every vendor session variable from the successor's environment", () => {
+  const scrubbed = withoutVendorSessionIdentity({
+    CLAUDE_CODE_SESSION_ID: "bb75097f", CLAUDE_PID: "29496", CLAUDE_CODE_CHILD_SESSION: "1",
+    CLAUDECODE: "1", CLAUDE_EXE: "C:/claude.exe", claude_lowercase_probe: "x",
+    PATH: "/usr/bin", APPDATA: "C:/AppData", CODEX_EXE: "C:/codex.exe",
+  });
+
+  expect(Object.keys(scrubbed).filter((key) => /^claude/iu.test(key))).toEqual([]);
+  // Everything the successor still needs to run must survive, including the Codex side, which
+  // identifies a conversation by a thread id rather than by anything in the environment.
+  expect(scrubbed).toEqual({ PATH: "/usr/bin", APPDATA: "C:/AppData", CODEX_EXE: "C:/codex.exe" });
+});
+
+test("resolves the real Claude executable rather than a name spawn cannot find", () => {
+  // PATH has claude, claude.cmd and claude.ps1 but no claude.exe, and Node does not use PATHEXT.
+  expect(claudeExecutable({ CLAUDE_CODE_EXECPATH: "C:/real/claude.exe" })).toBe("C:/real/claude.exe");
+  expect(claudeExecutable({ CLAUDE_EXE: "C:/override.exe", CLAUDE_CODE_EXECPATH: "C:/real/claude.exe" }))
+    .toBe("C:/override.exe");
+  expect(claudeExecutable({})).toBeUndefined();
+});
+
+test("waits for the successor to report, and repeats its reason when it failed", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+
+  const ok = join(dataRoot, "ok.txt");
+  writeFileSync(ok, "ok", "utf8");
+  await expect(awaitSuccessorStart(ok, 500, 10)).resolves.toBeUndefined();
+  expect(() => readFileSync(ok)).toThrow();
+
+  const failed = join(dataRoot, "failed.txt");
+  writeFileSync(failed, "The successor CLI could not be started: spawn claude ENOENT", "utf8");
+  await expect(awaitSuccessorStart(failed, 500, 10)).rejects.toThrow(/spawn claude ENOENT/u);
+});
+
+test("reports a terminal that never came up instead of claiming success", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  // Start-Process exiting 0 says only that the request was accepted; with Windows Terminal it does
+  // not even say a window appeared. Silence therefore has to be a failure, not a success.
+  await expect(awaitSuccessorStart(join(dataRoot, "never.txt"), 200, 10))
+    .rejects.toThrow(/did not start/u);
+});
+
+// The defect this kills: the successor inherited the outgoing session's identity, resolved to the
+// conversation it was replacing, and reported a takeover that never happened.
+test("hands the successor an environment with no trace of the outgoing conversation", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  const handoffRoot = join(dataRoot, "rotation-handoffs");
+  mkdirSync(handoffRoot);
+  const handoff = join(handoffRoot, "00000000-0000-4000-8000-000000000003.md");
+  writeFileSync(handoff, "handoff", "utf8");
+  const spawnTerminal = terminalThatStarts();
+
+  await launchRotation(["claude", "alpha/design", "--handoff-file", handoff], { dataRoot, spawnTerminal });
+
+  const environment = spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
+  expect(Object.keys(environment).filter((key) => /^claude/iu.test(key) && key !== "CLAUDE_EXE")).toEqual([]);
+  expect(environment.LANE_ROUTER_ROTATION_REQUEST).toContain("alpha/design");
+});
+
+test("keeps the handoff when the successor never reports, however cleanly the window opened", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  const handoffRoot = join(dataRoot, "rotation-handoffs");
+  mkdirSync(handoffRoot);
+  const handoff = join(handoffRoot, "00000000-0000-4000-8000-000000000004.md");
+  writeFileSync(handoff, "只写过一次的交接", "utf8");
+
+  await expect(launchRotation(["claude", "alpha/design", "--handoff-file", handoff], {
+    dataRoot, startTimeoutMs: 200, spawnTerminal: vi.fn(async () => undefined),
+  })).rejects.toThrow(/did not start/u);
+
+  expect(readFileSync(handoff, "utf8")).toBe("只写过一次的交接");
+});
+
+test("repeats the successor's own reason for failing to start", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  const handoffRoot = join(dataRoot, "rotation-handoffs");
+  mkdirSync(handoffRoot);
+  const handoff = join(handoffRoot, "00000000-0000-4000-8000-000000000005.md");
+  writeFileSync(handoff, "handoff", "utf8");
+
+  await expect(launchRotation(["claude", "alpha/design", "--handoff-file", handoff], {
+    dataRoot, startTimeoutMs: 2_000,
+    spawnTerminal: terminalThatStarts("The successor CLI could not be started: spawn claude ENOENT"),
+  })).rejects.toThrow(/spawn claude ENOENT/u);
+  expect(readFileSync(handoff, "utf8")).toBe("handoff");
+});
+
+test("builds the child environment from the source it is given, not from this process", () => {
+  const request = { backend: "claude" as const, cwd: "D:\p", prompt: "p", statusPath: "D:\s.txt" };
+  const environment = rotationChildEnvironment(request, {
+    CLAUDE_CODE_SESSION_ID: "bb75097f", CLAUDE_PID: "29496",
+    CLAUDE_CODE_EXECPATH: "C:/real/claude.exe", PATH: "/usr/bin",
+  });
+  expect(environment.CLAUDE_CODE_SESSION_ID).toBeUndefined();
+  expect(environment.CLAUDE_PID).toBeUndefined();
+  expect(environment.CLAUDE_EXE).toBe("C:/real/claude.exe");
+  expect(environment.PATH).toBe("/usr/bin");
+});
+
+// Only a real process can catch this one: the poll timer must keep the process alive. Unrefed, the
+// launcher exited 0 while the wait had not finished, so it never verified the successor and never
+// retired the handoff — and every in-process test still passed, because the runner's own event
+// loop was holding the process open.
+test("the wait keeps its own process alive rather than letting it exit early", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  const script = join(dataRoot, "wait.mts");
+  writeFileSync(script, [
+    `import { awaitSuccessorStart } from ${JSON.stringify(pathToFileURL(resolve("src/process/rotation-launcher.ts")).href)};`,
+    `await awaitSuccessorStart(${JSON.stringify(join(dataRoot, "never.txt"))}, 1500, 50)`,
+    `  .then(() => process.exit(0), () => process.exit(3));`,
+  ].join("\n"), "utf8");
+
+  const started = Date.now();
+  const result = spawnSync(process.execPath, [resolve("node_modules/tsx/dist/cli.mjs"), script], { encoding: "utf8" });
+
+  expect(result.status).toBe(3);
+  expect(Date.now() - started).toBeGreaterThan(1_000);
+});
+
+test("titles the window with the generation the successor is about to become", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  const handoffRoot = join(dataRoot, "rotation-handoffs");
+  mkdirSync(handoffRoot);
+  const handoff = join(handoffRoot, "00000000-0000-4000-8000-000000000006.md");
+  writeFileSync(handoff, "handoff", "utf8");
+  const spawnTerminal = terminalThatStarts();
+
+  await launchRotation(["claude", "alpha/design", "--handoff-file", handoff], {
+    dataRoot, spawnTerminal,
+    terminalTitle: async (address) => `${address} gen5`,
+  });
+
+  const environment = spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
+  expect(environment.LANE_ROUTER_ROTATION_TITLE).toBe("alpha/design gen5");
+  expect(environment.LANE_ROUTER_ROTATION_COMMAND).toContain("WindowTitle");
+});
+
+test("falls back to the bare address when the Router cannot say which generation is next", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  // No discovery.json at all: a rotation must not fail because the title would be plainer.
+  await expect(terminalTitle("alpha/design", dataRoot)).resolves.toBe("alpha/design");
 });

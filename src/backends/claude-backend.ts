@@ -9,7 +9,7 @@ export type ClaudeChannelOutcome = "sent" | "no_channel" | "send_failed";
 
 export interface ClaudeChannelPort {
   notify(binding: BindingRecord, notification: Notification): Promise<ClaudeChannelOutcome>;
-  waitUntilReplaceable(binding: BindingRecord): Promise<void>;
+  waitUntilReplaceable(binding: BindingRecord, signal?: AbortSignal): Promise<void>;
   onAttentionOpportunity(handler: (binding: BindingRecord) => void): () => void;
   reach(conversationId: string): ReachSnapshot;
   resolveIdentity(context: { conversationId: string; joinKey?: string }): ResolvedIdentity;
@@ -33,8 +33,8 @@ export class ClaudeBackend implements PlatformBackend {
     return this.channel.notify(binding, notification);
   }
 
-  waitUntilReplaceable(binding: BindingRecord): Promise<void> {
-    return this.channel.waitUntilReplaceable(binding);
+  waitUntilReplaceable(binding: BindingRecord, signal?: AbortSignal): Promise<void> {
+    return this.channel.waitUntilReplaceable(binding, signal);
   }
 
   onAttentionOpportunity(handler: (laneAddress: string) => void): () => void {

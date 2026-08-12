@@ -39,9 +39,9 @@ class FakeBackend implements PlatformBackend {
     return joined === undefined ? { value: context.conversationId, source: "caller" } : { value: joined, source: "joined" };
   }
   validateAttach?(context: CallerContext): string | undefined;
-  async waitUntilReplaceable(binding: BindingRecord): Promise<void> {
+  async waitUntilReplaceable(binding: BindingRecord, signal?: AbortSignal): Promise<void> {
     this.waited.push(binding);
-    await this.wait?.();
+    if (this.wait) await Promise.race([this.wait(), abortion(signal)]);
   }
 }
 
@@ -62,6 +62,15 @@ function setup() {
     now: () => ++now,
   });
   return { root, database, state, mailbox, backend, pump, core };
+}
+
+/** Rejects with the signal's reason, so a fake wait can be given up on the way a real one is. */
+function abortion(signal?: AbortSignal): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    if (!signal) return;
+    if (signal.aborted) return reject(signal.reason);
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
 }
 
 const caller = (conversationId: string, requestKey = `request:${conversationId}`) => ({
@@ -305,6 +314,34 @@ describe("RouterCore send and ack", () => {
       await x.core.attachCurrent(caller("successor", "attach:successor"), { address: "alpha/target" });
 
       expect(x.backend.notified.map((binding) => binding.conversationId)).toEqual(["successor"]);
+    } finally { x.database.close(); }
+  });
+});
+
+describe("RouterCore attach when the lane is held by a busy conversation", () => {
+  it("reports what it was waiting for instead of leaving the caller with a transport error", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("thread-a"), { address: "alpha/design", roleDescription: "Design." });
+      x.backend.wait = () => new Promise<void>(() => undefined); // a predecessor that never stops
+
+      await expect(x.core.attachCurrent(caller("thread-b"), { address: "alpha/design" }, AbortSignal.timeout(20)))
+        .rejects.toMatchObject({ code: "ATTACH_WAIT_ENDED", message: expect.stringContaining("still running a turn") });
+
+      // Nothing was changed: the lane still belongs to whoever held it.
+      expect(x.state.activeBindingForLane("alpha/design")).toMatchObject({ generation: 1, conversationId: "thread-a" });
+    } finally { x.database.close(); }
+  });
+
+  it("says so plainly when the caller itself went away", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("thread-a"), { address: "alpha/design", roleDescription: "Design." });
+      x.backend.wait = () => new Promise<void>(() => undefined);
+
+      await expect(x.core.attachCurrent(caller("thread-b"), { address: "alpha/design" }, AbortSignal.abort(new Error("caller left"))))
+        .rejects.toMatchObject({ code: "ATTACH_WAIT_ENDED", message: expect.stringContaining("ended before") });
+      expect(x.state.activeBindingForLane("alpha/design")).toMatchObject({ generation: 1 });
     } finally { x.database.close(); }
   });
 });

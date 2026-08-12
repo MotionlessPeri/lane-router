@@ -42,8 +42,9 @@ export class CodexBackend implements PlatformBackend {
     return this.notify(binding, notification, true);
   }
 
-  async waitUntilReplaceable(binding: BindingRecord): Promise<void> {
+  async waitUntilReplaceable(binding: BindingRecord, signal?: AbortSignal): Promise<void> {
     while (true) {
+      signal?.throwIfAborted();
       if (!this.dependencies.client.isConnected()) {
         await this.nextOpportunity(binding.conversationId);
         continue;

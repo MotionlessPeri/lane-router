@@ -126,14 +126,20 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     };
   }
 
-  async waitUntilReplaceable(binding: BindingRecord): Promise<void> {
+  async waitUntilReplaceable(binding: BindingRecord, signal?: AbortSignal): Promise<void> {
     this.bindings.set(binding.conversationId, binding);
     const connection = this.connections.get(binding.conversationId);
     if (!connection || !connection.busy) return;
-    await new Promise<void>((resolve) => {
+    signal?.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
       const waiters = this.waiters.get(binding.conversationId) ?? new Set<() => void>();
-      waiters.add(resolve);
+      const settle = () => { waiters.delete(settle); resolve(); };
+      waiters.add(settle);
       this.waiters.set(binding.conversationId, waiters);
+      // Rejecting is what stops the takeover: the caller's error travels up and attachCurrent
+      // never reaches replaceBinding. Removing the waiter is only housekeeping, so that callers
+      // that give up repeatedly do not pile up in here until the next Stop clears the set.
+      signal?.addEventListener("abort", () => { waiters.delete(settle); reject(signal.reason); }, { once: true });
     });
   }
 
@@ -270,7 +276,7 @@ export class LocalRouterServer {
       if (LANE_TOOL_NAMES.includes(body.method as LaneToolName)) {
         const context = callerContext(body.context);
         if (!context || typeof body.params !== "object" || body.params === null || Array.isArray(body.params)) return json(response, 400, { error: "invalid request" });
-        const result = await this.options.tools.call(body.method as LaneToolName, body.params as Record<string, unknown>, context);
+        const result = await this.options.tools.call(body.method as LaneToolName, body.params as Record<string, unknown>, context, callerLifetime(request));
         return json(response, 200, { result });
       }
       return json(response, 400, { error: "unknown method" });
@@ -281,6 +287,20 @@ export class LocalRouterServer {
     const address = this.http.address() as AddressInfo;
     return { pid: process.pid, port: address.port, url: `http://${this.host}:${address.port}`, codexEndpoint: this.codexEndpoint, instanceId: this.options.instanceId };
   }
+}
+
+/**
+ * How long the Router is allowed to keep working on a request. A takeover waits for the previous
+ * conversation to finish its turn, and that wait used to outlive the caller entirely. The bound is
+ * deliberately shorter than the transport's own give-up so the caller receives a sentence it can
+ * act on instead of a bare `fetch failed`.
+ */
+const ATTACH_WAIT_MS = 60_000;
+
+function callerLifetime(request: IncomingMessage): AbortSignal {
+  const abandoned = new AbortController();
+  request.once("close", () => abandoned.abort(new Error("the caller disconnected")));
+  return AbortSignal.any([abandoned.signal, AbortSignal.timeout(ATTACH_WAIT_MS)]);
 }
 
 function callerContext(value: unknown): CallerContext | undefined {

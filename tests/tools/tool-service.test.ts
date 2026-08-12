@@ -27,7 +27,7 @@ test("validates and dispatches all four tools with authoritative caller context"
   await x.tools.call("lane_send", { target: "alpha/test", body: "hello", kind: "correction", reply_to: "message-0" }, context);
   await x.tools.call("lane_ack", { message_ids: ["message-1"] }, context);
   expect(x.router.directory).toHaveBeenCalledWith("alpha");
-  expect(x.router.attachCurrent).toHaveBeenCalledWith(context, { address: "alpha/design", roleDescription: "Design." });
+  expect(x.router.attachCurrent).toHaveBeenCalledWith(context, { address: "alpha/design", roleDescription: "Design." }, undefined);
   expect(x.router.send).toHaveBeenCalledWith(context, { target: "alpha/test", body: "hello", kind: "correction", replyTo: "message-0" });
   expect(x.router.ack).toHaveBeenCalledWith(context, { messageIds: ["message-1"] });
 });
