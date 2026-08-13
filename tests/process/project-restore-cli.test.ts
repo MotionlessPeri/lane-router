@@ -47,3 +47,17 @@ test("propagates Router errors and does not print a false result", async () => {
   await expect(x.runtime([], x.dependencies as never)).rejects.toThrow(/not attached/iu);
   expect(x.write).not.toHaveBeenCalled();
 });
+
+test("gives the client a resolver that can follow a replacement Router", async () => {
+  const x = setup();
+  x.dependencies.ensure
+    .mockResolvedValueOnce({ url: "http://127.0.0.1:1" })
+    .mockResolvedValueOnce({ url: "http://127.0.0.1:2" });
+  x.dependencies.createClient.mockImplementation((resolveUrl: () => Promise<string>) => ({
+    call: async () => ({ urls: [await resolveUrl(), await resolveUrl()] }),
+  }));
+
+  await x.runtime([], x.dependencies as never);
+
+  expect(x.write).toHaveBeenCalledWith(`${JSON.stringify({ urls: ["http://127.0.0.1:1", "http://127.0.0.1:2"] }, null, 2)}\n`);
+});

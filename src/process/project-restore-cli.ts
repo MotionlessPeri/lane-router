@@ -17,7 +17,7 @@ interface RestoreCliDependencies {
   readonly cwd: () => string;
   readonly newRequestKey: () => string;
   readonly ensure: () => Promise<{ readonly url: string }>;
-  readonly createClient: (url: string) => RestoreCliClient;
+  readonly createClient: (resolveUrl: () => Promise<string>) => RestoreCliClient;
   readonly write: (text: string) => void;
 }
 
@@ -26,7 +26,7 @@ const defaults: RestoreCliDependencies = {
   cwd: () => process.cwd(),
   newRequestKey: randomUUID,
   ensure: ensureRouter,
-  createClient: (url) => new LocalRouterClient(url),
+  createClient: (resolveUrl) => new LocalRouterClient(resolveUrl),
   write: (text) => { process.stdout.write(text); },
 };
 
@@ -38,8 +38,7 @@ const defaults: RestoreCliDependencies = {
 export async function runProjectRestoreCli(args: readonly string[], dependencies: RestoreCliDependencies = defaults): Promise<number> {
   const threadId = dependencies.threadId();
   if (!threadId?.trim()) throw new Error("lane-router-restore-project must run inside a Codex conversation with CODEX_THREAD_ID");
-  const discovery = await dependencies.ensure();
-  const client = dependencies.createClient(discovery.url);
+  const client = dependencies.createClient(async () => (await dependencies.ensure()).url);
   const result = await client.call("lane_restore_project", args.length === 0 ? {} : { lanes: [...args] }, {
     backend: "codex",
     conversationId: threadId,
