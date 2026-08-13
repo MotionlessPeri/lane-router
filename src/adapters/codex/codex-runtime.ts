@@ -21,6 +21,8 @@ export class CodexRuntime {
   readonly dynamicTools = codexDynamicTools();
   private readonly dispatcher: CodexDynamicToolDispatcher;
   private readonly ownedThreads = new Set<string>();
+  private readonly visibleClients = new Map<string, number>();
+  private readonly threadCwds = new Map<string, string>();
   private unsubscribeRequest?: () => void;
   private unsubscribeReconnect?: () => void;
   private running = false;
@@ -35,9 +37,11 @@ export class CodexRuntime {
     this.backend = new CodexBackend({
       client: this.client,
       resolveLane: (threadId) => options.state.activeBindingForConversation("codex", threadId)?.laneAddress,
+      hasVisibleClient: (threadId) => (this.visibleClients.get(threadId) ?? 0) > 0,
     });
     this.dispatcher = new CodexDynamicToolDispatcher({
       ownsThread: (threadId) => this.ownsThread(threadId),
+      cwdForThread: (threadId) => this.threadCwds.get(threadId) ?? startupCwd(this.options.state.activeBindingForConversation("codex", threadId)),
       call: options.callTool,
     });
   }
@@ -70,8 +74,19 @@ export class CodexRuntime {
     return { ...params, dynamicTools: this.dynamicTools, developerInstructions: LANE_ROUTER_INSTRUCTIONS };
   }
 
-  claimThread(threadId: string): void {
+  claimThread(threadId: string, cwd?: string): void {
     this.ownedThreads.add(threadId);
+    if (cwd !== undefined) this.threadCwds.set(threadId, cwd);
+  }
+
+  openThreadClient(threadId: string): void {
+    this.visibleClients.set(threadId, (this.visibleClients.get(threadId) ?? 0) + 1);
+  }
+
+  closeThreadClient(threadId: string): void {
+    const next = (this.visibleClients.get(threadId) ?? 0) - 1;
+    if (next > 0) this.visibleClients.set(threadId, next);
+    else this.visibleClients.delete(threadId);
   }
 
   ownsThread(threadId: string): boolean {
@@ -104,4 +119,8 @@ export function createCodexRuntime(options: {
 }): CodexRuntime {
   const process = new CodexAppServerProcess({ command: options.command, gate: new CodexCapabilityGate({ cacheDir: options.capabilityCacheDir }) });
   return new CodexRuntime({ state: options.state, callTool: options.callTool, process });
+}
+
+function startupCwd(binding: ReturnType<RouterStateStore["activeBindingForConversation"]>): string | undefined {
+  return typeof binding?.startup.cwd === "string" ? binding.startup.cwd : undefined;
 }

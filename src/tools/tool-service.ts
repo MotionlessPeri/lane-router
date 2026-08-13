@@ -32,6 +32,10 @@ export class ToolService {
         const parsed = toolArgsSchemas.lane_ack.parse(args);
         return this.router.ack(context, { messageIds: parsed.message_ids });
       }
+      case "lane_restore_project": {
+        const parsed = toolArgsSchemas.lane_restore_project.parse(args);
+        return this.router.restoreProject(context, parsed.lanes === undefined ? {} : { lanes: parsed.lanes });
+      }
     }
   }
 }

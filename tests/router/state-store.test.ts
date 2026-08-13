@@ -54,6 +54,22 @@ describe("V1 state store", () => {
     }
   });
 
+  it("updates startup metadata without changing binding identity or generation", () => {
+    const { database, store } = setup();
+    try {
+      store.createLane({ address: "alpha/design", project: "alpha", roleDescription: "design", now: 1 });
+      const created = store.createBinding({
+        id: "binding-1", laneAddress: "alpha/design", backend: "codex",
+        conversationId: "thread-1", generation: 3, startup: {}, now: 2,
+      });
+
+      const updated = store.updateBindingStartup(created.id, { cwd: "D:\\project" });
+
+      expect(updated).toEqual({ ...created, startup: { cwd: "D:\\project" } });
+      expect(store.activeBindingForLane("alpha/design")).toEqual(updated);
+    } finally { database.close(); }
+  });
+
   it("stores message metadata and resolves request keys without storing bodies", () => {
     const { database, store } = setup();
     try {

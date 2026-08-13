@@ -4,6 +4,17 @@ import type { MailboxStore } from "./mailbox-store.js";
 import type { NotificationPump } from "./notification-pump.js";
 import type { RouterStateStore } from "./state-store.js";
 import type { CallerContext, LaneRecord, MessageKind, MessageRecord, ReachSnapshot, ResolvedIdentity } from "./types.js";
+import type { BindingRecord } from "./types.js";
+
+export interface LaneRestoreResult {
+  readonly status: "launch_requested" | "skipped_online" | "skipped_launching" | "failed";
+  readonly reason?: string;
+  readonly message?: string;
+}
+
+export interface LaneRestorePort {
+  restore(binding: BindingRecord): Promise<LaneRestoreResult>;
+}
 
 export class RouterError extends Error {
   constructor(readonly code: string, message: string) {
@@ -35,6 +46,7 @@ interface RouterCoreDependencies {
   readonly mailbox: MailboxStore;
   readonly backends: BackendRegistry;
   readonly pump: NotificationPump;
+  readonly restore?: LaneRestorePort;
   readonly newId: (kind: "binding" | "message") => string;
   readonly now: () => number;
 }
@@ -76,7 +88,7 @@ export class RouterCore {
       if (input.roleDescription !== undefined && input.roleDescription !== state.requireLane(parsed.address).roleDescription) {
         state.updateLaneRole(parsed.address, input.roleDescription, this.dependencies.now());
       }
-      return this.bootstrap(state.requireLane(parsed.address), conversationBinding, identity);
+      return this.bootstrap(state.requireLane(parsed.address), this.refreshStartup(conversationBinding, context), identity);
     }
 
     let lane = state.lane(parsed.address);
@@ -106,7 +118,7 @@ export class RouterCore {
         backend: context.backend,
         conversationId: identity.value,
         generation,
-        startup: {},
+        startup: context.cwd === undefined ? {} : { cwd: context.cwd },
         roleDescription: input.roleDescription,
         now: this.dependencies.now(),
       });
@@ -175,7 +187,52 @@ export class RouterCore {
   private requireCallerBinding(context: CallerContext) {
     const binding = this.dependencies.state.activeBindingForConversation(context.backend, this.identity(context).value);
     if (!binding) throw new RouterError("NOT_ATTACHED", "The current conversation is not attached to a lane");
-    return binding;
+    return this.refreshStartup(binding, context);
+  }
+
+  async restoreProject(context: CallerContext, input: { lanes?: readonly string[] }) {
+    const caller = this.requireCallerBinding(context);
+    const callerLane = this.dependencies.state.requireLane(caller.laneAddress);
+    const projectLanes = this.dependencies.state.listLanes(callerLane.project);
+    let selected = projectLanes;
+    if (input.lanes !== undefined) {
+      const addresses = new Set<string>();
+      for (const raw of input.lanes) {
+        const parsed = parseLaneAddress(raw);
+        if (parsed.project !== callerLane.project) {
+          throw new RouterError("RESTORE_LANE_OUTSIDE_PROJECT", `Lane is outside the current project: ${parsed.address}`);
+        }
+        if (!this.dependencies.state.lane(parsed.address)) throw new RouterError("RESTORE_LANE_NOT_FOUND", `Lane not found: ${parsed.address}`);
+        addresses.add(parsed.address);
+      }
+      selected = projectLanes.filter((lane) => addresses.has(lane.address));
+    }
+    const results: Array<Record<string, unknown>> = [];
+    for (const lane of selected) {
+      if (lane.address === caller.laneAddress) {
+        results.push({ address: lane.address, status: "skipped_current" });
+        continue;
+      }
+      const binding = this.dependencies.state.activeBindingForLane(lane.address);
+      if (!binding) {
+        results.push({ address: lane.address, status: "skipped_inactive" });
+        continue;
+      }
+      try {
+        const restored = this.dependencies.restore
+          ? await this.dependencies.restore.restore(binding)
+          : { status: "failed" as const, reason: "backend_unavailable", message: "Conversation restore is unavailable" };
+        results.push({ address: lane.address, ...restored });
+      } catch (error) {
+        results.push({ address: lane.address, status: "failed", reason: "terminal_launch_failed", message: error instanceof Error ? error.message : "Conversation restore failed" });
+      }
+    }
+    return { project: callerLane.project, results };
+  }
+
+  private refreshStartup(binding: NonNullable<ReturnType<RouterStateStore["activeBindingForLane"]>>, context: CallerContext) {
+    if (context.cwd === undefined || binding.startup.cwd === context.cwd) return binding;
+    return this.dependencies.state.updateBindingStartup(binding.id, { ...binding.startup, cwd: context.cwd });
   }
 
   private bootstrap(lane: LaneRecord, binding: NonNullable<ReturnType<RouterStateStore["activeBindingForLane"]>>, identity: ResolvedIdentity) {

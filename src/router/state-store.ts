@@ -174,6 +174,13 @@ export class RouterStateStore {
     return (rows as BindingRow[]).map(mapBinding);
   }
 
+  updateBindingStartup(id: string, startup: Readonly<Record<string, unknown>>): BindingRecord {
+    if (this.database.prepare(`
+      UPDATE binding SET startup_json=? WHERE id=?
+    `).run(JSON.stringify(startup), id).changes !== 1) throw new Error(`Binding not found: ${id}`);
+    return this.requireBinding(id);
+  }
+
   deactivateBinding(id: string, generation: number, now: number): boolean {
     return this.database.prepare(`
       UPDATE binding SET inactive_at=? WHERE id=? AND generation=? AND inactive_at IS NULL

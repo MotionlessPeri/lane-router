@@ -28,6 +28,10 @@ function setup(result: ClaudeChannelOutcome = "sent", reach: ReachSnapshot = liv
 }
 
 describe("ClaudeBackend", () => {
+  it("treats any open lifecycle channel as online for restore", () => {
+    expect(setup("sent", { ...live, state: "unconfirmed", lastLifecycleAt: null }).backend.restorePresence(binding)).toBe("online");
+    expect(setup("no_channel", { ...live, state: "no_channel", connectedAt: null }).backend.restorePresence(binding)).toBe("offline");
+  });
   it("uses the same Channel notification for normal and correction messages", async () => {
     const x = setup();
     await expect(x.backend.notifyNormal(binding, notification)).resolves.toBe("sent");

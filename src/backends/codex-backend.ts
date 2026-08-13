@@ -4,7 +4,7 @@ import {
   decodeTurnSteerResult,
   type ThreadResult,
 } from "../adapters/codex/protocol.js";
-import type { Notification, NotificationOutcome, PlatformBackend, ReachSnapshot } from "../router/backend.js";
+import type { Notification, NotificationOutcome, PlatformBackend, ReachSnapshot, RestorePresence } from "../router/backend.js";
 import type { BindingRecord, CallerContext, ResolvedIdentity } from "../router/types.js";
 
 interface CodexNotification {
@@ -28,6 +28,7 @@ export class CodexBackend implements PlatformBackend {
   constructor(private readonly dependencies: {
     readonly client: CodexClient;
     readonly resolveLane: (threadId: string) => string | undefined;
+    readonly hasVisibleClient?: (threadId: string) => boolean;
     readonly now?: () => number;
   }) {
     this.now = dependencies.now ?? Date.now;
@@ -136,6 +137,11 @@ export class CodexBackend implements PlatformBackend {
       // The Codex backend keeps no busy belief; it asks the App Server when it needs the answer.
       believedBusy: null,
     };
+  }
+
+  restorePresence(binding: BindingRecord): RestorePresence {
+    if (!this.dependencies.client.isConnected()) return "unavailable";
+    return this.dependencies.hasVisibleClient?.(binding.conversationId) === true ? "online" : "offline";
   }
 
   // A Codex threadId is issued by the App Server and outlives every process on this side, so

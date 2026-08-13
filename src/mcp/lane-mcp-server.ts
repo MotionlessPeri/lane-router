@@ -40,6 +40,7 @@ export class LaneMcpServer {
   constructor(private readonly options: {
     readonly router: LaneRouterClient;
     readonly conversationId: string;
+    readonly cwd?: string;
     readonly joinKey?: string;
     readonly channel?: ClaudeChannelConnection;
     readonly newRequestKey?: () => string;
@@ -79,6 +80,7 @@ export class LaneMcpServer {
       const result = await this.options.router.call(tool, args, {
         backend: "claude",
         conversationId: this.options.conversationId,
+        ...(this.options.cwd === undefined ? {} : { cwd: this.options.cwd }),
         ...(this.options.joinKey === undefined ? {} : { joinKey: this.options.joinKey }),
         requestKey: `claude:${(this.options.newRequestKey ?? randomUUID)()}`,
       });
@@ -111,7 +113,7 @@ export async function runLaneMcpStdio(): Promise<{ close(): Promise<void> }> {
   const joinKey = claudeJoinKey();
   const channel = await connectClaudeChannel(resolveRouterUrl, conversationId, joinKey);
   let closing: Promise<void> | undefined;
-  const server = createLaneMcpServer({ router, conversationId, joinKey, channel, onClose: () => close() });
+  const server = createLaneMcpServer({ router, conversationId, cwd: process.cwd(), joinKey, channel, onClose: () => close() });
   const close = (): Promise<void> => closing ??= (async () => {
     await channel.close();
     await server.close();

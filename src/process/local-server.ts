@@ -310,6 +310,7 @@ function callerContext(value: unknown): CallerContext | undefined {
   return {
     backend: context.backend, conversationId: context.conversationId, requestKey: context.requestKey,
     ...(typeof context.joinKey === "string" ? { joinKey: context.joinKey } : {}),
+    ...(typeof context.cwd === "string" ? { cwd: context.cwd } : {}),
   };
 }
 

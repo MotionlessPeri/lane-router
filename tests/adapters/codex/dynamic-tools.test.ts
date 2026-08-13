@@ -3,23 +3,23 @@ import { expect, test, vi } from "vitest";
 import { LANE_TOOL_NAMES } from "../../../src/tools/tool-contract.js";
 import { CodexDynamicToolDispatcher, codexDynamicTools, UnknownCodexThreadError } from "../../../src/adapters/codex/dynamic-tools.js";
 
-test("exports exactly four strict shared logical schemas", () => {
+test("exports exactly five strict shared logical schemas", () => {
   const tools = codexDynamicTools();
   expect(tools.map((tool) => tool.name)).toEqual(LANE_TOOL_NAMES);
-  expect(tools).toHaveLength(4);
+  expect(tools).toHaveLength(5);
   for (const tool of tools) expect(tool.inputSchema).toMatchObject({ type: "object", additionalProperties: false });
   expect(tools.find((tool) => tool.name === "lane_attach_current")?.description).toMatch(/explicit confirmation/i);
 });
 
 test("authoritative App Server thread identity and call ID become caller context", async () => {
   const call = vi.fn(() => ({ id: "message-1" }));
-  const dispatcher = new CodexDynamicToolDispatcher({ ownsThread: (threadId) => threadId === "thread-1", call });
+  const dispatcher = new CodexDynamicToolDispatcher({ ownsThread: (threadId) => threadId === "thread-1", cwdForThread: () => "D:\\project", call });
   const request = { threadId: "thread-1", turnId: "turn-1", callId: "call-1", tool: "lane_send", arguments: { target: "alpha/test", kind: "normal", body: "x" } } as const;
   const [first, second] = await Promise.all([dispatcher.dispatch(request), dispatcher.dispatch(request)]);
   expect(first).toEqual(second);
   expect(call).toHaveBeenCalledTimes(1);
   expect(call).toHaveBeenCalledWith("lane_send", request.arguments, {
-    backend: "codex", conversationId: "thread-1", requestKey: 'codex:["thread-1","turn-1","call-1"]',
+    backend: "codex", conversationId: "thread-1", cwd: "D:\\project", requestKey: 'codex:["thread-1","turn-1","call-1"]',
   });
 });
 

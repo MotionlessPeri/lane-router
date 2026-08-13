@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
@@ -7,6 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { fileURLToPath } from "node:url";
 
 import { parseLaneAddress } from "../router/address.js";
+import { launchVisibleTerminal } from "./visible-terminal.js";
 
 export interface RotationRequest {
   readonly backend: "codex" | "claude";
@@ -138,23 +138,11 @@ export function rotationChildEnvironment(request: RotationRequest, source: NodeJ
 }
 
 async function spawnTerminal(request: RotationRequest, environment: NodeJS.ProcessEnv): Promise<void> {
-  await new Promise<void>((resolveSpawn, reject) => {
-    // Windows Terminal when it is installed, a plain console when it is not. Either way the window
-    // opening proves nothing, which is why the child reports separately.
-    const command = [
-      "$inner = @('-NoExit','-Command', $env:LANE_ROUTER_ROTATION_COMMAND)",
-      "if (Get-Command wt.exe -ErrorAction SilentlyContinue) {",
-      "  Start-Process -FilePath 'wt.exe' -ArgumentList (@('-d', $env:LANE_ROUTER_ROTATION_CWD, 'powershell.exe') + $inner)",
-      "} else {",
-      "  Start-Process -FilePath 'powershell.exe' -ArgumentList $inner -WorkingDirectory $env:LANE_ROUTER_ROTATION_CWD -WindowStyle Normal",
-      "}",
-    ].join("\n");
-    const child = spawn("powershell.exe", ["-NoProfile", "-Command", command], {
-      cwd: request.cwd, env: environment, windowsHide: true, stdio: "ignore",
-    });
-    child.once("error", reject);
-    child.once("exit", (code) => code === 0 ? resolveSpawn() : reject(new Error(`PowerShell failed to create terminal (exit ${code ?? "unknown"})`)));
-  });
+  const childPath = resolve(dirname(fileURLToPath(import.meta.url)), "rotation-terminal-child.js");
+  await launchVisibleTerminal(
+    { cwd: request.cwd, childPath, requestName: "LANE_ROUTER_ROTATION_REQUEST", request },
+    { environment },
+  );
 }
 
 /**

@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createCodexRuntime } from "../adapters/codex/codex-runtime.js";
 import { ClaudeBackend } from "../backends/claude-backend.js";
@@ -12,6 +12,8 @@ import { MailboxStore } from "../router/mailbox-store.js";
 import { NotificationPump } from "../router/notification-pump.js";
 import { RouterCore } from "../router/router-core.js";
 import { RouterStateStore } from "../router/state-store.js";
+import { ClaudeSessionLocator } from "./claude-session-locator.js";
+import { ConversationRestorer } from "./conversation-restorer.js";
 import { ToolService } from "../tools/tool-service.js";
 import { ClaudeChannelHub, LocalRouterServer } from "./local-server.js";
 import { RuntimeLock } from "./runtime-lock.js";
@@ -43,7 +45,12 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     await codex.start();
     const backends = new BackendRegistry([claudeBackend, codex.backend]);
     const pump = new NotificationPump(state, mailbox, backends);
-    const core = new RouterCore({ state, mailbox, backends, pump, newId: () => randomUUID(), now: Date.now });
+    const restore = new ConversationRestorer({
+      state, backends,
+      claudeSessions: new ClaudeSessionLocator(join(homedir(), ".claude", "projects")),
+      fallbackCwd: resolve(dirname(fileURLToPath(import.meta.url)), "../.."),
+    });
+    const core = new RouterCore({ state, mailbox, backends, pump, restore, newId: () => randomUUID(), now: Date.now });
     tools = new ToolService(core);
     server = new LocalRouterServer({ tools, codex, claude: claudeHub, instanceId: randomUUID() });
     mailbox.reconcile(state);

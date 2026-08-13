@@ -13,18 +13,18 @@ async function connected() {
   const call = vi.fn(async (name: string) => name === "lane_directory" ? [] : { ok: true });
   const router = { call } as unknown as LaneRouterClient;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createLaneMcpServer({ router, conversationId: "claude-session-1", newRequestKey: () => "call-1" });
+  const server = createLaneMcpServer({ router, conversationId: "claude-session-1", cwd: "D:\\project", newRequestKey: () => "call-1" });
   const client = new Client({ name: "lane-test", version: "1" }, { capabilities: {} });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   closers.push(async () => { await client.close(); await server.close(); });
   return { client, call };
 }
 
-test("advertises exactly four strict tools with the shared attach confirmation", async () => {
+test("advertises exactly five strict tools with the shared attach confirmation", async () => {
   const x = await connected();
   const listed = await x.client.listTools();
   expect(listed.tools.map((tool) => tool.name)).toEqual(LANE_TOOL_NAMES);
-  expect(listed.tools).toHaveLength(4);
+  expect(listed.tools).toHaveLength(5);
   expect(listed.tools.find((tool) => tool.name === "lane_attach_current")?.description).toMatch(/explicit confirmation/i);
   for (const tool of listed.tools) {
     expect(tool.inputSchema.additionalProperties).toBe(false);
@@ -39,7 +39,7 @@ test("injects the current Claude connection identity and an internal request key
   const result = await x.client.callTool({ name: "lane_send", arguments: { target: "alpha/test", body: "hello", kind: "normal" } });
   expect(result.isError).not.toBe(true);
   expect(x.call).toHaveBeenCalledWith("lane_send", { target: "alpha/test", body: "hello", kind: "normal" }, {
-    backend: "claude", conversationId: "claude-session-1", requestKey: "claude:call-1",
+    backend: "claude", conversationId: "claude-session-1", cwd: "D:\\project", requestKey: "claude:call-1",
   });
 });
 

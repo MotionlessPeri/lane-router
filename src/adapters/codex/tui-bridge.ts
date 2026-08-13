@@ -6,7 +6,9 @@ import { decodeServerMessage, type DynamicToolCallParams, type JsonRpcId } from 
 export interface CodexTuiBridgeHost {
   readonly endpoint: string;
   decorateThreadStart(params: Record<string, unknown>): Record<string, unknown>;
-  claimThread(threadId: string): void;
+  claimThread(threadId: string, cwd?: string): void;
+  openThreadClient(threadId: string): void;
+  closeThreadClient(threadId: string): void;
   ownsThread(threadId: string): boolean;
   dispatchTool(request: DynamicToolCallParams): Promise<unknown>;
   observeNotification(method: string, params: Readonly<Record<string, unknown>>): void;
@@ -37,7 +39,8 @@ export class CodexTuiBridge {
     const upstream = new WebSocket(this.host.endpoint);
     const pair = { downstream, upstream };
     const queued: string[] = [];
-    const pendingStarts = new Set<JsonRpcId>();
+    const pendingClaims = new Map<JsonRpcId, string | undefined>();
+    const claimedThreads = new Set<string>();
     this.connections.add(pair);
 
     upstream.on("open", () => {
@@ -45,17 +48,23 @@ export class CodexTuiBridge {
       queued.length = 0;
     });
     downstream.on("message", (raw) => {
-      const message = this.fromTui(raw.toString(), pendingStarts, downstream);
+      const message = this.fromTui(raw.toString(), pendingClaims, downstream);
       if (message === undefined) return;
       if (upstream.readyState === WebSocket.OPEN) upstream.send(message);
       else if (upstream.readyState === WebSocket.CONNECTING) queued.push(message);
     });
-    upstream.on("message", (raw) => { void this.fromAppServer(raw.toString(), pendingStarts, upstream, downstream); });
+    upstream.on("message", (raw) => { void this.fromAppServer(raw.toString(), pendingClaims, claimedThreads, upstream, downstream); });
     downstream.on("close", () => upstream.close());
     upstream.on("close", () => downstream.close());
     downstream.on("error", () => upstream.close());
     upstream.on("error", () => downstream.close(1011, "Codex App Server connection failed"));
-    const detach = () => this.connections.delete(pair);
+    let attached = true;
+    const detach = () => {
+      if (!attached) return;
+      attached = false;
+      this.connections.delete(pair);
+      for (const threadId of claimedThreads) this.host.closeThreadClient(threadId);
+    };
     downstream.once("close", detach);
     upstream.once("close", detach);
   }
@@ -72,11 +81,11 @@ export class CodexTuiBridge {
     if (server) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 
-  private fromTui(raw: string, pendingStarts: Set<JsonRpcId>, downstream: WebSocket): string | undefined {
+  private fromTui(raw: string, pendingClaims: Map<JsonRpcId, string | undefined>, downstream: WebSocket): string | undefined {
     const message = parseRecord(raw);
     if (!message) return raw;
     if (message.method === "thread/start" && isId(message.id) && isRecord(message.params)) {
-      pendingStarts.add(message.id);
+      pendingClaims.set(message.id, typeof message.params.cwd === "string" ? message.params.cwd : undefined);
       return JSON.stringify({ ...message, params: this.host.decorateThreadStart(message.params) });
     }
     if (message.method === "thread/resume" && isId(message.id) && isRecord(message.params)) {
@@ -85,15 +94,24 @@ export class CodexTuiBridge {
         downstream.send(JSON.stringify({ id: message.id, error: { code: -32600, message: `Codex thread is not owned by Lane Router: ${String(threadId)}` } }));
         return undefined;
       }
+      pendingClaims.set(message.id, undefined);
     }
     return raw;
   }
 
-  private async fromAppServer(raw: string, pendingStarts: Set<JsonRpcId>, upstream: WebSocket, downstream: WebSocket): Promise<void> {
+  private async fromAppServer(raw: string, pendingClaims: Map<JsonRpcId, string | undefined>, claimedThreads: Set<string>, upstream: WebSocket, downstream: WebSocket): Promise<void> {
     const message = parseRecord(raw);
-    if (message && isId(message.id) && pendingStarts.delete(message.id)) {
+    if (message && isId(message.id) && pendingClaims.has(message.id)) {
+      const cwd = pendingClaims.get(message.id);
+      pendingClaims.delete(message.id);
       const threadId = nestedThreadId(message.result);
-      if (threadId) this.host.claimThread(threadId);
+      if (threadId) {
+        this.host.claimThread(threadId, cwd);
+        if (!claimedThreads.has(threadId)) {
+          claimedThreads.add(threadId);
+          this.host.openThreadClient(threadId);
+        }
+      }
     }
     if (message?.method === "item/tool/call" && isId(message.id)) {
       try {

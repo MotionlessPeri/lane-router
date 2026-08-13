@@ -82,6 +82,7 @@ export interface CallerContext {
   readonly backend: BackendName;
   readonly conversationId: string;
   readonly joinKey?: string;
+  readonly cwd?: string;
   readonly requestKey: string;
 }
 

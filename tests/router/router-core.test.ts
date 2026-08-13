@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PlatformBackend, ReachSnapshot } from "../../src/router/backend.js";
 import type { CallerContext, ResolvedIdentity } from "../../src/router/types.js";
@@ -56,12 +56,14 @@ function setup() {
   let sequence = 0;
   let now = 100;
   const pump = new NotificationPump(state, mailbox, backends);
+  const restore = vi.fn(async () => ({ status: "launch_requested" as const }));
   const core = new RouterCore({
     state, mailbox, backends, pump,
+    restore: { restore },
     newId: (kind) => `${kind}-${++sequence}`,
     now: () => ++now,
   });
-  return { root, database, state, mailbox, backend, pump, core };
+  return { root, database, state, mailbox, backend, pump, core, restore };
 }
 
 /** Rejects with the signal's reason, so a fake wait can be given up on the way a real one is. */
@@ -215,6 +217,25 @@ describe("RouterCore directory and attach", () => {
     } finally { x.database.close(); }
   });
 
+  it("stores and refreshes trusted caller cwd without rotating the binding", async () => {
+    const x = setup();
+    try {
+      const first = await x.core.attachCurrent({ ...caller("thread-a"), cwd: "D:\\project-a" }, {
+        address: "alpha/design", roleDescription: "Design.",
+      });
+      expect(first.binding.startup).toEqual({ cwd: "D:\\project-a" });
+
+      x.state.createLane({ address: "alpha/target", project: "alpha", roleDescription: "Target.", now: 1 });
+      await x.core.send({ ...caller("thread-a", "send:refresh"), cwd: "D:\\project-b" }, {
+        target: "alpha/target", body: "refresh", kind: "normal",
+      });
+
+      expect(x.state.activeBindingForLane("alpha/design")).toMatchObject({
+        id: first.binding.id, generation: first.binding.generation, startup: { cwd: "D:\\project-b" },
+      });
+    } finally { x.database.close(); }
+  });
+
   it("waits for the old binding, increments generation, and invalidates the old caller", async () => {
     const x = setup();
     try {
@@ -252,6 +273,63 @@ describe("RouterCore directory and attach", () => {
       expect(x.state.requireLane("alpha/design").roleDescription).toBe("Old role.");
       await x.core.attachCurrent(caller("thread-new", "request:update"), { address: "alpha/design", roleDescription: "New role." });
       expect(x.state.requireLane("alpha/design").roleDescription).toBe("New role.");
+    } finally { x.database.close(); }
+  });
+});
+
+describe("RouterCore project restore", () => {
+  it("derives the project and reports current, inactive, and restored lanes in directory order", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("thread-main"), { address: "alpha/main", roleDescription: "Main." });
+      x.state.createLane({ address: "alpha/inactive", project: "alpha", roleDescription: "Inactive.", now: 1 });
+      x.state.createLane({ address: "alpha/peer", project: "alpha", roleDescription: "Peer.", now: 1 });
+      x.state.createBinding({ id: "binding-peer", laneAddress: "alpha/peer", backend: "codex", conversationId: "thread-peer", generation: 1, startup: {}, now: 2 });
+
+      await expect(x.core.restoreProject(caller("thread-main", "restore:1"), {})).resolves.toEqual({
+        project: "alpha",
+        results: [
+          { address: "alpha/inactive", status: "skipped_inactive" },
+          { address: "alpha/main", status: "skipped_current" },
+          { address: "alpha/peer", status: "launch_requested" },
+        ],
+      });
+      expect(x.restore).toHaveBeenCalledOnce();
+    } finally { x.database.close(); }
+  });
+
+  it("validates an explicit subset completely before launching anything", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("thread-main"), { address: "alpha/main", roleDescription: "Main." });
+      x.state.createLane({ address: "alpha/peer", project: "alpha", roleDescription: "Peer.", now: 1 });
+      x.state.createBinding({ id: "binding-peer", laneAddress: "alpha/peer", backend: "codex", conversationId: "thread-peer", generation: 1, startup: {}, now: 2 });
+      await expect(x.core.restoreProject(caller("thread-main", "restore:bad"), {
+        lanes: ["alpha/peer", "beta/foreign"],
+      })).rejects.toMatchObject({ code: "RESTORE_LANE_OUTSIDE_PROJECT" });
+      expect(x.restore).not.toHaveBeenCalled();
+    } finally { x.database.close(); }
+  });
+
+  it("isolates one restore failure and preserves every binding generation", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("thread-main"), { address: "alpha/main", roleDescription: "Main." });
+      for (const name of ["a", "b"]) {
+        x.state.createLane({ address: `alpha/${name}`, project: "alpha", roleDescription: name, now: 1 });
+        x.state.createBinding({ id: `binding-${name}`, laneAddress: `alpha/${name}`, backend: "codex", conversationId: `thread-${name}`, generation: 7, startup: {}, now: 2 });
+      }
+      x.restore.mockImplementation(async (binding) => {
+        if (binding.laneAddress === "alpha/a") throw new Error("boom");
+        return { status: "launch_requested" };
+      });
+      const result = await x.core.restoreProject(caller("thread-main", "restore:mixed"), { lanes: ["alpha/a", "alpha/b"] });
+      expect(result.results).toEqual([
+        { address: "alpha/a", status: "failed", reason: "terminal_launch_failed", message: "boom" },
+        { address: "alpha/b", status: "launch_requested" },
+      ]);
+      expect(x.state.activeBindingForLane("alpha/a")?.generation).toBe(7);
+      expect(x.state.activeBindingForLane("alpha/b")?.generation).toBe(7);
     } finally { x.database.close(); }
   });
 });

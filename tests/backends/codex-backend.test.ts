@@ -15,6 +15,7 @@ const notification = {
 function setup(status: "idle" | "active" | "notLoaded" = "idle") {
   let current = status;
   let connected = true;
+  let visibleClient = false;
   let notificationHandler: ((message: { method: string; params: Readonly<Record<string, unknown>> }) => void) | undefined;
   const request = vi.fn(async (method: string) => {
     if (method === "thread/read") return {
@@ -34,16 +35,26 @@ function setup(status: "idle" | "active" | "notLoaded" = "idle") {
       onNotification(handler) { notificationHandler = handler; return () => { notificationHandler = undefined; }; },
     },
     resolveLane: (threadId) => threadId === "thread-1" ? "alpha/design" : undefined,
+    hasVisibleClient: () => visibleClient,
   });
   return {
     backend, request,
     setStatus(value: typeof current) { current = value; },
     setConnected(value: boolean) { connected = value; },
+    setVisibleClient(value: boolean) { visibleClient = value; },
     emit(method: string, params: Record<string, unknown>) { notificationHandler?.({ method, params }); },
   };
 }
 
 describe("CodexBackend", () => {
+  it("reports restore presence from the TUI client, not loaded thread state", () => {
+    const x = setup("active");
+    expect(x.backend.restorePresence(binding)).toBe("offline");
+    x.setVisibleClient(true);
+    expect(x.backend.restorePresence(binding)).toBe("online");
+    x.setConnected(false);
+    expect(x.backend.restorePresence(binding)).toBe("unavailable");
+  });
   it("starts an idle thread with a body-free mailbox notice", async () => {
     const x = setup("idle");
     await expect(x.backend.notifyNormal(binding, notification)).resolves.toBe("sent");

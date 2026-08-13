@@ -3,6 +3,7 @@ export const LANE_TOOL_NAMES = [
   "lane_attach_current",
   "lane_send",
   "lane_ack",
+  "lane_restore_project",
 ] as const;
 
 export type LaneToolName = (typeof LANE_TOOL_NAMES)[number];
@@ -20,6 +21,7 @@ export const LANE_TOOLS: readonly LogicalToolDefinition[] = [
   { name: "lane_attach_current", description: `Attach the current conversation to a lane. ${ATTACH_CONFIRMATION}`, mutating: true },
   { name: "lane_send", description: "Write an immutable message to another lane's pending mailbox. Use correction with reply_to to amend an earlier message.", mutating: true },
   { name: "lane_ack", description: "Resolve one or more pending mailbox messages after the current lane has processed them.", mutating: true },
+  { name: "lane_restore_project", description: "Open visible terminal windows that resume existing offline conversations for other lanes in the current lane's project. Call only when the user explicitly asks to reopen lanes. Omit lanes to consider every lane in the project; provide lanes to restore only that subset.", mutating: true },
 ];
 
 export const LANE_ROUTER_INSTRUCTIONS = `Use lane_directory to inspect roles before proposing a topology change. ${ATTACH_CONFIRMATION} When notified, read the pending mailbox files directly, process related messages together when useful, then call lane_ack with every processed message ID.`;

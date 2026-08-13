@@ -1,6 +1,7 @@
 import type { BackendName, BindingRecord, CallerContext, MessageKind, NotificationOutcome, ReachSnapshot, ResolvedIdentity } from "./types.js";
 
 export type { NotificationOutcome, ReachSnapshot, ReachState, ResolvedIdentity } from "./types.js";
+export type RestorePresence = "online" | "offline" | "unavailable";
 
 export interface Notification {
   readonly laneAddress: string;
@@ -26,6 +27,8 @@ export interface PlatformBackend {
    * make a platform round trip and must never block.
    */
   reach(binding: BindingRecord): ReachSnapshot;
+  /** Whether an interactive client already owns this conversation for restore decisions. */
+  restorePresence(binding: BindingRecord): RestorePresence;
   /**
    * Turn what a caller claims about itself into the identity a binding is stored under. It must
    * be stable across restarts of the calling process, or a lane stops recognising the

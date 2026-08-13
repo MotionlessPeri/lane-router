@@ -14,6 +14,7 @@ export const toolArgsSchemas = {
     reply_to: text.optional(),
   }).strict(),
   lane_ack: z.object({ message_ids: z.array(text).min(1) }).strict(),
+  lane_restore_project: z.object({ lanes: z.array(text).min(1).optional() }).strict(),
 } satisfies Record<LaneToolName, z.ZodType>;
 
 export type ToolArgsMap = { [K in LaneToolName]: z.infer<(typeof toolArgsSchemas)[K]> };
