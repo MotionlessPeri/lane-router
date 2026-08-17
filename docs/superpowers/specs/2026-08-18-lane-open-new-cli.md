@@ -119,7 +119,7 @@ lane-router-lane open <project>/<lane> [--cwd <dir>] [--terminal <wt|powershell|
 
 ### 4.1 记录 Claude conversation 的工作目录
 
-`claude --resume` 必须在原项目目录运行，而 Router 今天不知道任何 conversation 的 cwd（binding 的 `startup_json` 恒为 `{}`，lifecycle hook 不转发 cwd）。改动链三步：
+官方 sessions 文档明说 `claude --resume <session-id>` 可以从任意目录运行（会跨项目搜索 session），所以 cwd 的必要性不在"找到 session"，而在让 lane 于原项目上下文中恢复——project settings、CLAUDE.md、project MCP 配置和 hooks 都挂在目录上，换目录 resume 得到的是一个上下文错位的 conversation。Router 今天不知道任何 conversation 的 cwd（binding 的 `startup_json` 恒为 `{}`，lifecycle hook 不转发 cwd）。改动链三步：
 
 1. **hook 转发**：`lifecycle-hook` 把 Claude Code hook payload 里的 `cwd` 字段一并 POST 到 `/claude/lifecycle`（该字段是文档记载的 hook 输入；实施第一步用真实 payload 核实）。
 2. **持久化**：schema 升 v3，`binding` 表加 nullable `cwd` 列（SQLite 纯 `ADD COLUMN`，无表重建）。lifecycle 报告携带 cwd 且该 conversation 有 active binding 时更新该列；conversation 尚未 attach 时忽略。attach 那个 turn 结束时的 `Stop` 事件即完成首次记录，所以任何在本功能上线后 attach 过的 lane 都有 cwd。
@@ -149,10 +149,10 @@ lane-router-lane open <project>/<lane> [--cwd <dir>] [--terminal <wt|powershell|
 
 ### 真机验证点（设计假设，实施期逐条核销）
 
-1. Claude Code hook payload 确实携带 `cwd` 字段。
-2. `--resume` 与 `--dangerously-load-development-channels` 可组合使用。
-3. `--resume` 默认保留原 session id（存在 `--fork-session` 反向 flag 佐证默认不换 id；若实测换 id，binding 对不上，`open` 设计需回炉）。
-4. resume 后 channel 重连、pending 通知自动下发的端到端行为。
+1. Claude Code hook payload 确实携带 `cwd` 字段。——已核销（2026-08-18 真机抓取：UserPromptSubmit 与 Stop payload 均带 `cwd`，值为会话启动目录）。
+2. `--resume` 与 `--dangerously-load-development-channels` 可组合使用。——文档未明说互斥，真机待验。
+3. `--resume` 默认保留原 session id。——文档面已核销（`--fork-session` 帮助原文 "create a new session ID instead of reusing the original"，官方 sessions 文档同述）；真机端到端仍在 Task 5 验证。
+4. resume 后 channel 重连、pending 通知自动下发的端到端行为。——真机待验。
 
 ## 七、范围审计
 
