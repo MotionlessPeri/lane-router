@@ -167,6 +167,49 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 **顺带一条环境限制：** Router 启动时无条件要求一个能用的 `codex`（`main.ts` 的 `await codex.start()` 在服务器启动之前）。因此在拿不到 `codex` 的 shell 里无法用独立 data root 起一个 Router 来做端到端探针；2026-08-12 尝试过，Router 以 `Unable to fingerprint Codex executable/version` 退出。这不说明该机器没有装 codex——只说明那个 shell 解析不到它。
 
+## lane-router-lane 打开与新建
+
+**前提：** 已构建 `dist/` 且 `npm link` 已刷新；**Router process 必须运行本构建**——旧 Router 没有 `/lanes/resume-info` 端点、也不记录 cwd，此时 `open` 以 `not found` 优雅失败（2026-08-18 已实测该失败路径：无窗口、退出非零、Router 状态不变）。受控重启共享 Router 的时机由用户决定；那次重启同时解锁上文「Router 换代后既有会话」的 RPC 重解析用例。
+
+### TC-LANE-NEW: 新建 lane 全流程
+
+**目标：** `lane-router-lane new` 打开可见 terminal、以 channel 接入方式启动 Claude、bootstrap prompt 促成 attach。
+**Fixture：** 一个 scratch project 命名空间（如 `smoke/probe`），把验证残留隔离在真实项目目录之外（V1 没有 lane 删除）。
+**步骤：**
+
+1. 在目标项目目录运行 `lane-router-lane new smoke/probe --role "Scratch lane for verifying lane-router-lane."`。
+2. 观察新窗口出现（默认 Windows Terminal）；命令应等 terminal child 报告 CLI 启动后才退出 0。
+3. 新对话首次使用 development channel 可能弹确认，需人工接受。
+4. attach 完成后 `lane_directory` 应显示 `smoke/probe` gen1；该 turn 的 `Stop` 之后 `/lanes/resume-info` 的 `cwd` 应等于第 1 步的目录。
+
+**预期：** 窗口可见且 CLI 真启动；新对话按 bootstrap 接入并报告就绪、不自行推进工作；cwd 已被记录。
+**状态：** 尚未验证（等待受控 Router 重启）。
+
+### TC-LANE-OPEN: 打开已有 lane（含设计假设 2/3/4 核销）
+
+**目标：** 关闭 lane 的 terminal 后，`lane-router-lane open` 恢复原 conversation。同时核销设计稿三条假设：`--resume` 与 `--dangerously-load-development-channels` 组合可用（假设 2）；resume 保留原 session id（假设 3，判据：channel 以同一 conversation id 重连、binding 不变、reach 离开 `no_channel`）；channel 重连后 pending 通知自动下发（假设 4）。
+**步骤：**
+
+1. 结束 TC-LANE-NEW 留下窗口的进程树，确认 resume-info 的 reach 变为 `no_channel`。
+2. 从另一条已绑定 lane 向 `smoke/probe` 发送一条 normal 消息，确认它停在 pending。
+3. 运行 `lane-router-lane open smoke/probe`，观察新窗口出现、原对话历史完整恢复。
+4. 核对 resume-info：同一 conversation id、generation 不变、reach 离开 `no_channel`。
+5. 观察该 lane 在无人输入时收到通知、读取并 ack 第 2 步的消息（mailbox 文件 pending → resolved）。
+
+**预期：** 五步全部成立。第 4 步若 conversation id 变化 = 假设 3 破产，`open` 设计需回炉并停止上报。
+**状态：** 尚未验证（同上；第 2、5 步需要一条有 active binding 的发送方 lane，可由用户的 coordinator lane 承担）。
+
+### TC-LANE-TERMINAL: --terminal 三档
+
+**目标：** `wt` / `powershell` / `cmd` 三档各真开一窗。复用同一条 scratch lane：关窗后 `open --terminal <档>` 依次验证，不必新建三条 lane。
+**判据：** 本机已把系统默认宿主设为 Windows Terminal，`powershell` / `cmd` 档的窗口也会由 WT 承载——看 shell 进程（claude 的进程链上游是 powershell.exe 还是 cmd.exe），不看窗口外观。`cmd` 档还需确认 `/k` 的引号剥离没有拆坏命令（设计已知风险点：`Start-Process` 给含空格参数外包引号后由 cmd 的旧式剥离规则还原）。
+**状态：** 尚未验证。
+
+### TC-LANE-REFUSE: 拒绝语义
+
+**目标：** lane 在线时 `open` 拒绝（already online）；不存在的 lane 提示走 `new`；`--backend codex` 与 codex binding 报暂不支持；无记录 cwd 时要求显式 `--cwd`。
+**状态：** 参数与拒绝分支已有自动测试覆盖；在线拒绝的真机路径随 TC-LANE-OPEN 顺带验证。
+
 ## 当前记录
 
 ### 自动轮换的可见 Windows terminal
@@ -179,7 +222,7 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 1. 在旧 conversation 中说明同地址接替并取得用户明确确认。
 2. 从正确 worktree 调用 `lane-router-rotate codex <lane-address> --handoff-file <absolute-path>`。
-3. 观察是否出现新的可见 PowerShell；检查进程链是否为 `PowerShell → rotation-terminal-child → lane-router-codex → Codex`。
+3. 观察是否出现新的可见 PowerShell；检查进程链是否为 `PowerShell → terminal-child → lane-router-codex → Codex`（2026-08-18 起 terminal child 由 rotation 专用泛化为共享模块，旧名 `rotation-terminal-child`）。
 4. 在新 conversation 完成 attach 后，核对 lane 地址、角色说明、cwd、generation 和 pending mailbox；旧 terminal 由用户自行关闭。
 
 **预期：** 新 PowerShell 可见且不会在 launcher 返回后立即退出；Codex 从调用时 cwd 启动。只有新 conversation 报告 attach 成功后，才能把轮换视为完成。
