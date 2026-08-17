@@ -98,7 +98,8 @@ describe("router schema migration 1 to 2", () => {
     const path = writeVersion1Database();
     const database = openRouterDatabase(path);
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(2);
+      // Opening always lands on the current version; the subject here is the value mapping.
+      expect(database.pragma("user_version", { simple: true })).toBe(3);
 
       const rows = database.prepare("SELECT id,notification_state FROM message ORDER BY id").all() as Array<{ id: string; notification_state: string }>;
       expect(rows).toEqual([
@@ -165,5 +166,58 @@ describe("router schema migration 1 to 2", () => {
     raw.pragma("user_version = 99");
     raw.close();
     expect(() => openRouterDatabase(path)).toThrow(/not supported/iu);
+  });
+});
+
+// Version 2 differs from version 1 only in the widened notification_state vocabulary; deriving the
+// pinned copy from the pinned version 1 keeps both historical, without importing from schema.ts.
+const SCHEMA_V2_SQL = SCHEMA_V1_SQL.replace(
+  "CHECK (notification_state IN ('pending','notified'))",
+  "CHECK (notification_state IN ('pending','sent','deferred','no_channel','send_failed'))",
+);
+
+function writeVersion2Database(): string {
+  const root = mkdtempSync(join(tmpdir(), "lane-router-migration-"));
+  roots.push(root);
+  const path = join(root, "router.sqlite");
+  const database = new Database(path);
+  database.exec(SCHEMA_V2_SQL);
+  database.pragma("user_version = 2");
+  database.prepare("INSERT INTO lane(address,project,role_description,created_at,updated_at) VALUES(?,?,?,?,?)")
+    .run("alpha/design", "alpha", "design", 1, 1);
+  database.prepare(`
+    INSERT INTO binding(id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at)
+    VALUES('binding-1','alpha/design','claude','session-1',1,'{}',5,NULL)
+  `).run();
+  database.close();
+  return path;
+}
+
+describe("router schema migration 2 to 3", () => {
+  it("adds a nullable cwd column and keeps the existing binding row untouched", () => {
+    const database = openRouterDatabase(writeVersion2Database());
+    try {
+      expect(database.pragma("user_version", { simple: true })).toBe(3);
+      const columns = database.pragma("table_info(binding)") as Array<{ name: string; notnull: number }>;
+      expect(columns.find((column) => column.name === "cwd")).toMatchObject({ notnull: 0 });
+      expect(database.prepare("SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd FROM binding").get())
+        .toEqual({
+          id: "binding-1", lane_address: "alpha/design", backend: "claude", conversation_id: "session-1",
+          generation: 1, startup_json: "{}", active_at: 5, inactive_at: null, cwd: null,
+        });
+      expect(() => database.prepare("UPDATE binding SET cwd='E:\\\\project' WHERE id='binding-1'").run()).not.toThrow();
+    } finally { database.close(); }
+  });
+
+  it("migrates a version 1 database through 2 all the way to 3", () => {
+    const database = openRouterDatabase(writeVersion1Database());
+    try {
+      expect(database.pragma("user_version", { simple: true })).toBe(3);
+      const columns = database.pragma("table_info(binding)") as Array<{ name: string }>;
+      expect(columns.map((column) => column.name)).toContain("cwd");
+      // The version 1 mapping must still have happened on the way through.
+      expect(database.prepare("SELECT notification_state FROM message WHERE id='m-notified'").get())
+        .toEqual({ notification_state: "sent" });
+    } finally { database.close(); }
   });
 });

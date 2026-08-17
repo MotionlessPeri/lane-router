@@ -225,6 +225,8 @@ export class LocalRouterServer {
     readonly host?: string;
     readonly port?: number;
     readonly claude?: ClaudeChannelHub;
+    /** Receives the working directory a lifecycle report carries for a conversation. */
+    readonly recordCwd?: (conversationId: string, cwd: string) => void;
   }) {
     this.host = options.host ?? "127.0.0.1";
     if (this.host !== "127.0.0.1" && this.host !== "::1") throw new Error("Router internal server must bind to loopback");
@@ -266,9 +268,16 @@ export class LocalRouterServer {
     try {
       if (request.method === "GET" && request.url === "/health") return json(response, 200, this.discovery());
       if (request.method === "POST" && request.url === "/claude/lifecycle") {
-        const body = await readJson(request) as { conversationId?: unknown; event?: unknown; joinKey?: unknown };
-        const accepted = typeof body.conversationId === "string" && (body.event === "Stop" || body.event === "UserPromptSubmit")
-          ? this.claude.reportLifecycle(body.conversationId, body.event, typeof body.joinKey === "string" ? body.joinKey : undefined) : false;
+        const body = await readJson(request) as { conversationId?: unknown; event?: unknown; joinKey?: unknown; cwd?: unknown };
+        const valid = typeof body.conversationId === "string" && (body.event === "Stop" || body.event === "UserPromptSubmit");
+        // The cwd is a fact about the conversation, not about the channel: it is recorded even
+        // when no channel is currently connected, which is exactly the state a closed terminal
+        // leaves behind and the state `open` later needs the directory for.
+        if (valid && typeof body.cwd === "string" && body.cwd.length > 0) {
+          this.options.recordCwd?.(body.conversationId as string, body.cwd);
+        }
+        const accepted = valid
+          ? this.claude.reportLifecycle(body.conversationId as string, body.event as "Stop" | "UserPromptSubmit", typeof body.joinKey === "string" ? body.joinKey : undefined) : false;
         return json(response, accepted ? 200 : 400, { accepted });
       }
       if (request.method !== "POST" || request.url !== "/rpc") return json(response, 404, { error: "not found" });

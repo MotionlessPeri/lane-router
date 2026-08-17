@@ -45,7 +45,10 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     const pump = new NotificationPump(state, mailbox, backends);
     const core = new RouterCore({ state, mailbox, backends, pump, newId: () => randomUUID(), now: Date.now });
     tools = new ToolService(core);
-    server = new LocalRouterServer({ tools, codex, claude: claudeHub, instanceId: randomUUID() });
+    server = new LocalRouterServer({
+      tools, codex, claude: claudeHub, instanceId: randomUUID(),
+      recordCwd: (conversationId, cwd) => state.updateBindingCwd("claude", conversationId, cwd),
+    });
     mailbox.reconcile(state);
     const discovery = await server.start();
     writeDiscovery(discoveryPath, discovery);
