@@ -227,6 +227,8 @@ export class LocalRouterServer {
     readonly claude?: ClaudeChannelHub;
     /** Receives the working directory a lifecycle report carries for a conversation. */
     readonly recordCwd?: (conversationId: string, cwd: string) => void;
+    /** Answers what a lane needs to be resumed; serves the lane launcher, not conversation tools. */
+    readonly resumeInfo?: (address: string) => unknown;
   }) {
     this.host = options.host ?? "127.0.0.1";
     if (this.host !== "127.0.0.1" && this.host !== "::1") throw new Error("Router internal server must bind to loopback");
@@ -267,6 +269,11 @@ export class LocalRouterServer {
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
       if (request.method === "GET" && request.url === "/health") return json(response, 200, this.discovery());
+      if (request.method === "GET" && request.url?.startsWith("/lanes/resume-info") && this.options.resumeInfo) {
+        const address = new URL(request.url, "http://127.0.0.1").searchParams.get("address");
+        if (!address) return json(response, 400, { error: "address is required" });
+        return json(response, 200, { result: this.options.resumeInfo(address) });
+      }
       if (request.method === "POST" && request.url === "/claude/lifecycle") {
         const body = await readJson(request) as { conversationId?: unknown; event?: unknown; joinKey?: unknown; cwd?: unknown };
         const valid = typeof body.conversationId === "string" && (body.event === "Stop" || body.event === "UserPromptSubmit");

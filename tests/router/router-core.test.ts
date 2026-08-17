@@ -345,3 +345,30 @@ describe("RouterCore attach when the lane is held by a busy conversation", () =>
     } finally { x.database.close(); }
   });
 });
+
+describe("resume info", () => {
+  it("reports the facts a resume needs for a bound lane", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("thread-1"), { address: "alpha/design", roleDescription: "design" });
+      x.state.updateBindingCwd("codex", "thread-1", "E:\project");
+      expect(x.core.resumeInfo("alpha/design")).toEqual({
+        state: "bound", backend: "codex", conversationId: "thread-1", cwd: "E:\project",
+        generation: 1, reach: x.backend.reachState,
+      });
+    } finally { x.database.close(); }
+  });
+
+  it("distinguishes a missing lane from an unbound one and rejects malformed addresses", async () => {
+    const x = setup();
+    try {
+      expect(x.core.resumeInfo("alpha/ghost")).toEqual({ state: "missing" });
+      await x.core.attachCurrent(caller("thread-1"), { address: "alpha/design", roleDescription: "design" });
+      const binding = x.state.activeBindingForLane("alpha/design");
+      if (!binding) throw new Error("expected an active binding");
+      x.state.deactivateBinding(binding.id, binding.generation, 50);
+      expect(x.core.resumeInfo("alpha/design")).toEqual({ state: "unbound" });
+      expect(() => x.core.resumeInfo("not-an-address")).toThrow(/invalid lane address/iu);
+    } finally { x.database.close(); }
+  });
+});

@@ -302,3 +302,24 @@ test("hands a lifecycle-reported cwd to the recorder even when no channel is con
     expect(recordCwd).toHaveBeenCalledTimes(1);
   } finally { await server.close(); }
 });
+
+test("serves resume info for the lane launcher on loopback", async () => {
+  const info = { state: "bound", backend: "claude", conversationId: "session-1", cwd: "E:\project", generation: 2, reach: null };
+  const resumeInfo = vi.fn(() => info);
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x", resumeInfo });
+  const discovery = await server.start();
+  try {
+    const response = await fetch(`${discovery.url}/lanes/resume-info?address=${encodeURIComponent("alpha/design")}`);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ result: info });
+    expect(resumeInfo).toHaveBeenCalledExactlyOnceWith("alpha/design");
+
+    const missingAddress = await fetch(`${discovery.url}/lanes/resume-info`);
+    expect(missingAddress.status).toBe(400);
+
+    resumeInfo.mockImplementation(() => { throw new Error("Invalid lane address"); });
+    const invalid = await fetch(`${discovery.url}/lanes/resume-info?address=bad`);
+    expect(invalid.status).toBe(400);
+    await expect(invalid.json()).resolves.toEqual({ error: "Invalid lane address" });
+  } finally { await server.close(); }
+});

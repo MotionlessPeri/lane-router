@@ -30,6 +30,24 @@ export interface DirectoryEntry {
   readonly reach: ReachSnapshot | null;
 }
 
+/**
+ * The facts the lane launcher needs to reopen a closed lane. All three shapes are answers, not
+ * errors: a missing lane and an unbound lane are things the launcher tells its caller apart.
+ * Policy — refusing an online lane, an unsupported backend, a missing cwd — stays with the
+ * launcher; this only reports what the Router knows.
+ */
+export type ResumeInfo =
+  | { readonly state: "missing" }
+  | { readonly state: "unbound" }
+  | {
+      readonly state: "bound";
+      readonly backend: "claude" | "codex";
+      readonly conversationId: string;
+      readonly cwd: string | null;
+      readonly generation: number;
+      readonly reach: ReachSnapshot | null;
+    };
+
 interface RouterCoreDependencies {
   readonly state: RouterStateStore;
   readonly mailbox: MailboxStore;
@@ -60,6 +78,24 @@ export class RouterCore {
         reach: backend?.reach(binding) ?? null,
       };
     });
+  }
+
+  resumeInfo(address: string): ResumeInfo {
+    const parsed = parseLaneAddress(address);
+    if (!this.dependencies.state.lane(parsed.address)) return { state: "missing" };
+    const binding = this.dependencies.state.activeBindingForLane(parsed.address);
+    if (!binding) return { state: "unbound" };
+    // find, not require, for the same reason as directory(): a query must not throw over a
+    // backend this Router does not run. No backend means no reachability claim at all.
+    const backend = this.dependencies.backends.find(binding.backend);
+    return {
+      state: "bound",
+      backend: binding.backend,
+      conversationId: binding.conversationId,
+      cwd: binding.cwd,
+      generation: binding.generation,
+      reach: backend?.reach(binding) ?? null,
+    };
   }
 
   async attachCurrent(context: CallerContext, input: { address: string; roleDescription?: string }, signal?: AbortSignal) {

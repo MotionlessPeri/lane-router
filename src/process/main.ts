@@ -48,6 +48,7 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     server = new LocalRouterServer({
       tools, codex, claude: claudeHub, instanceId: randomUUID(),
       recordCwd: (conversationId, cwd) => state.updateBindingCwd("claude", conversationId, cwd),
+      resumeInfo: (address) => core.resumeInfo(address),
     });
     mailbox.reconcile(state);
     const discovery = await server.start();
