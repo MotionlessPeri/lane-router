@@ -135,7 +135,7 @@ lane-router-lane open <project>/<lane> [--cwd <dir>] [--terminal <wt|powershell|
 |---|---|
 | `new` 且地址已存在 | 报错，提示用 `open` |
 | `open` 且 lane 不存在 | 报错，提示用 `new` |
-| `open` 且 lane 无 active binding | 报错，提示走 `new` 或轮换；**不**自动升级成接替（接替有 handoff 闭环，不该被"打开"顺手触发） |
+| `open` 且 lane 无 active binding | 报错，提示走轮换流程接管；**不**自动升级成接替（接替有 handoff 闭环，不该被"打开"顺手触发）。不提示 `new`——lane 已存在，`new` 会因地址占用而拒绝 |
 | `open` 且 reach 在线（channel 连接打开） | 拒绝："lane 已在线" |
 | `open` 且 backend 是 codex / `new --backend codex` | 报错："codex 暂不支持"（`lane-router-codex resume` 可手动使用） |
 | `open` 且 Router 无 cwd 记录、未传 `--cwd` | 报错，要求显式 `--cwd` |
