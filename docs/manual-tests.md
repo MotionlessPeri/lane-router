@@ -206,6 +206,8 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 **引号机制（2026-08-18 已实测钉死）：** PowerShell 5.1 对 `-ArgumentList` 原样拼接、**不加任何引号**；cmd 的 `/C|/K` 规则会剥掉命令的第一个和最后一个引号字符——所以 child 命令自带一层牺牲性外层引号（`""%A%" "%B%""`），wt 档的 `-d` 目录也自带引号。用 `/c` 等价替换 `/k` 走完整生产链路（`Start-Process` → cmd → node 写 marker 记录 argv）四象限验证：未包裹字符串在无空格/含空格路径下 child 都起不来，包裹后两种路径 argv 均正确。剩余真机项只有 `/k` 窗口驻留形态本身。
 **状态：** 引号机制已实测；`wt` 档已于 2026-08-18 真机验证（显式 `--terminal wt` 开 mocap 6 窗 + 不传 flag 的默认档开 RetargetStudy 4 窗，共 10 个 Windows Terminal 窗全部成功启动 claude 并连回 channel）。`powershell` / `cmd` 档真开窗尚未验证（含 `/k` 驻留窗口形态）。
 
+**会话命名 + 按项目聚窗（2026-08-18 首次真机验证，用户眼校确认）：** `open` 打开 `of_retarget_maya` 两条 lane，得到一个以项目命名的 wt 窗口、两个选项卡，标签与会话名均显示 `of_retarget_maya/<lane> gen2`；channel 以原 conversation id 重连、generation 不变。覆盖 `--name`（含 `--resume` 改名路径）与 `wt -w` 聚窗两个特性的 open 路径；new / rotate / restore 路径的命名聚窗随其各自首次真机使用顺带验证。
+
 ### TC-LANE-REFUSE: 拒绝语义
 
 **目标：** lane 在线时 `open` 拒绝（already online）；不存在的 lane 提示走 `new`；`--backend codex` 与 codex binding 报暂不支持；无记录 cwd 时要求显式 `--cwd`。
