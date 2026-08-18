@@ -274,7 +274,9 @@ export class LocalRouterServer {
         if (url.pathname === "/lanes/resume-info") {
           const address = url.searchParams.get("address");
           if (!address) return json(response, 400, { error: "address is required" });
-          return json(response, 200, { result: this.options.resumeInfo(address) });
+          // Awaited, not passed through: the resolver is async (it may consult the session
+          // locator), and serializing the pending promise answered `{}` on the real machine.
+          return json(response, 200, { result: await this.options.resumeInfo(address) });
         }
       }
       if (request.method === "POST" && request.url === "/claude/lifecycle") {
