@@ -14,6 +14,8 @@ export interface LaneRestoreResult {
 
 export interface LaneRestorePort {
   restore(binding: BindingRecord): Promise<LaneRestoreResult>;
+  /** Recovers a conversation's directory from platform records; null when nothing is found. */
+  resolveCwd?(binding: BindingRecord): Promise<string | null>;
 }
 
 export class RouterError extends Error {
@@ -92,7 +94,7 @@ export class RouterCore {
     });
   }
 
-  resumeInfo(address: string): ResumeInfo {
+  async resumeInfo(address: string): Promise<ResumeInfo> {
     const parsed = parseLaneAddress(address);
     if (!this.dependencies.state.lane(parsed.address)) return { state: "missing" };
     const binding = this.dependencies.state.activeBindingForLane(parsed.address);
@@ -104,10 +106,22 @@ export class RouterCore {
       state: "bound",
       backend: binding.backend,
       conversationId: binding.conversationId,
-      cwd: binding.cwd,
+      cwd: await this.resolveBindingCwd(binding),
       generation: binding.generation,
       reach: backend?.reach(binding) ?? null,
     };
+  }
+
+  /**
+   * The cwd column is the single home for a conversation's directory; `startup.cwd` is only read
+   * as a legacy fallback for bindings written by builds that stored it there. When neither holds
+   * a value, the restorer's resolver may still recover one from the platform's own records — a
+   * miss stays an honest null, never a guess.
+   */
+  private async resolveBindingCwd(binding: BindingRecord): Promise<string | null> {
+    if (binding.cwd !== null) return binding.cwd;
+    if (typeof binding.startup.cwd === "string") return binding.startup.cwd;
+    return await this.dependencies.restore?.resolveCwd?.(binding) ?? null;
   }
 
   async attachCurrent(context: CallerContext, input: { address: string; roleDescription?: string }, signal?: AbortSignal) {
@@ -124,7 +138,7 @@ export class RouterCore {
       if (input.roleDescription !== undefined && input.roleDescription !== state.requireLane(parsed.address).roleDescription) {
         state.updateLaneRole(parsed.address, input.roleDescription, this.dependencies.now());
       }
-      return this.bootstrap(state.requireLane(parsed.address), this.refreshStartup(conversationBinding, context), identity);
+      return this.bootstrap(state.requireLane(parsed.address), this.recordCallerCwd(conversationBinding, context), identity);
     }
 
     let lane = state.lane(parsed.address);
@@ -154,7 +168,7 @@ export class RouterCore {
         backend: context.backend,
         conversationId: identity.value,
         generation,
-        startup: context.cwd === undefined ? {} : { cwd: context.cwd },
+        startup: {},
         roleDescription: input.roleDescription,
         now: this.dependencies.now(),
       });
@@ -165,6 +179,7 @@ export class RouterCore {
       throw error;
     }
     if (!binding) throw new RouterError("BINDING_CHANGED", "The lane binding changed while attach was waiting");
+    binding = this.recordCallerCwd(binding, context);
     // The bootstrap names the pending directory, but a lane that takes over a backlog would
     // otherwise wait for the next incoming message before anything offers it a turn.
     await this.dependencies.pump.notifyLane(parsed.address);
@@ -223,7 +238,7 @@ export class RouterCore {
   private requireCallerBinding(context: CallerContext) {
     const binding = this.dependencies.state.activeBindingForConversation(context.backend, this.identity(context).value);
     if (!binding) throw new RouterError("NOT_ATTACHED", "The current conversation is not attached to a lane");
-    return this.refreshStartup(binding, context);
+    return this.recordCallerCwd(binding, context);
   }
 
   async restoreProject(context: CallerContext, input: { lanes?: readonly string[] }) {
@@ -266,9 +281,11 @@ export class RouterCore {
     return { project: callerLane.project, results };
   }
 
-  private refreshStartup(binding: NonNullable<ReturnType<RouterStateStore["activeBindingForLane"]>>, context: CallerContext) {
-    if (context.cwd === undefined || binding.startup.cwd === context.cwd) return binding;
-    return this.dependencies.state.updateBindingStartup(binding.id, { ...binding.startup, cwd: context.cwd });
+  /** The caller's reported cwd is a fact about its conversation; the cwd column is its home. */
+  private recordCallerCwd(binding: NonNullable<ReturnType<RouterStateStore["activeBindingForLane"]>>, context: CallerContext) {
+    if (context.cwd === undefined || binding.cwd === context.cwd) return binding;
+    this.dependencies.state.updateBindingCwd(binding.backend, binding.conversationId, context.cwd);
+    return this.dependencies.state.requireBinding(binding.id);
   }
 
   private bootstrap(lane: LaneRecord, binding: NonNullable<ReturnType<RouterStateStore["activeBindingForLane"]>>, identity: ResolvedIdentity) {

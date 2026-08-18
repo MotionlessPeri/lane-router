@@ -44,7 +44,7 @@ export class ConversationRestorer {
     try {
       if (presence === "online") return this.release(binding.id, { status: "skipped_online" });
       if (presence === "unavailable") return this.release(binding.id, failure("backend_unavailable", `${binding.backend} backend is unavailable`));
-      const cwd = await this.resolveCwd(binding);
+      const cwd = await this.requireCwd(binding);
       const request = {
         mode: "resume", backend: binding.backend, conversationId: binding.conversationId, cwd,
         statusPath: newStatusPath(this.dependencies.dataRoot),
@@ -62,12 +62,23 @@ export class ConversationRestorer {
     }
   }
 
-  private async resolveCwd(binding: BindingRecord): Promise<string> {
-    const stored = binding.startup.cwd;
-    if (stored !== undefined) return requireDirectory(stored, binding.laneAddress);
+  /**
+   * The null-on-miss face of the resolver, for callers that report facts (resume-info) rather
+   * than launch: a lookup failure there is an honest "unknown", not a failed restore.
+   */
+  async resolveCwd(binding: BindingRecord): Promise<string | null> {
+    try { return await this.requireCwd(binding); } catch { return null; }
+  }
+
+  private async requireCwd(binding: BindingRecord): Promise<string> {
+    // The cwd column is the single home; startup.cwd is only read as a legacy fallback for
+    // bindings written by builds that stored it there.
+    if (binding.cwd !== null) return requireDirectory(binding.cwd, binding.laneAddress);
+    const legacy = binding.startup.cwd;
+    if (legacy !== undefined) return requireDirectory(legacy, binding.laneAddress);
     if (binding.backend === "codex") return requireDirectory(this.dependencies.fallbackCwd, binding.laneAddress);
     const cwd = await this.dependencies.claudeSessions.locate(binding.conversationId);
-    this.dependencies.state.updateBindingStartup(binding.id, { ...binding.startup, cwd });
+    this.dependencies.state.updateBindingCwd(binding.backend, binding.conversationId, cwd);
     return cwd;
   }
 

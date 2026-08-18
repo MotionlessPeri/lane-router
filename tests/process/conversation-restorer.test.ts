@@ -63,7 +63,19 @@ test("recovers and backfills a legacy Claude cwd without rotating the binding", 
   try {
     await expect(x.restorer.restore(x.binding)).resolves.toEqual({ status: "launch_requested" });
     expect(x.locate).toHaveBeenCalledWith(x.binding.conversationId);
-    expect(x.state.activeBindingForLane("alpha/design")).toMatchObject({ id: x.binding.id, generation: 4, startup: { cwd: x.fallbackCwd } });
+    // The backfill lands in the cwd column — the single home — not in startup metadata.
+    expect(x.state.activeBindingForLane("alpha/design")).toMatchObject({ id: x.binding.id, generation: 4, cwd: x.fallbackCwd });
+  } finally { x.database.close(); }
+});
+
+test("prefers the recorded cwd column over legacy startup metadata", async () => {
+  const x = setup("codex", { cwd: "D:\\stale-legacy" });
+  try {
+    x.state.updateBindingCwd("codex", "thread-1", x.fallbackCwd);
+    const fresh = x.state.activeBindingForLane("alpha/design");
+    if (!fresh) throw new Error("expected an active binding");
+    await expect(x.restorer.restore(fresh)).resolves.toEqual({ status: "launch_requested" });
+    expect(x.launch).toHaveBeenCalledWith(expect.objectContaining({ cwd: x.fallbackCwd }), "alpha/design gen4");
   } finally { x.database.close(); }
 });
 

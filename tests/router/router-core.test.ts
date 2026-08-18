@@ -57,13 +57,14 @@ function setup() {
   let now = 100;
   const pump = new NotificationPump(state, mailbox, backends);
   const restore = vi.fn(async () => ({ status: "launch_requested" as const }));
+  const resolveCwd = vi.fn(async (): Promise<string | null> => null);
   const core = new RouterCore({
     state, mailbox, backends, pump,
-    restore: { restore },
+    restore: { restore, resolveCwd },
     newId: (kind) => `${kind}-${++sequence}`,
     now: () => ++now,
   });
-  return { root, database, state, mailbox, backend, pump, core, restore };
+  return { root, database, state, mailbox, backend, pump, core, restore, resolveCwd };
 }
 
 /** Rejects with the signal's reason, so a fake wait can be given up on the way a real one is. */
@@ -223,7 +224,9 @@ describe("RouterCore directory and attach", () => {
       const first = await x.core.attachCurrent({ ...caller("thread-a"), cwd: "D:\\project-a" }, {
         address: "alpha/design", roleDescription: "Design.",
       });
-      expect(first.binding.startup).toEqual({ cwd: "D:\\project-a" });
+      // The cwd column is the single home for a conversation's directory; startup stays free of it.
+      expect(first.binding.cwd).toBe("D:\\project-a");
+      expect(first.binding.startup).toEqual({});
 
       x.state.createLane({ address: "alpha/target", project: "alpha", roleDescription: "Target.", now: 1 });
       await x.core.send({ ...caller("thread-a", "send:refresh"), cwd: "D:\\project-b" }, {
@@ -231,7 +234,7 @@ describe("RouterCore directory and attach", () => {
       });
 
       expect(x.state.activeBindingForLane("alpha/design")).toMatchObject({
-        id: first.binding.id, generation: first.binding.generation, startup: { cwd: "D:\\project-b" },
+        id: first.binding.id, generation: first.binding.generation, cwd: "D:\\project-b",
       });
     } finally { x.database.close(); }
   });
@@ -430,7 +433,7 @@ describe("resume info", () => {
     try {
       await x.core.attachCurrent(caller("thread-1"), { address: "alpha/design", roleDescription: "design" });
       x.state.updateBindingCwd("codex", "thread-1", "E:\\project");
-      expect(x.core.resumeInfo("alpha/design")).toEqual({
+      await expect(x.core.resumeInfo("alpha/design")).resolves.toEqual({
         state: "bound", backend: "codex", conversationId: "thread-1", cwd: "E:\\project",
         generation: 1, reach: x.backend.reachState,
       });
@@ -440,13 +443,36 @@ describe("resume info", () => {
   it("distinguishes a missing lane from an unbound one and rejects malformed addresses", async () => {
     const x = setup();
     try {
-      expect(x.core.resumeInfo("alpha/ghost")).toEqual({ state: "missing" });
+      await expect(x.core.resumeInfo("alpha/ghost")).resolves.toEqual({ state: "missing" });
       await x.core.attachCurrent(caller("thread-1"), { address: "alpha/design", roleDescription: "design" });
       const binding = x.state.activeBindingForLane("alpha/design");
       if (!binding) throw new Error("expected an active binding");
       x.state.deactivateBinding(binding.id, binding.generation, 50);
-      expect(x.core.resumeInfo("alpha/design")).toEqual({ state: "unbound" });
-      expect(() => x.core.resumeInfo("not-an-address")).toThrow(/invalid lane address/iu);
+      await expect(x.core.resumeInfo("alpha/design")).resolves.toEqual({ state: "unbound" });
+      await expect(x.core.resumeInfo("not-an-address")).rejects.toThrow(/invalid lane address/iu);
+    } finally { x.database.close(); }
+  });
+
+  it("falls back to legacy startup metadata and then to the restorer's resolver", async () => {
+    const x = setup();
+    try {
+      x.state.createLane({ address: "alpha/legacy", project: "alpha", roleDescription: "legacy", now: 1 });
+      x.state.createBinding({
+        id: "binding-legacy", laneAddress: "alpha/legacy", backend: "codex",
+        conversationId: "thread-legacy", generation: 2, startup: { cwd: "D:\\written-by-old-build" }, now: 2,
+      });
+      await expect(x.core.resumeInfo("alpha/legacy")).resolves.toMatchObject({ cwd: "D:\\written-by-old-build" });
+
+      x.state.createLane({ address: "alpha/blank", project: "alpha", roleDescription: "blank", now: 3 });
+      x.state.createBinding({
+        id: "binding-blank", laneAddress: "alpha/blank", backend: "codex",
+        conversationId: "thread-blank", generation: 1, startup: {}, now: 4,
+      });
+      x.resolveCwd.mockResolvedValueOnce("E:\\located");
+      await expect(x.core.resumeInfo("alpha/blank")).resolves.toMatchObject({ cwd: "E:\\located" });
+      // A resolver that finds nothing leaves the fact honest: null, never a guess.
+      x.resolveCwd.mockResolvedValueOnce(null);
+      await expect(x.core.resumeInfo("alpha/blank")).resolves.toMatchObject({ cwd: null });
     } finally { x.database.close(); }
   });
 });
