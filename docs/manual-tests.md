@@ -163,7 +163,7 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 **同时会被这一步验掉的：** 通知路径不受影响（通道本来就会跟过去），所以第 3 步之后从另一条 lane 发一条消息应当照常送达。
 
-**尚未验证。** 2026-08-12 实现当天没有跑这条：当时另外 10 条 lane 全部运行构建之前的代码，停 Router 会把它们一起打断、需要再做一轮 11 条的轮换。这条用例要留到所有会话都换到新代码之后、或一个可以接受集体中断的时刻再做。在那之前，本修复的证据止于自动测试与变异检验，**不得当作真实链路已通过**。
+**已于 2026-08-18 验证。** 借 lane open/new 真机验收的受控重启完成：一条构建后新起的真实 Claude 会话在 Router 两次被替换（pid 27528 → 40724 → 5836，`discovery.json` 的 url 每次变化）后，同一会话的 `lane_directory` 直接成功返回，无需重启或轮换该会话；期间 6 条在线 lane（均为当日新起会话）保持可用。原记录保留供背景——2026-08-12 实现当天没有跑这条：当时另外 10 条 lane 全部运行构建之前的代码，停 Router 会把它们一起打断。
 
 **顺带一条环境限制：** Router 启动时无条件要求一个能用的 `codex`（`main.ts` 的 `await codex.start()` 在服务器启动之前）。因此在拿不到 `codex` 的 shell 里无法用独立 data root 起一个 Router 来做端到端探针；2026-08-12 尝试过，Router 以 `Unable to fingerprint Codex executable/version` 退出。这不说明该机器没有装 codex——只说明那个 shell 解析不到它。
 
@@ -197,14 +197,14 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 5. 观察该 lane 在无人输入时收到通知、读取并 ack 第 2 步的消息（mailbox 文件 pending → resolved）。
 
 **预期：** 五步全部成立。第 4 步若 conversation id 变化 = 假设 3 破产，`open` 设计需回炉并停止上报。
-**状态：** 尚未验证（同上；第 2、5 步需要一条有 active binding 的发送方 lane，可由用户的 coordinator lane 承担）。
+**状态：** 主体已于 2026-08-18 验证——受控重启后（生产库真机迁 v3，17 lanes / 1255 messages 无损），用 `lane-router-lane open --terminal wt` 恢复 mocap 项目全部 6 条真实 lane：每条退出 0、channel 以原 conversation id 重连（reach no_channel → unconfirmed）、generation 不变 → **假设 2、3 核销**；6 条 binding 均无 cwd 记录，全部由 claude session locator 从会话档案解析出 `H:\xd_projects_h\neuralsolver_app` 并回填。对在线 lane 重复 open 被拒（already online、退出 1、不开窗）。真机顺带抓出并修复两处缺陷：resume-info handler 未 await async 解析器（序列化出 `{}`）、`wtOnPath` 的 existsSync 看不见 Store app execution alias（stat EACCES / lstat ok）。**仍未验证：第 2、5 步（pending 消息在恢复后自动重发），需要一条有 binding 的发送方 lane 配合。**
 
 ### TC-LANE-TERMINAL: --terminal 三档
 
 **目标：** `wt` / `powershell` / `cmd` 三档各真开一窗。复用同一条 scratch lane：关窗后 `open --terminal <档>` 依次验证，不必新建三条 lane。
 **判据：** 本机已把系统默认宿主设为 Windows Terminal，`powershell` / `cmd` 档的窗口也会由 WT 承载——看 shell 进程（claude 的进程链上游是 powershell.exe 还是 cmd.exe），不看窗口外观。
 **引号机制（2026-08-18 已实测钉死）：** PowerShell 5.1 对 `-ArgumentList` 原样拼接、**不加任何引号**；cmd 的 `/C|/K` 规则会剥掉命令的第一个和最后一个引号字符——所以 child 命令自带一层牺牲性外层引号（`""%A%" "%B%""`），wt 档的 `-d` 目录也自带引号。用 `/c` 等价替换 `/k` 走完整生产链路（`Start-Process` → cmd → node 写 marker 记录 argv）四象限验证：未包裹字符串在无空格/含空格路径下 child 都起不来，包裹后两种路径 argv 均正确。剩余真机项只有 `/k` 窗口驻留形态本身。
-**状态：** 引号机制已实测；三档真开窗（含 `/k` 驻留窗口）尚未验证。
+**状态：** 引号机制已实测；`wt` 档已于 2026-08-18 真机验证（6 个 Windows Terminal 窗各自成功启动 claude 并连回 channel）。`powershell` / `cmd` 档真开窗尚未验证（含 `/k` 驻留窗口形态）。
 
 ### TC-LANE-REFUSE: 拒绝语义
 
