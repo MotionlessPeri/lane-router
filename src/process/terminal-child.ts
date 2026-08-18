@@ -14,14 +14,21 @@ export function childCommand(
 ): { executable: string; args: string[] } {
   if (request.backend === "codex") {
     // Both codex modes go through the launcher, which owns Router discovery and TUI wiring.
+    // codex has no session display-name flag, so the window keeps only the title escape below.
     return request.mode === "prompt"
       ? { executable: process.execPath, args: [join(here, "codex-launcher.js"), "--prompt", request.prompt] }
       : { executable: process.execPath, args: [join(here, "codex-launcher.js"), "resume", request.conversationId] };
   }
+  // Claude renders its session display name into the terminal title, overwriting whatever the
+  // window was opened with — so the lane address travels as that very display name. --name also
+  // works on --resume (measured 2026-08-18: the reopened session gains the new custom-title),
+  // which is what keeps a reopened lane's window and /resume picker entry legible.
+  const title = environment.LANE_ROUTER_CHILD_TITLE;
+  const name = title ? ["--name", title] : [];
   const claude = environment.CLAUDE_EXE ?? "claude";
   return request.mode === "prompt"
-    ? { executable: claude, args: ["--dangerously-load-development-channels", "server:lane", "--", request.prompt] }
-    : { executable: claude, args: ["--resume", request.conversationId, "--dangerously-load-development-channels", "server:lane"] };
+    ? { executable: claude, args: [...name, "--dangerously-load-development-channels", "server:lane", "--", request.prompt] }
+    : { executable: claude, args: [...name, "--resume", request.conversationId, "--dangerously-load-development-channels", "server:lane"] };
 }
 
 function run(): void {

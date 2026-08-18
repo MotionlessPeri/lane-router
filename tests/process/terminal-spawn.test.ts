@@ -82,6 +82,27 @@ test("builds the child command for each mode and backend", () => {
   });
 });
 
+test("names the Claude session after the lane so every window and picker entry stays legible", () => {
+  const here = join("C:", "dist", "process");
+  const titled = { LANE_ROUTER_CHILD_TITLE: "alpha/worker gen3" };
+  // Claude renders its session display name into the terminal title, overwriting whatever the
+  // window was opened with — so the lane address is handed to it as that very display name,
+  // for new conversations and reopened ones alike (--name on --resume renames the session).
+  expect(childCommand(promptRequest, { ...titled, CLAUDE_EXE: "C:/claude.exe" }, here)).toEqual({
+    executable: "C:/claude.exe",
+    args: ["--name", "alpha/worker gen3", "--dangerously-load-development-channels", "server:lane", "--", "hello"],
+  });
+  expect(childCommand(resumeRequest, titled, here)).toEqual({
+    executable: "claude",
+    args: ["--name", "alpha/worker gen3", "--resume", "4b50f153-0932-4442-840b-98a4b7593a51", "--dangerously-load-development-channels", "server:lane"],
+  });
+  // codex has no display-name flag; its branches must stay untouched by the title.
+  expect(childCommand({ ...promptRequest, backend: "codex" }, titled, here)).toEqual({
+    executable: process.execPath,
+    args: [join(here, "codex-launcher.js"), "--prompt", "hello"],
+  });
+});
+
 test("the child environment speaks the shell that will read it", () => {
   const ps = childEnvironment(promptRequest, { CLAUDE_CODE_EXECPATH: "C:/real.exe", PATH: "x" }, "title", "powershell");
   expect(ps.LANE_ROUTER_CHILD_COMMAND).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD");
