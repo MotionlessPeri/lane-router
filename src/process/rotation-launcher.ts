@@ -28,7 +28,8 @@ export async function launchRotation(args: readonly string[], dependencies: Rota
   if (args.length === 6 && args[4] !== "--terminal") throw new Error(usage);
   const terminal = args.length === 6 ? parseTerminalChoice(args[5] ?? "") : undefined;
   const backend = args[0];
-  const address = parseLaneAddress(args[1] ?? "").address;
+  const parsedAddress = parseLaneAddress(args[1] ?? "");
+  const address = parsedAddress.address;
   const dataRoot = dependencies.dataRoot ?? join(homedir(), ".lane-router");
   const handoffRoot = resolve(dataRoot, "rotation-handoffs");
   const handoffPath = args[3];
@@ -48,7 +49,7 @@ export async function launchRotation(args: readonly string[], dependencies: Rota
   const resolved = resolveTerminal(terminal, dependencies.wtAvailable ?? wtOnPath(process.env));
   const request = { mode: "prompt", backend, cwd: dependencies.cwd ?? process.cwd(), prompt, statusPath } satisfies TerminalChildRequest;
   const title = await (dependencies.terminalTitle ?? terminalTitle)(address, dataRoot);
-  const environment = childEnvironment(request, process.env, title, resolved.shell);
+  const environment = childEnvironment(request, process.env, title, resolved.shell, parsedAddress.project);
   await (dependencies.spawnTerminal ?? ((current, env) => spawnTerminal(current, env, terminalLaunchScript(resolved))))(request, environment);
   // Opening a window proves nothing, so the handoff is not retired until the successor itself
   // reports that its CLI started. Retiring on the strength of an exit code destroyed a handoff

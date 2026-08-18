@@ -38,7 +38,7 @@ test("launches an offline Codex binding and reserves it for thirty seconds", asy
     expect(x.launch).toHaveBeenCalledWith({
       mode: "resume", backend: "codex", conversationId: "thread-1", cwd: x.fallbackCwd,
       statusPath: expect.stringContaining("lane-status"),
-    }, "alpha/design gen4");
+    }, "alpha/design gen4", "alpha");
     await expect(x.restorer.restore(x.binding)).resolves.toEqual({ status: "skipped_launching" });
     x.advance(30_001);
     await expect(x.restorer.restore(x.binding)).resolves.toEqual({ status: "launch_requested" });
@@ -75,7 +75,7 @@ test("prefers the recorded cwd column over legacy startup metadata", async () =>
     const fresh = x.state.activeBindingForLane("alpha/design");
     if (!fresh) throw new Error("expected an active binding");
     await expect(x.restorer.restore(fresh)).resolves.toEqual({ status: "launch_requested" });
-    expect(x.launch).toHaveBeenCalledWith(expect.objectContaining({ cwd: x.fallbackCwd }), "alpha/design gen4");
+    expect(x.launch).toHaveBeenCalledWith(expect.objectContaining({ cwd: x.fallbackCwd }), "alpha/design gen4", "alpha");
   } finally { x.database.close(); }
 });
 

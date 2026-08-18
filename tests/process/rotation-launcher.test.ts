@@ -229,6 +229,7 @@ test("titles the window with the generation the successor is about to become", a
 
   const environment = spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
   expect(environment.LANE_ROUTER_CHILD_TITLE).toBe("alpha/design gen5");
+  expect(environment.LANE_ROUTER_CHILD_WINDOW).toBe("alpha");
   // The title reaches the terminal from the child process, not through this command line.
   expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD");
 });

@@ -73,11 +73,13 @@ function fileVisible(path: string): boolean {
 /** One Start-Process statement per shape; which shape to run was already decided in Node. */
 export function terminalLaunchScript(resolved: ResolvedTerminal): string {
   if (resolved.host === "wt") {
-    // The cwd element carries its own quotes: PowerShell 5.1 joins the argument list verbatim
-    // without adding any, so an unquoted directory containing a space reaches wt.exe as two
-    // arguments and -d breaks. wt parses its command line with CommandLineToArgvW, which folds
-    // the embedded quotes back into one argument.
-    return "Start-Process -FilePath 'wt.exe' -ArgumentList @('-d', ('\"' + $env:LANE_ROUTER_CHILD_CWD + '\"'), 'powershell.exe', '-NoExit', '-Command', $env:LANE_ROUTER_CHILD_COMMAND)";
+    // Lanes group into one Windows Terminal window per project: -w targets a window by name and
+    // creates it when it does not exist, so the first lane of a project opens the window and the
+    // rest arrive as tabs. The cwd element carries its own quotes: PowerShell 5.1 joins the
+    // argument list verbatim without adding any, so an unquoted directory containing a space
+    // reaches wt.exe as two arguments and -d breaks. wt parses its command line with
+    // CommandLineToArgvW, which folds the embedded quotes back into one argument.
+    return "Start-Process -FilePath 'wt.exe' -ArgumentList @('-w', $env:LANE_ROUTER_CHILD_WINDOW, 'new-tab', '-d', ('\"' + $env:LANE_ROUTER_CHILD_CWD + '\"'), 'powershell.exe', '-NoExit', '-Command', $env:LANE_ROUTER_CHILD_COMMAND)";
   }
   if (resolved.shell === "cmd") {
     return "Start-Process -FilePath 'cmd.exe' -ArgumentList @('/k', $env:LANE_ROUTER_CHILD_COMMAND) -WorkingDirectory $env:LANE_ROUTER_CHILD_CWD -WindowStyle Normal";
@@ -116,6 +118,7 @@ export function childEnvironment(
   source: NodeJS.ProcessEnv,
   title = "",
   shell: "powershell" | "cmd" = "powershell",
+  window = "",
 ): NodeJS.ProcessEnv {
   const executable = claudeExecutable(source);
   return {
@@ -126,6 +129,9 @@ export function childEnvironment(
     LANE_ROUTER_CHILD: resolve(dirname(fileURLToPath(import.meta.url)), "terminal-child.js"),
     LANE_ROUTER_CHILD_CWD: request.cwd,
     LANE_ROUTER_CHILD_TITLE: title,
+    // Never empty: wt would read the token after -w as the window name. Callers pass the lane's
+    // project so a project's lanes share one window; anything unnamed shares the fallback.
+    LANE_ROUTER_CHILD_WINDOW: window || "lane-router",
     // One statement, and above all no semicolon: Windows Terminal splits its own command line on
     // `;`, so a two-statement command made wt treat everything after it as a separate program to
     // launch and fail with "the system cannot find the file specified". The title is therefore

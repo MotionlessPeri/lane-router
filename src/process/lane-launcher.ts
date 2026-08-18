@@ -48,7 +48,7 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
       mode: "prompt", backend: "claude", cwd: invocation.cwd ?? dependencies.cwd ?? process.cwd(),
       prompt, statusPath: newStatusPath(dataRoot),
     } satisfies TerminalChildRequest;
-    await openTerminal(dependencies, invocation.terminal, request, invocation.address.address);
+    await openTerminal(dependencies, invocation.terminal, request, invocation.address.address, invocation.address.project);
     return;
   }
 
@@ -78,7 +78,7 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
   const request = {
     mode: "resume", backend: "claude", cwd, conversationId: info.conversationId, statusPath: newStatusPath(dataRoot),
   } satisfies TerminalChildRequest;
-  await openTerminal(dependencies, invocation.terminal, request, `${invocation.address.address} gen${info.generation}`);
+  await openTerminal(dependencies, invocation.terminal, request, `${invocation.address.address} gen${info.generation}`, invocation.address.project);
 }
 
 interface ParsedInvocation {
@@ -121,9 +121,10 @@ async function openTerminal(
   terminal: TerminalChoice | undefined,
   request: TerminalChildRequest,
   title: string,
+  window: string,
 ): Promise<void> {
   const resolved = resolveTerminal(terminal, dependencies.wtAvailable ?? wtOnPath(process.env));
-  const environment = childEnvironment(request, process.env, title, resolved.shell);
+  const environment = childEnvironment(request, process.env, title, resolved.shell, window);
   const spawn = dependencies.spawnTerminal
     ?? ((current: TerminalChildRequest, env: NodeJS.ProcessEnv) => spawnTerminal(current, env, terminalLaunchScript(resolved)));
   await spawn(request, environment);

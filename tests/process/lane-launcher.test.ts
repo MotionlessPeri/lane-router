@@ -57,6 +57,7 @@ test("new opens a terminal whose first prompt creates the lane", async () => {
   expect(request.prompt).toContain("lane_attach_current");
   expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD");
   expect(environment.LANE_ROUTER_CHILD_TITLE).toBe("alpha/worker");
+  expect(environment.LANE_ROUTER_CHILD_WINDOW).toBe("alpha");
 });
 
 test("new refuses an address that already exists and an oversized role", async () => {
@@ -86,6 +87,7 @@ test("open resumes the bound conversation in its recorded cwd", async () => {
     mode: "resume", backend: "claude", cwd: "E:\\proj", conversationId: "4b50f153-0932-4442-840b-98a4b7593a51",
   });
   expect(environment.LANE_ROUTER_CHILD_TITLE).toBe("alpha/worker gen3");
+  expect(environment.LANE_ROUTER_CHILD_WINDOW).toBe("alpha");
 });
 
 test("open refuses what must not be reopened and says what to do instead", async () => {

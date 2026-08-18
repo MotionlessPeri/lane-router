@@ -20,7 +20,7 @@ interface RestorerDependencies {
   readonly claudeSessions: Pick<ClaudeSessionLocator, "locate">;
   readonly fallbackCwd: string;
   readonly dataRoot: string;
-  readonly launch?: (request: TerminalChildRequest, title: string) => Promise<void>;
+  readonly launch?: (request: TerminalChildRequest, title: string, window: string) => Promise<void>;
   readonly now?: () => number;
 }
 
@@ -49,7 +49,11 @@ export class ConversationRestorer {
         mode: "resume", backend: binding.backend, conversationId: binding.conversationId, cwd,
         statusPath: newStatusPath(this.dependencies.dataRoot),
       } satisfies TerminalChildRequest;
-      await (this.dependencies.launch ?? launchRestoreTerminal)(request, `${binding.laneAddress} gen${binding.generation}`);
+      await (this.dependencies.launch ?? launchRestoreTerminal)(
+        request,
+        `${binding.laneAddress} gen${binding.generation}`,
+        binding.laneAddress.split("/")[0] ?? "",
+      );
       this.reservations.set(binding.id, (this.dependencies.now ?? Date.now)() + RESERVATION_MS);
       return { status: "launch_requested" };
     } catch (error) {
@@ -109,7 +113,7 @@ function failure(reason: Extract<RestoreResult, { status: "failed" }>["reason"],
  * awaited: `launch_requested` stays the weak claim the restore contract documents, and a batch
  * restore must not serialise on thirty-second waits.
  */
-async function launchRestoreTerminal(request: TerminalChildRequest, title: string): Promise<void> {
+async function launchRestoreTerminal(request: TerminalChildRequest, title: string, window: string): Promise<void> {
   const resolved = resolveTerminal(undefined, wtOnPath(process.env));
-  await spawnTerminal(request, childEnvironment(request, process.env, title, resolved.shell), terminalLaunchScript(resolved));
+  await spawnTerminal(request, childEnvironment(request, process.env, title, resolved.shell, window), terminalLaunchScript(resolved));
 }

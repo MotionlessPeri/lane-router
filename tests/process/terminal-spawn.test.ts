@@ -43,6 +43,9 @@ test("finds wt.exe by scanning PATH the way spawn would", () => {
 test("each terminal choice yields a launch script for its own host and shell", () => {
   const wt = terminalLaunchScript({ host: "wt", shell: "powershell" });
   expect(wt).toContain("wt.exe");
+  // Lanes group into one Windows Terminal window per project: the window is targeted by name,
+  // and wt creates it when it does not exist yet.
+  expect(wt).toContain("'-w', $env:LANE_ROUTER_CHILD_WINDOW, 'new-tab'");
   // The cwd element carries its own quotes: PowerShell joins the argument list verbatim, so an
   // unquoted directory with a space would reach wt.exe as two arguments and break -d.
   expect(wt).toContain("('\"' + $env:LANE_ROUTER_CHILD_CWD + '\"')");
@@ -104,7 +107,8 @@ test("names the Claude session after the lane so every window and picker entry s
 });
 
 test("the child environment speaks the shell that will read it", () => {
-  const ps = childEnvironment(promptRequest, { CLAUDE_CODE_EXECPATH: "C:/real.exe", PATH: "x" }, "title", "powershell");
+  const ps = childEnvironment(promptRequest, { CLAUDE_CODE_EXECPATH: "C:/real.exe", PATH: "x" }, "title", "powershell", "alpha");
+  expect(ps.LANE_ROUTER_CHILD_WINDOW).toBe("alpha");
   expect(ps.LANE_ROUTER_CHILD_COMMAND).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD");
   // Windows Terminal splits its command line on `;`, so the command must stay one statement.
   expect(ps.LANE_ROUTER_CHILD_COMMAND).not.toContain(";");
@@ -119,6 +123,9 @@ test("the child environment speaks the shell that will read it", () => {
   // sacrificial outer pair or the stripping lands on the real ones. Verified 2026-08-18 by
   // replaying the exact production shape against cmd.exe with plain and space-containing paths.
   const cmd = childEnvironment(promptRequest, {}, "", "cmd");
+  // A caller that names no window still yields a usable -w value; an empty string would make
+  // wt read the next token as the window name.
+  expect(cmd.LANE_ROUTER_CHILD_WINDOW).toBe("lane-router");
   expect(cmd.LANE_ROUTER_CHILD_COMMAND).toBe("\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"\"");
   expect(cmd.LANE_ROUTER_CHILD_COMMAND).not.toContain(";");
 });
