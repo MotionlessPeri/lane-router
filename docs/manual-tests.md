@@ -215,7 +215,7 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 ### TC-PROJECT-RESTORE-1：重启后从主 lane 恢复同项目原对话
 
-**目标：** 验证主 lane 调用一次 `lane_restore_project` 后，每条离线 peer lane 都在可见 PowerShell 中恢复原 conversation/session，而不是新建对话或替换 binding。
+**目标：** 验证主 lane 调用一次 `lane_restore_project` 后，每条离线 peer lane 都在可见 terminal（默认 Windows Terminal，经共享 terminal 机械件）中恢复原 conversation/session，而不是新建对话或替换 binding。
 
 **Fixture：** 同一项目至少三条 active lane，其中主 lane 已手动恢复，另有一条 Codex peer 和一条 Claude peer 已关闭；各 peer 原对话中都有可辨认的历史消息。
 

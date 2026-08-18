@@ -1,5 +1,7 @@
 # Project Lane Restore Design
 
+> **整合注记（2026-08-18）：** 与 lane open/new CLI 整合后，两处实现细节偏离本稿：conversation 的工作目录统一存 `binding.cwd` 列（`startup_json.cwd` 只作旧数据读取兜底，本稿「Startup metadata」一节按此理解）；恢复窗口经共享 terminal 机械件启动（`terminal-spawn`/`terminal-child`，带 vendor 环境剥离与 cmd/wt 引号修复，`visible-terminal`/`restore-terminal-child` 已删除）。公开契约（`lane_restore_project` 与兼容 CLI）不变。裁决记录见 `../plans/2026-08-18-integrate-restore-and-lane-cli.md`。
+
 ## Purpose
 
 After a machine restart, the user manually resumes one primary lane and asks it to reopen the other lanes in the same project. Lane Router must restore those lanes' existing Codex threads or Claude sessions in visible terminal windows. It must not create replacement conversations, change lane generations, or require the user to reopen every lane manually.
