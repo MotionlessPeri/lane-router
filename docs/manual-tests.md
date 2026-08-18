@@ -204,7 +204,7 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 **目标：** `wt` / `powershell` / `cmd` 三档各真开一窗。复用同一条 scratch lane：关窗后 `open --terminal <档>` 依次验证，不必新建三条 lane。
 **判据：** 本机已把系统默认宿主设为 Windows Terminal，`powershell` / `cmd` 档的窗口也会由 WT 承载——看 shell 进程（claude 的进程链上游是 powershell.exe 还是 cmd.exe），不看窗口外观。
 **引号机制（2026-08-18 已实测钉死）：** PowerShell 5.1 对 `-ArgumentList` 原样拼接、**不加任何引号**；cmd 的 `/C|/K` 规则会剥掉命令的第一个和最后一个引号字符——所以 child 命令自带一层牺牲性外层引号（`""%A%" "%B%""`），wt 档的 `-d` 目录也自带引号。用 `/c` 等价替换 `/k` 走完整生产链路（`Start-Process` → cmd → node 写 marker 记录 argv）四象限验证：未包裹字符串在无空格/含空格路径下 child 都起不来，包裹后两种路径 argv 均正确。剩余真机项只有 `/k` 窗口驻留形态本身。
-**状态：** 引号机制已实测；`wt` 档已于 2026-08-18 真机验证（6 个 Windows Terminal 窗各自成功启动 claude 并连回 channel）。`powershell` / `cmd` 档真开窗尚未验证（含 `/k` 驻留窗口形态）。
+**状态：** 引号机制已实测；`wt` 档已于 2026-08-18 真机验证（显式 `--terminal wt` 开 mocap 6 窗 + 不传 flag 的默认档开 RetargetStudy 4 窗，共 10 个 Windows Terminal 窗全部成功启动 claude 并连回 channel）。`powershell` / `cmd` 档真开窗尚未验证（含 `/k` 驻留窗口形态）。
 
 ### TC-LANE-REFUSE: 拒绝语义
 
