@@ -351,9 +351,9 @@ describe("resume info", () => {
     const x = setup();
     try {
       await x.core.attachCurrent(caller("thread-1"), { address: "alpha/design", roleDescription: "design" });
-      x.state.updateBindingCwd("codex", "thread-1", "E:\project");
+      x.state.updateBindingCwd("codex", "thread-1", "E:\\project");
       expect(x.core.resumeInfo("alpha/design")).toEqual({
-        state: "bound", backend: "codex", conversationId: "thread-1", cwd: "E:\project",
+        state: "bound", backend: "codex", conversationId: "thread-1", cwd: "E:\\project",
         generation: 1, reach: x.backend.reachState,
       });
     } finally { x.database.close(); }

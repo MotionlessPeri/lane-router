@@ -43,7 +43,9 @@ test("finds wt.exe by scanning PATH the way spawn would", () => {
 test("each terminal choice yields a launch script for its own host and shell", () => {
   const wt = terminalLaunchScript({ host: "wt", shell: "powershell" });
   expect(wt).toContain("wt.exe");
-  expect(wt).toContain("$env:LANE_ROUTER_CHILD_CWD");
+  // The cwd element carries its own quotes: PowerShell joins the argument list verbatim, so an
+  // unquoted directory with a space would reach wt.exe as two arguments and break -d.
+  expect(wt).toContain("('\"' + $env:LANE_ROUTER_CHILD_CWD + '\"')");
   expect(wt).not.toContain("cmd.exe");
 
   const powershell = terminalLaunchScript({ host: "system", shell: "powershell" });
@@ -86,7 +88,11 @@ test("the child environment speaks the shell that will read it", () => {
   expect(ps.CLAUDE_CODE_EXECPATH).toBeUndefined();
   expect(ps.PATH).toBe("x");
 
+  // Doubled outer quotes: PowerShell 5.1 joins -ArgumentList verbatim (it adds no quotes), and
+  // cmd's /C|/K rule strips the first and last quote character — so the payload needs a
+  // sacrificial outer pair or the stripping lands on the real ones. Verified 2026-08-18 by
+  // replaying the exact production shape against cmd.exe with plain and space-containing paths.
   const cmd = childEnvironment(promptRequest, {}, "", "cmd");
-  expect(cmd.LANE_ROUTER_CHILD_COMMAND).toBe("\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"");
+  expect(cmd.LANE_ROUTER_CHILD_COMMAND).toBe("\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"\"");
   expect(cmd.LANE_ROUTER_CHILD_COMMAND).not.toContain(";");
 });

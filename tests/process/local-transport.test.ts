@@ -304,7 +304,7 @@ test("hands a lifecycle-reported cwd to the recorder even when no channel is con
 });
 
 test("serves resume info for the lane launcher on loopback", async () => {
-  const info = { state: "bound", backend: "claude", conversationId: "session-1", cwd: "E:\project", generation: 2, reach: null };
+  const info = { state: "bound", backend: "claude", conversationId: "session-1", cwd: "E:\\project", generation: 2, reach: null };
   const resumeInfo = vi.fn(() => info);
   const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x", resumeInfo });
   const discovery = await server.start();

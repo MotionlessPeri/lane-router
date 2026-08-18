@@ -269,10 +269,13 @@ export class LocalRouterServer {
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
       if (request.method === "GET" && request.url === "/health") return json(response, 200, this.discovery());
-      if (request.method === "GET" && request.url?.startsWith("/lanes/resume-info") && this.options.resumeInfo) {
-        const address = new URL(request.url, "http://127.0.0.1").searchParams.get("address");
-        if (!address) return json(response, 400, { error: "address is required" });
-        return json(response, 200, { result: this.options.resumeInfo(address) });
+      if (request.method === "GET" && request.url !== undefined && this.options.resumeInfo) {
+        const url = new URL(request.url, "http://127.0.0.1");
+        if (url.pathname === "/lanes/resume-info") {
+          const address = url.searchParams.get("address");
+          if (!address) return json(response, 400, { error: "address is required" });
+          return json(response, 200, { result: this.options.resumeInfo(address) });
+        }
       }
       if (request.method === "POST" && request.url === "/claude/lifecycle") {
         const body = await readJson(request) as { conversationId?: unknown; event?: unknown; joinKey?: unknown; cwd?: unknown };

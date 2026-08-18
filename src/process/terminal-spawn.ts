@@ -63,7 +63,11 @@ export function wtOnPath(environment: NodeJS.ProcessEnv): boolean {
 /** One Start-Process statement per shape; which shape to run was already decided in Node. */
 export function terminalLaunchScript(resolved: ResolvedTerminal): string {
   if (resolved.host === "wt") {
-    return "Start-Process -FilePath 'wt.exe' -ArgumentList @('-d', $env:LANE_ROUTER_CHILD_CWD, 'powershell.exe', '-NoExit', '-Command', $env:LANE_ROUTER_CHILD_COMMAND)";
+    // The cwd element carries its own quotes: PowerShell 5.1 joins the argument list verbatim
+    // without adding any, so an unquoted directory containing a space reaches wt.exe as two
+    // arguments and -d breaks. wt parses its command line with CommandLineToArgvW, which folds
+    // the embedded quotes back into one argument.
+    return "Start-Process -FilePath 'wt.exe' -ArgumentList @('-d', ('\"' + $env:LANE_ROUTER_CHILD_CWD + '\"'), 'powershell.exe', '-NoExit', '-Command', $env:LANE_ROUTER_CHILD_COMMAND)";
   }
   if (resolved.shell === "cmd") {
     return "Start-Process -FilePath 'cmd.exe' -ArgumentList @('/k', $env:LANE_ROUTER_CHILD_COMMAND) -WorkingDirectory $env:LANE_ROUTER_CHILD_CWD -WindowStyle Normal";
@@ -115,10 +119,15 @@ export function childEnvironment(
     // One statement, and above all no semicolon: Windows Terminal splits its own command line on
     // `;`, so a two-statement command made wt treat everything after it as a separate program to
     // launch and fail with "the system cannot find the file specified". The title is therefore
-    // set by the child process, which needs no shell at all. The cmd variant says the same thing
-    // in the syntax cmd will read it in.
+    // set by the child process, which needs no shell at all.
+    //
+    // The cmd variant says the same thing in cmd syntax, with a sacrificial outer quote pair:
+    // PowerShell 5.1 joins -ArgumentList verbatim (it adds no quotes), and cmd's /C|/K rule
+    // strips the first and last quote character of its command — without the outer pair the
+    // stripping lands on the path quotes and no path with a space survives. Verified 2026-08-18
+    // by replaying the exact production shape against cmd.exe with plain and spaced paths.
     LANE_ROUTER_CHILD_COMMAND: shell === "cmd"
-      ? "\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\""
+      ? "\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"\""
       : "& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD",
   };
 }

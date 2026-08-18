@@ -111,6 +111,15 @@ test("open refuses what must not be reopened and says what to do instead", async
     })),
   });
   await expect(launchLane(["open", "alpha/worker"], codex)).rejects.toThrow(/not supported yet/iu);
+
+  // An online lane is refused as online whatever its backend: the "resume it manually" advice in
+  // the codex message must never be handed out while a process still speaks for the conversation.
+  const onlineCodex = fakes({
+    queryResumeInfo: vi.fn(async () => ({
+      state: "bound" as const, backend: "codex" as const, conversationId: "t", cwd: null, generation: 1, reach: reach("live"),
+    })),
+  });
+  await expect(launchLane(["open", "alpha/worker"], onlineCodex)).rejects.toThrow(/already online/iu);
 });
 
 test("open needs a directory: recorded, or given, or refused", async () => {
@@ -140,8 +149,11 @@ test("passes the terminal choice through and fails when the child never reports"
   });
   await launchLane(["open", "alpha/worker", "--terminal", "cmd"], cmd);
   const environment = cmd.spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
-  expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"");
+  expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"\"");
 
   const silent = fakes({ spawnTerminal: vi.fn(async () => undefined), startTimeoutMs: 200 });
   await expect(launchLane(["new", "alpha/worker", "--role", "r"], silent)).rejects.toThrow(/did not start/u);
+
+  const broken = fakes({ spawnTerminal: terminalThatStarts("The lane CLI could not be started: spawn claude ENOENT") });
+  await expect(launchLane(["new", "alpha/worker", "--role", "r"], broken)).rejects.toThrow(/spawn claude ENOENT/u);
 });

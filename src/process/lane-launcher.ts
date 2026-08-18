@@ -61,13 +61,15 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     // change with its own confirmation loop, and must not happen as a side effect of "open".
     throw new Error(`Lane ${invocation.address.address} has no active binding to resume; attach a conversation through the rotation flow instead`);
   }
-  if (info.backend !== "claude") {
-    throw new Error(`The ${info.backend} backend is not supported yet; resume it manually with: lane-router-codex resume ${info.conversationId}`);
-  }
   // An open channel — even one that has not reported a lifecycle event yet — means a process is
-  // already speaking for this conversation, and a second one would fight it for the lane.
+  // already speaking for this conversation, and a second one would fight it for the lane. This
+  // gate comes before the backend one so that the "resume it manually" advice below can never be
+  // handed out for a conversation that is still live.
   if (info.reach !== null && info.reach.state !== "no_channel") {
     throw new Error(`Lane ${invocation.address.address} is already online; nothing was opened`);
+  }
+  if (info.backend !== "claude") {
+    throw new Error(`The ${info.backend} backend is not supported yet; resume it manually with: lane-router-codex resume ${info.conversationId}`);
   }
   const cwd = invocation.cwd ?? info.cwd;
   if (cwd === null || cwd === undefined) {

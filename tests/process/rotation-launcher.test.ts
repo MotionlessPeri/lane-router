@@ -181,7 +181,7 @@ test("repeats the successor's own reason for failing to start", async () => {
 });
 
 test("builds the child environment from the source it is given, not from this process", () => {
-  const request = { mode: "prompt" as const, backend: "claude" as const, cwd: "D:\p", prompt: "p", statusPath: "D:\s.txt" };
+  const request = { mode: "prompt" as const, backend: "claude" as const, cwd: "D:\\p", prompt: "p", statusPath: "D:\\s.txt" };
   const environment = childEnvironment(request, {
     CLAUDE_CODE_SESSION_ID: "bb75097f", CLAUDE_PID: "29496",
     CLAUDE_CODE_EXECPATH: "C:/real/claude.exe", PATH: "/usr/bin",
@@ -243,7 +243,7 @@ test("falls back to the bare address when the Router cannot say which generation
 // Windows Terminal splits its command line on `;`. A two-statement command therefore made wt try
 // to launch everything after the semicolon as a program: 0x80070002, file not found.
 test("keeps the terminal command free of anything Windows Terminal would split on", () => {
-  const request = { mode: "prompt" as const, backend: "claude" as const, cwd: "D:\p", prompt: "p", statusPath: "D:\s.txt" };
+  const request = { mode: "prompt" as const, backend: "claude" as const, cwd: "D:\\p", prompt: "p", statusPath: "D:\\s.txt" };
   const environment = childEnvironment(request, {}, "alpha/design gen5");
   expect(environment.LANE_ROUTER_CHILD_COMMAND).not.toContain(";");
   // The title still has to travel, just not through the shell.
@@ -264,7 +264,7 @@ test("passes the terminal choice through to the child environment's command synt
   });
 
   const environment = spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
-  expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"");
+  expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"\"");
 });
 
 test("rejects an unknown terminal choice without opening anything", async () => {
