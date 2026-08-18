@@ -1,6 +1,6 @@
 # Lane Router V1 手工验证
 
-自动测试覆盖四项工具、文件 mailbox、SQLite 对账、Claude Channel transport、Codex App Server 协议、按需启动与 launcher 参数。下面两项只验证真实 CLI、模型 provider 和交互式 TUI 的边界，不能用 fake backend 结果代替。
+自动测试覆盖五项工具、文件 mailbox、SQLite 对账、Claude Channel transport、Codex App Server 协议、按需启动与 launcher 参数。下面各项只验证真实 CLI、模型 provider 和交互式 TUI 的边界，不能用 fake backend 结果代替。
 
 ## Claude Channel
 
@@ -13,13 +13,13 @@
 5. 退出 Claude，再发送一条消息；恢复同一 Claude session 后确认 pending 消息再次得到提醒。
 6. 在旧 turn 运行期间从新对话请求接替同一 lane，确认接替等待 `Stop`，随后 generation 增加且旧 session 不能再发送或 ack。
 
-预期：MCP 只列出 `lane_directory`、`lane_attach_current`、`lane_send`、`lane_ack`。MCP 进程使用 Claude 自动提供的 `CLAUDE_CODE_SESSION_ID`；hook 的 `session_id` 与它对应。通知不携带消息正文，正文只在 mailbox 文件中。
+预期：MCP 只列出 `lane_directory`、`lane_attach_current`、`lane_send`、`lane_ack`、`lane_restore_project`。MCP 进程使用 Claude 自动提供的 `CLAUDE_CODE_SESSION_ID`；hook 的 `session_id` 与它对应。通知不携带消息正文，正文只在 mailbox 文件中。
 
 ## Codex remote TUI
 
 前提：已构建 `dist/`，`codex --version` 与实验性 App Server schema 检查通过。
 
-1. 运行 `lane-router-codex`，确认它按需启动 Router process、打开 stock Codex remote TUI，并由本地 adapter 在 TUI 的 `thread/start` 中注入四项 dynamic tools；不得先创建空 thread 再 resume。
+1. 运行 `lane-router-codex`，确认它按需启动 Router process、打开 stock Codex remote TUI，并由本地 adapter 在 TUI 的 `thread/start` 中注入五项 dynamic tools；不得先创建空 thread 再 resume。
 2. 在对话中查询目录、取得用户确认并 attach 一条 lane。
 3. 从另一条 lane 发送 normal 消息。目标 idle 时应由 `turn/start` 唤醒；busy 时应保持 pending，直到 turn 完成事件提供下一次处理机会。
 4. 在目标 busy 时发送 correction，确认 App Server 使用 `turn/steer`，且通知只包含 mailbox 路径和 message ID。
@@ -212,6 +212,27 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 **状态：** 参数与拒绝分支已有自动测试覆盖；在线拒绝的真机路径随 TC-LANE-OPEN 顺带验证。
 
 ## 当前记录
+
+### TC-PROJECT-RESTORE-1：重启后从主 lane 恢复同项目原对话
+
+**目标：** 验证主 lane 调用一次 `lane_restore_project` 后，每条离线 peer lane 都在可见 PowerShell 中恢复原 conversation/session，而不是新建对话或替换 binding。
+
+**Fixture：** 同一项目至少三条 active lane，其中主 lane 已手动恢复，另有一条 Codex peer 和一条 Claude peer 已关闭；各 peer 原对话中都有可辨认的历史消息。
+
+**设置：** 从包含本功能的 build 启动新 Router 和主 lane。不要使用仍在运行的旧 Router；不要更新全局 npm link，除非用户另行要求。
+
+**步骤：**
+
+1. 在主 lane 调用 `lane_directory`，记录三条 lane 的 address、backend 和 binding generation，确认两条 peer 没有客户端连接。
+2. 新 Codex thread 或 Claude 调用不带 `lanes` 的 `lane_restore_project`。若主 lane 是升级前创建的 Codex thread，它的旧 dynamic tool 清单无法在 `thread/resume` 时刷新；在该对话的 shell 运行 `lane-router-restore-project`，它使用 `CODEX_THREAD_ID` 调用同一项 Router 操作。
+3. 确认每条离线 peer 各出现一个 `Start-Process -WindowStyle Normal` 创建的可见 PowerShell；当前 lane 和已在线 lane 不重复打开。
+4. 在 Codex 与 Claude 窗口分别检查原历史消息、工作目录和 lane 工具列表；调用 `lane_directory`，确认各自仍对应原 address 和原 generation。
+5. 立即再次调用 `lane_restore_project`，确认已在线或正在启动的 lane 被跳过，不新增重复窗口。
+6. 关闭其中一个 peer，等待 30 秒启动保留期后，只指定该 address 再调用，确认只恢复该窗口。tool 使用 `lanes` 数组；旧 Codex CLI 使用位置参数，例如 `lane-router-restore-project alpha/peer`。
+
+**预期：** 每条离线 peer 返回 `launch_requested`，当前/在线/启动中 lane 分别返回对应 `skipped_*`；PowerShell 可见；恢复的是原 conversation/session；binding ID 与 generation 不变。单条失败以 `failed` 返回且不阻止其他 lane。
+
+**最后验证：** 尚未执行。当前实现会构建并运行自动测试，但本 case 需要切换正在使用的 Router 并由人观察多个交互窗口；在实际完成以上步骤前，不得宣称一键恢复的真实闭环已经通过。
 
 ### 自动轮换的可见 Windows terminal
 

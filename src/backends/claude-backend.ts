@@ -1,4 +1,4 @@
-import type { Notification, NotificationOutcome, PlatformBackend, ReachSnapshot } from "../router/backend.js";
+import type { Notification, NotificationOutcome, PlatformBackend, ReachSnapshot, RestorePresence } from "../router/backend.js";
 import type { BindingRecord, CallerContext, ResolvedIdentity } from "../router/types.js";
 
 /**
@@ -44,6 +44,10 @@ export class ClaudeBackend implements PlatformBackend {
 
   reach(binding: BindingRecord): ReachSnapshot {
     return this.channel.reach(binding.conversationId);
+  }
+
+  restorePresence(binding: BindingRecord): RestorePresence {
+    return this.channel.reach(binding.conversationId).state === "no_channel" ? "offline" : "online";
   }
 
   resolveIdentity(context: CallerContext): ResolvedIdentity {

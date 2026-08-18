@@ -12,10 +12,14 @@ test("the Codex TUI bridge injects Router tools into TUI-created threads", async
   if (typeof address === "string" || address === null) throw new Error("missing upstream address");
   const upstreamEndpoint = `ws://127.0.0.1:${address.port}`;
   const claimed: string[] = [];
+  const opened: string[] = [];
+  const closed: string[] = [];
   const codex = {
     endpoint: upstreamEndpoint,
     decorateThreadStart: (params: Record<string, unknown>) => ({ ...params, dynamicTools: [{ name: "lane_directory" }], developerInstructions: "router instructions" }),
     claimThread: (threadId: string) => { claimed.push(threadId); },
+    openThreadClient: (threadId: string) => { opened.push(threadId); },
+    closeThreadClient: (threadId: string) => { closed.push(threadId); },
     ownsThread: (threadId: string) => threadId === "thread-new",
     dispatchTool: vi.fn(async () => ({ success: true, contentItems: [{ type: "inputText", text: "ok" }] })),
     observeNotification: vi.fn(),
@@ -46,6 +50,7 @@ test("the Codex TUI bridge injects Router tools into TUI-created threads", async
     upstream.send(JSON.stringify({ id: 2, result: { thread: { id: "thread-new", status: { type: "idle" }, turns: [] } } }));
     await expect(nextJson(client)).resolves.toMatchObject({ id: 2, result: { thread: { id: "thread-new" } } });
     expect(claimed).toEqual(["thread-new"]);
+    expect(opened).toEqual(["thread-new"]);
 
     upstream.send(JSON.stringify({ id: 3, method: "item/tool/call", params: { threadId: "thread-new", turnId: "turn-1", callId: "call-1", tool: "lane_directory", arguments: { project: "alpha" } } }));
     await expect(nextJson(upstream)).resolves.toEqual({ id: 3, result: { success: true, contentItems: [{ type: "inputText", text: "ok" }] } });
@@ -58,13 +63,19 @@ test("the Codex TUI bridge injects Router tools into TUI-created threads", async
     client.send(JSON.stringify({ id: 4, method: "thread/resume", params: { threadId: "foreign" } }));
     await expect(nextJson(client)).resolves.toMatchObject({ id: 4, error: { message: expect.stringMatching(/not owned/i) } });
   } finally {
-    client?.close(); upstream?.close();
+    if (client) {
+      const closedClient = new Promise<void>((resolve) => client!.once("close", () => resolve()));
+      client.close();
+      await closedClient;
+    }
+    await vi.waitFor(() => expect(closed).toEqual(["thread-new"]));
+    upstream?.close();
     await server.close();
     await new Promise<void>((resolve) => upstreamServer.close(() => resolve()));
   }
 });
 
-test("serves health and four lane calls on loopback", async () => {
+test("serves health and lane calls on loopback", async () => {
   const tools = { call: vi.fn(async (name: string) => ({ name })) };
   const codex = {
     endpoint: "ws://127.0.0.1:45000",
@@ -76,12 +87,12 @@ test("serves health and four lane calls on loopback", async () => {
     const client = new LocalRouterClient(async () => discovery.url);
     await expect(probeRouterHealth(discovery.url)).resolves.toMatchObject({ instanceId: "instance-1", codexEndpoint: expect.stringMatching(/^ws:\/\/127\.0\.0\.1:\d+$/u) });
     await expect(client.call("lane_directory", { project: "alpha" }, {
-      backend: "claude", conversationId: "session-1", requestKey: "request-1",
+      backend: "claude", conversationId: "session-1", cwd: "D:\\project", requestKey: "request-1",
     })).resolves.toEqual({ name: "lane_directory" });
     // The fourth argument is the caller's lifetime: the Router stops working on a request once
     // the caller is gone, so a takeover can no longer complete after its attach was reported failed.
     expect(tools.call).toHaveBeenCalledWith("lane_directory", { project: "alpha" }, {
-      backend: "claude", conversationId: "session-1", requestKey: "request-1",
+      backend: "claude", conversationId: "session-1", cwd: "D:\\project", requestKey: "request-1",
     }, expect.any(AbortSignal));
   } finally { await server.close(); }
 });

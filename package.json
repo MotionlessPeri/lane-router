@@ -6,6 +6,7 @@
   "bin": {
     "lane-router-codex": "dist/process/codex-launcher.js",
     "lane-router-lane": "dist/process/lane-launcher.js",
+    "lane-router-restore-project": "dist/process/project-restore-cli.js",
     "lane-router-rotate": "dist/process/rotation-launcher.js"
   },
   "engines": {

@@ -15,7 +15,7 @@ interface CompletedCall { readonly promise: Promise<DynamicToolResult>; readonly
 export class CodexDynamicToolDispatcher {
   private readonly inflight = new Map<string, Promise<DynamicToolResult>>();
   private readonly completed = new Map<string, CompletedCall>();
-  constructor(private readonly deps: { ownsThread: (threadId: string) => boolean; call: (name: LaneToolName, args: Record<string, unknown>, context: CallerContext) => unknown | Promise<unknown>; now?: () => number; completedTtlMs?: number; maxCompletedEntries?: number }) {}
+  constructor(private readonly deps: { ownsThread: (threadId: string) => boolean; cwdForThread?: (threadId: string) => string | undefined; call: (name: LaneToolName, args: Record<string, unknown>, context: CallerContext) => unknown | Promise<unknown>; now?: () => number; completedTtlMs?: number; maxCompletedEntries?: number }) {}
   dispatch(request: DynamicToolCallParams): Promise<DynamicToolResult> {
     const key = callKey(request);
     const now = this.now();
@@ -42,8 +42,11 @@ export class CodexDynamicToolDispatcher {
     if (!(LANE_TOOL_NAMES as readonly string[]).includes(request.tool)) throw new Error(`Unknown Lane Router tool: ${request.tool}`);
     const raw = typeof request.arguments === "object" && request.arguments !== null && !Array.isArray(request.arguments) ? request.arguments as Record<string, unknown> : request.arguments;
     if (typeof raw !== "object" || raw === null) throw new Error("Lane tool arguments must be an object");
+    const cwd = this.deps.cwdForThread?.(request.threadId);
     const result = await this.deps.call(request.tool as LaneToolName, raw as Record<string, unknown>, {
-      backend: "codex", conversationId: request.threadId, requestKey,
+      backend: "codex", conversationId: request.threadId,
+      ...(cwd === undefined ? {} : { cwd }),
+      requestKey,
     });
     return { success: true as const, contentItems: [{ type: "inputText" as const, text: JSON.stringify(result) }] as const };
   }
