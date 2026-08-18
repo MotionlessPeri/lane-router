@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { mkdirSync, realpathSync, rmSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parseLaneAddress, type LaneAddress } from "../router/address.js";
 import type { ResumeInfo } from "../router/router-core.js";
 import { ensureRouter } from "./ensure-router.js";
 import {
-  awaitChildStart, childEnvironment, parseTerminalChoice, resolveTerminal, spawnTerminal,
-  terminalLaunchScript, wtOnPath, type TerminalChildRequest, type TerminalChoice,
+  awaitChildStart, childEnvironment, newStatusPath, parseTerminalChoice, resolveTerminal,
+  spawnTerminal, terminalLaunchScript, wtOnPath, type TerminalChildRequest, type TerminalChoice,
 } from "./terminal-spawn.js";
 
 const USAGE = [
@@ -46,7 +46,7 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     if (prompt.length > 24_000) throw new Error("The role description is too long; shorten it before creating the lane");
     const request = {
       mode: "prompt", backend: "claude", cwd: invocation.cwd ?? dependencies.cwd ?? process.cwd(),
-      prompt, statusPath: statusPath(dataRoot),
+      prompt, statusPath: newStatusPath(dataRoot),
     } satisfies TerminalChildRequest;
     await openTerminal(dependencies, invocation.terminal, request, invocation.address.address);
     return;
@@ -76,7 +76,7 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     throw new Error(`The Router has no recorded working directory for ${invocation.address.address}; pass --cwd <dir>`);
   }
   const request = {
-    mode: "resume", backend: "claude", cwd, conversationId: info.conversationId, statusPath: statusPath(dataRoot),
+    mode: "resume", backend: "claude", cwd, conversationId: info.conversationId, statusPath: newStatusPath(dataRoot),
   } satisfies TerminalChildRequest;
   await openTerminal(dependencies, invocation.terminal, request, `${invocation.address.address} gen${info.generation}`);
 }
@@ -114,13 +114,6 @@ function parseInvocation(args: readonly string[]): ParsedInvocation {
 
 function creationPrompt(address: string, role: string): string {
   return `This is an approved creation of the new lane ${address}.\n\nRead the repository AGENTS.md and applicable referenced instructions completely. Call lane_directory for the project and verify the address is free, then call lane_attach_current with address \`${address}\` and exactly this role_description:\n\n${role}\n\nAfterwards report that the lane is ready and wait for direction; do not start feature work on your own.`;
-}
-
-function statusPath(dataRoot: string): string {
-  const path = resolve(dataRoot, "lane-status", `${randomUUID()}.txt`);
-  mkdirSync(dirname(path), { recursive: true });
-  rmSync(path, { force: true });
-  return path;
 }
 
 async function openTerminal(

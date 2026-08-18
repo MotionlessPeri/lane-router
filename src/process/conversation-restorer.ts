@@ -1,19 +1,14 @@
 import { existsSync, statSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
-import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isAbsolute } from "node:path";
 
 import type { PlatformBackend } from "../router/backend.js";
 import type { RouterStateStore } from "../router/state-store.js";
 import type { BindingRecord } from "../router/types.js";
 import { ClaudeSessionLookupError, type ClaudeSessionLocator } from "./claude-session-locator.js";
-import { launchVisibleTerminal } from "./visible-terminal.js";
-
-export interface RestoreRequest {
-  readonly backend: "codex" | "claude";
-  readonly conversationId: string;
-  readonly cwd: string;
-}
+import {
+  childEnvironment, newStatusPath, resolveTerminal, spawnTerminal, terminalLaunchScript, wtOnPath,
+  type TerminalChildRequest,
+} from "./terminal-spawn.js";
 
 export type RestoreResult =
   | { readonly status: "launch_requested" | "skipped_online" | "skipped_launching" }
@@ -24,7 +19,8 @@ interface RestorerDependencies {
   readonly backends: { require(name: "codex" | "claude"): Pick<PlatformBackend, "restorePresence"> };
   readonly claudeSessions: Pick<ClaudeSessionLocator, "locate">;
   readonly fallbackCwd: string;
-  readonly launch?: (request: RestoreRequest) => Promise<void>;
+  readonly dataRoot: string;
+  readonly launch?: (request: TerminalChildRequest, title: string) => Promise<void>;
   readonly now?: () => number;
 }
 
@@ -49,8 +45,11 @@ export class ConversationRestorer {
       if (presence === "online") return this.release(binding.id, { status: "skipped_online" });
       if (presence === "unavailable") return this.release(binding.id, failure("backend_unavailable", `${binding.backend} backend is unavailable`));
       const cwd = await this.resolveCwd(binding);
-      const request = { backend: binding.backend, conversationId: binding.conversationId, cwd } satisfies RestoreRequest;
-      await (this.dependencies.launch ?? launchRestoreTerminal)(request);
+      const request = {
+        mode: "resume", backend: binding.backend, conversationId: binding.conversationId, cwd,
+        statusPath: newStatusPath(this.dependencies.dataRoot),
+      } satisfies TerminalChildRequest;
+      await (this.dependencies.launch ?? launchRestoreTerminal)(request, `${binding.laneAddress} gen${binding.generation}`);
       this.reservations.set(binding.id, (this.dependencies.now ?? Date.now)() + RESERVATION_MS);
       return { status: "launch_requested" };
     } catch (error) {
@@ -91,13 +90,15 @@ function failure(reason: Extract<RestoreResult, { status: "failed" }>["reason"],
   return { status: "failed", reason, message };
 }
 
-export function restoreClientCommand(request: RestoreRequest, paths: { nodePath: string; codexLauncherPath: string; claudeExe: string }) {
-  return request.backend === "codex"
-    ? { executable: paths.nodePath, args: [paths.codexLauncherPath, "resume", request.conversationId] }
-    : { executable: paths.claudeExe, args: ["--resume", request.conversationId, "--dangerously-load-development-channels", "server:lane"] };
-}
-
-async function launchRestoreTerminal(request: RestoreRequest): Promise<void> {
-  const childPath = resolve(dirname(fileURLToPath(import.meta.url)), "restore-terminal-child.js");
-  await launchVisibleTerminal({ cwd: request.cwd, childPath, requestName: "LANE_ROUTER_RESTORE_REQUEST", request });
+/**
+ * The shared terminal machinery carries three things this path used to lack: the vendor-env
+ * scrub (the Router inherits CLAUDE_* from whichever session first ensured it, and an unscrubbed
+ * restored client resolves to that conversation instead of its own), the verified cmd/wt quoting,
+ * and a window title. The status file is written for later diagnosis but deliberately not
+ * awaited: `launch_requested` stays the weak claim the restore contract documents, and a batch
+ * restore must not serialise on thirty-second waits.
+ */
+async function launchRestoreTerminal(request: TerminalChildRequest, title: string): Promise<void> {
+  const resolved = resolveTerminal(undefined, wtOnPath(process.env));
+  await spawnTerminal(request, childEnvironment(request, process.env, title, resolved.shell), terminalLaunchScript(resolved));
 }

@@ -12,8 +12,11 @@ export function childCommand(
   environment: NodeJS.ProcessEnv,
   here: string,
 ): { executable: string; args: string[] } {
-  if (request.mode === "prompt" && request.backend === "codex") {
-    return { executable: process.execPath, args: [join(here, "codex-launcher.js"), "--prompt", request.prompt] };
+  if (request.backend === "codex") {
+    // Both codex modes go through the launcher, which owns Router discovery and TUI wiring.
+    return request.mode === "prompt"
+      ? { executable: process.execPath, args: [join(here, "codex-launcher.js"), "--prompt", request.prompt] }
+      : { executable: process.execPath, args: [join(here, "codex-launcher.js"), "resume", request.conversationId] };
   }
   const claude = environment.CLAUDE_EXE ?? "claude";
   return request.mode === "prompt"

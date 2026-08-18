@@ -75,6 +75,11 @@ test("builds the child command for each mode and backend", () => {
     executable: "claude",
     args: ["--resume", "4b50f153-0932-4442-840b-98a4b7593a51", "--dangerously-load-development-channels", "server:lane"],
   });
+  // The codex side resumes through its launcher, which owns Router discovery and TUI wiring.
+  expect(childCommand({ mode: "resume", backend: "codex", cwd: "D:\\p", conversationId: "thread-1", statusPath: "D:\\s.txt" }, {}, here)).toEqual({
+    executable: process.execPath,
+    args: [join(here, "codex-launcher.js"), "resume", "thread-1"],
+  });
 });
 
 test("the child environment speaks the shell that will read it", () => {

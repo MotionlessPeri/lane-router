@@ -49,6 +49,7 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
       state, backends,
       claudeSessions: new ClaudeSessionLocator(join(homedir(), ".claude", "projects")),
       fallbackCwd: resolve(dirname(fileURLToPath(import.meta.url)), "../.."),
+      dataRoot,
     });
     const core = new RouterCore({ state, mailbox, backends, pump, restore, newId: () => randomUUID(), now: Date.now });
     tools = new ToolService(core);

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,7 +20,7 @@ export type TerminalChildRequest =
     }
   | {
       readonly mode: "resume";
-      readonly backend: "claude";
+      readonly backend: "claude" | "codex";
       readonly cwd: string;
       readonly conversationId: string;
       readonly statusPath: string;
@@ -130,6 +131,14 @@ export function childEnvironment(
       ? "\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"\""
       : "& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD",
   };
+}
+
+/** A fresh status file path for one launch; the terminal child reports its start through it. */
+export function newStatusPath(dataRoot: string): string {
+  const path = resolve(dataRoot, "lane-status", `${randomUUID()}.txt`);
+  mkdirSync(dirname(path), { recursive: true });
+  rmSync(path, { force: true });
+  return path;
 }
 
 /** Creates the visible window. The window opening proves nothing; the child reports separately. */
