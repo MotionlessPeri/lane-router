@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -54,11 +54,20 @@ export function resolveTerminal(choice: TerminalChoice | undefined, wtAvailable:
   return { host: wtAvailable ? "wt" : "system", shell: "powershell" };
 }
 
-/** wt.exe the way spawn would find it: by walking PATH. The Store app publishes an alias there. */
+/**
+ * wt.exe the way a shell would find it: by walking PATH. The Store app publishes an app
+ * execution alias there — a reparse point that `stat` refuses to follow (measured 2026-08-18:
+ * statSync EACCES, lstatSync ok), so `existsSync` reports the alias as absent and the check
+ * must use lstat.
+ */
 export function wtOnPath(environment: NodeJS.ProcessEnv): boolean {
   const path = environment.PATH ?? environment.Path;
   if (!path) return false;
-  return path.split(delimiter).some((entry) => entry !== "" && existsSync(join(entry, "wt.exe")));
+  return path.split(delimiter).some((entry) => entry !== "" && fileVisible(join(entry, "wt.exe")));
+}
+
+function fileVisible(path: string): boolean {
+  try { lstatSync(path); return true; } catch { return false; }
 }
 
 /** One Start-Process statement per shape; which shape to run was already decided in Node. */
