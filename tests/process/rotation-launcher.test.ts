@@ -8,7 +8,7 @@ import { afterEach, expect, test, vi } from "vitest";
 
 import { launchRotation, terminalTitle } from "../../src/process/rotation-launcher.js";
 import {
-  awaitChildStart, childEnvironment, claudeExecutable, withoutVendorSessionIdentity,
+  awaitChildStart, childEnvironment, claudeExecutable, withoutInheritedConsoleDescription, withoutVendorSessionIdentity,
 } from "../../src/process/terminal-spawn.js";
 
 /** Stands in for a terminal that came up and whose CLI reported for itself. */
@@ -101,6 +101,24 @@ test("strips every vendor session variable from the successor's environment", ()
   expect(scrubbed).toEqual({ PATH: "/usr/bin", APPDATA: "C:/AppData", CODEX_EXE: "C:/codex.exe" });
 });
 
+// Measured 2026-08-20 by reading real environment blocks: four windows opened by hand carry
+// neither NO_COLOR nor TERM and draw in colour, while the rotated chain carried NO_COLOR=1 and
+// TERM=xterm-256color into a TUI that drew its whole interface in monochrome. Unset is the
+// measured shape of a healthy window here, so these are removed rather than corrected.
+test("drops what a parent said about its own stream, which is not the console being created", () => {
+  const scrubbed = withoutInheritedConsoleDescription({
+    NO_COLOR: "1", force_color: "0", TERM: "xterm-256color",
+    NO_COLOR_EXTRA: "not the variable", COLORTERM: "truecolor", WT_SESSION: "cd25d3a8", PATH: "/usr/bin",
+  });
+
+  // Exact names, case-insensitively, and not a prefix: Windows treats NO_COLOR and force_color as
+  // the variables the convention names, while NO_COLOR_EXTRA is simply somebody else's.
+  expect(scrubbed).toEqual({
+    NO_COLOR_EXTRA: "not the variable", COLORTERM: "truecolor",
+    WT_SESSION: "cd25d3a8", PATH: "/usr/bin",
+  });
+});
+
 test("resolves the real Claude executable rather than a name spawn cannot find", () => {
   // PATH has claude, claude.cmd and claude.ps1 but no claude.exe, and Node does not use PATHEXT.
   expect(claudeExecutable({ CLAUDE_CODE_EXECPATH: "C:/real/claude.exe" })).toBe("C:/real/claude.exe");
@@ -185,11 +203,16 @@ test("builds the child environment from the source it is given, not from this pr
   const environment = childEnvironment(request, {
     CLAUDE_CODE_SESSION_ID: "bb75097f", CLAUDE_PID: "29496",
     CLAUDE_CODE_EXECPATH: "C:/real/claude.exe", PATH: "/usr/bin",
+    NO_COLOR: "1", TERM: "xterm-256color",
   });
   expect(environment.CLAUDE_CODE_SESSION_ID).toBeUndefined();
   expect(environment.CLAUDE_PID).toBeUndefined();
   expect(environment.CLAUDE_EXE).toBe("C:/real/claude.exe");
   expect(environment.PATH).toBe("/usr/bin");
+  // Both scrubs have to be wired in here, not merely exist: the second one was written because a
+  // rotated window inherited NO_COLOR=1 and drew a monochrome interface all the way through.
+  expect(environment.NO_COLOR).toBeUndefined();
+  expect(environment.TERM).toBeUndefined();
 });
 
 // Only a real process can catch this one: the poll timer must keep the process alive. Unrefed, the

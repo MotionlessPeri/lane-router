@@ -102,6 +102,34 @@ export function withoutVendorSessionIdentity(environment: NodeJS.ProcessEnv): No
 }
 
 /**
+ * What a parent said about the stream it was writing to. The terminal created here is a different
+ * stream, so none of it carries over: an answer that was true for a captured pipe becomes a false
+ * claim about a console somebody is looking at.
+ *
+ * Measured 2026-08-20, along one live chain and against four independently opened windows. A
+ * window opened by hand has `NO_COLOR` and `TERM` both unset and draws in colour; the rotated
+ * chain carried `NO_COLOR=1` and `TERM=xterm-256color` from a shell through PowerShell, wt and
+ * Node into the TUI, which drew its whole interface in monochrome — correctly, having been told
+ * to. Unset is therefore not a gap to fill: it is the measured shape of a healthy window of this
+ * kind. Where the values entered the launching process could not be recovered and did not need
+ * to be, because a new console should inherit none of them whatever set them.
+ *
+ * `TERM` was left in place at first, reasoning that `xterm-256color` described the console
+ * truthfully. The four clean windows disproved that: they carry no `TERM` at all, so the value
+ * described the shell that leaked it rather than this console.
+ *
+ * An exact list rather than the prefix rule above, because these names share no prefix and
+ * `NO_COLOR_EXTRA` belongs to somebody else; matched case-insensitively, because Windows draws no
+ * distinction between `NO_COLOR` and `no_color`.
+ */
+const INHERITED_STREAM_DESCRIPTION = new Set(["no_color", "force_color", "term"]);
+
+export function withoutInheritedConsoleDescription(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(environment)
+    .filter(([key]) => !INHERITED_STREAM_DESCRIPTION.has(key.toLowerCase())));
+}
+
+/**
  * PATH holds `claude`, `claude.cmd` and `claude.ps1` but no `claude.exe`, and Node's spawn does
  * not consult PATHEXT, so spawning the bare name fails with ENOENT on Windows. Resolve the real
  * executable here, while the vendor's own variable is still readable, and hand it to the child as
@@ -122,7 +150,7 @@ export function childEnvironment(
 ): NodeJS.ProcessEnv {
   const executable = claudeExecutable(source);
   return {
-    ...withoutVendorSessionIdentity(source),
+    ...withoutInheritedConsoleDescription(withoutVendorSessionIdentity(source)),
     ...(executable === undefined ? {} : { CLAUDE_EXE: executable }),
     LANE_ROUTER_CHILD_REQUEST: JSON.stringify(request),
     LANE_ROUTER_NODE: process.execPath,

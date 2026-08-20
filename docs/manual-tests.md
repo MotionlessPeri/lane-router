@@ -167,6 +167,26 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 **顺带一条环境限制：** Router 启动时无条件要求一个能用的 `codex`（`main.ts` 的 `await codex.start()` 在服务器启动之前）。因此在拿不到 `codex` 的 shell 里无法用独立 data root 起一个 Router 来做端到端探针；2026-08-12 尝试过，Router 以 `Unable to fingerprint Codex executable/version` 退出。这不说明该机器没有装 codex——只说明那个 shell 解析不到它。
 
+### 新窗口不继承父进程的禁色设置
+
+**目标：** rotate / new / open 开出来的窗口里，TUI 是彩色的。
+
+**背景（2026-08-20 实测，`mocap/hotfix` 直读进程环境块取证）：** 沿链读下来 Windows Terminal 与 Router daemon 都干净，而 `spawnTerminal` 创建的 tab shell 带着 `NO_COLOR=1`，链末的 TUI 于是整个界面黑白——**它没坏，它是被要求的**。`NO_COLOR` 只要非空就一律关色。那个值对设它的人是对的（被解析的管道不该有 ANSI），对这里要创建的真实控制台是错的。
+
+**四条手工开的窗口作对照**：`NO_COLOR` 与 `TERM` **都未设**，且颜色正常。所以「未设」不是缺口，是这类窗口健康时的实测形态——`TERM` 因此也一并剥掉（初版曾保留它，理由是 `xterm-256color` 如实描述了控制台；那四条对照推翻了这个理由，干净窗口根本没有 `TERM`，那个值描述的是泄漏它的那个 shell）。
+
+⚠️ **最容易验错的一点：** 从一个**本来就没有** `NO_COLOR` 的 shell 发起轮换，无论修没修都会看到彩色——那不是通过，是没测到。必须显式制造那个条件：
+
+```bash
+NO_COLOR=1 lane-router-lane new <project>/<lane> --role "<角色说明>"
+```
+
+**预期：** 新窗口的 TUI **有颜色**。修复前同一条命令应当得到黑白窗口（要复现，把 `terminal-spawn.ts` 里 `childEnvironment` 的 `withoutInheritedColorOverrides(...)` 那层去掉再构建）。
+
+**对照：** 同一条命令不带 `NO_COLOR=1` 也应当有颜色——否则问题不在这条链上，另查。
+
+**最后验证：** 尚未真机执行。自动测试覆盖两处 scrub 的接线与精确匹配语义（三个变异各被对应测试杀掉），并在构建产物上直接核过 `childEnvironment` 的输出；**但「窗口看起来是彩色的」只能人眼确认**。
+
 ## `lane_send` 的抄送
 
 自动测试覆盖副本的独立 ack、全有或全无、重放幂等、逐收件人的投递结果、`cc:` 文件头与旧文件兼容，并做过五个变异（结果见设计稿第六节）。下面两条依赖真实 Claude 会话与 channel，fake backend 代替不了。
