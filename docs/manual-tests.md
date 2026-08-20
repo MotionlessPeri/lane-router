@@ -167,6 +167,31 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 **顺带一条环境限制：** Router 启动时无条件要求一个能用的 `codex`（`main.ts` 的 `await codex.start()` 在服务器启动之前）。因此在拿不到 `codex` 的 shell 里无法用独立 data root 起一个 Router 来做端到端探针；2026-08-12 尝试过，Router 以 `Unable to fingerprint Codex executable/version` 退出。这不说明该机器没有装 codex——只说明那个 shell 解析不到它。
 
+## `lane_send` 的抄送
+
+自动测试覆盖副本的独立 ack、全有或全无、重放幂等、逐收件人的投递结果、`cc:` 文件头与旧文件兼容，并做过五个变异（结果见设计稿第六节）。下面两条依赖真实 Claude 会话与 channel，fake backend 代替不了。
+
+**前提：** 已构建 `dist/`，且**参与验证的会话都是构建之后新起的**——MCP server 的代码在进程启动时载入，构建之前起的会话仍跑旧代码，拿它验只会验出旧行为。
+
+### TC-CC-1：被抄送的真实 lane 确实被唤醒
+
+1. 从一条 lane 发一封 `cc` 指向另外**两条在线** lane 的 normal 消息。
+2. 观察那两条 lane 是否各自开出 turn。
+3. 在每条 lane 里读它自己那份 `.md`。
+
+**预期：** 两条都自行开出 turn；每份文件头都有 `cc:` 行且列出全部三个收件人；各自 `lane_ack` 自己那份之后，另一份仍在 `pending`。发信方拿到的三份记录 `notificationState` 均为 `sent`。
+
+**关键看点：** 收件人读到的 `target:` 是它自己、`cc:` 是完整清单——这两行合起来才让它知道「还有谁也收到了」，这正是过去写在正文里的「(抄 X)」承载的信息。
+
+### TC-CC-2：收件人离线时回执说真话
+
+1. 关掉其中一条收件 lane 的窗口（使其 `no_channel`，可用 `lane_directory` 确认）。
+2. 发一封同时抄送在线与离线两条 lane 的消息。
+
+**预期：** 回执里在线那份是 `sent`、离线那份是 `no_channel`——**两者不再长得一样**。离线那条的消息仍留在 `pending`，用 `lane-router-lane open <project>/<lane>` 打开它之后应当收到补投。
+
+**尚未验证。** 2026-08-20 实施当天没有跑：需要至少三条构建之后新起的会话同时在线，而当时在线的 11 条全部运行构建之前的代码。在这两条通过之前，抄送**不得**被称作真实链路已验证。
+
 ## lane-router-lane 打开与新建
 
 **前提：** 已构建 `dist/` 且 `npm link` 已刷新；**Router process 必须运行本构建**——旧 Router 没有 `/lanes/resume-info` 端点、也不记录 cwd，此时 `open` 以 `not found` 优雅失败（2026-08-18 已实测该失败路径：无窗口、退出非零、Router 状态不变）。受控重启共享 Router 的时机由用户决定；那次重启同时解锁上文「Router 换代后既有会话」的 RPC 重解析用例。

@@ -186,24 +186,48 @@ export class RouterCore {
     return this.bootstrap(state.requireLane(parsed.address), binding, identity);
   }
 
-  async send(context: CallerContext, input: { target: string; body: string; kind: MessageKind; replyTo?: string }): Promise<MessageRecord> {
+  /**
+   * One call, one copy per recipient — each a whole message with its own id, file and ack. A
+   * shared row would have to teach `ack` what a partly processed message is; separate copies
+   * leave it untouched, and lanes read the same body at their own pace.
+   */
+  async send(context: CallerContext, input: { target: string; body: string; kind: MessageKind; replyTo?: string; cc?: readonly string[] }): Promise<MessageRecord[]> {
     const state = this.dependencies.state;
     const sender = this.requireCallerBinding(context);
-    const target = parseLaneAddress(input.target).address;
-    if (!state.lane(target)) throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${target}`);
+    // Every recipient is resolved before anything is written. Validating as we go would let a
+    // later bad address leave earlier lanes holding a message the sender was told had failed.
+    const recipients: string[] = [];
+    for (const raw of [input.target, ...(input.cc ?? [])]) {
+      const address = parseLaneAddress(raw).address;
+      if (!state.lane(address)) throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${address}`);
+      if (!recipients.includes(address)) recipients.push(address);
+    }
     if (input.kind === "correction" && !input.replyTo) throw new RouterError("REPLY_TO_REQUIRED", "A correction must identify the message it corrects");
     if (input.replyTo && !state.message(input.replyTo)) throw new RouterError("MESSAGE_NOT_FOUND", `Message not found: ${input.replyTo}`);
-    const existing = state.messageByRequestKey(context.requestKey);
-    if (existing) return existing;
-    const message = {
-      id: this.dependencies.newId("message"), requestKey: context.requestKey,
-      senderLane: sender.laneAddress, targetLane: target, kind: input.kind,
-      replyTo: input.replyTo ?? null, createdAt: this.dependencies.now(), body: input.body,
-    };
-    const file = this.dependencies.mailbox.writePending(message);
-    const stored = state.insertMessage({ ...message, relativePath: file.relativePath, contentSha256: file.contentSha256 });
-    await this.dependencies.pump.notifyLane(target);
-    return stored;
+
+    const ids: string[] = [];
+    for (const targetLane of recipients) {
+      // Derived from the address and never from position: the RPC client retries a request whose
+      // connection was refused, and a key built from an index would mint new ones the moment a
+      // replay named the recipients in another order, delivering the message twice.
+      const requestKey = `${context.requestKey}#${targetLane}`;
+      const existing = state.messageByRequestKey(requestKey);
+      if (existing) { ids.push(existing.id); continue; }
+      const message = {
+        id: this.dependencies.newId("message"), requestKey,
+        senderLane: sender.laneAddress, targetLane, kind: input.kind,
+        replyTo: input.replyTo ?? null, createdAt: this.dependencies.now(), body: input.body,
+      };
+      const file = this.dependencies.mailbox.writePending({ ...message, recipients });
+      ids.push(state.insertMessage({ ...message, relativePath: file.relativePath, contentSha256: file.contentSha256 }).id);
+    }
+    // After every copy exists, or the first recipient could wake to a distribution list naming
+    // files that are not there yet.
+    for (const targetLane of recipients) await this.dependencies.pump.notifyLane(targetLane);
+    // Re-read rather than return what was inserted: those rows predate the notification, so their
+    // notificationState is the initial `pending` — which is how a delivery that reached nobody
+    // used to look exactly like one that arrived.
+    return ids.map((id) => state.requireMessage(id));
   }
 
   async ack(context: CallerContext, input: { messageIds: readonly string[] }): Promise<{ resolved: string[] }> {
@@ -251,7 +275,9 @@ export class RouterCore {
       for (const raw of input.lanes) {
         const parsed = parseLaneAddress(raw);
         if (parsed.project !== callerLane.project) {
-          throw new RouterError("RESTORE_LANE_OUTSIDE_PROJECT", `Lane is outside the current project: ${parsed.address}`);
+          // The refusal is deliberate, but a refusal with no way out reads as "this cannot be
+          // done": one lane concluded exactly that and passed it on. The route exists, in a CLI.
+          throw new RouterError("RESTORE_LANE_OUTSIDE_PROJECT", `Lane is outside the current project: ${parsed.address}; open it from a shell with: lane-router-lane open ${parsed.address}`);
         }
         if (!this.dependencies.state.lane(parsed.address)) throw new RouterError("RESTORE_LANE_NOT_FOUND", `Lane not found: ${parsed.address}`);
         addresses.add(parsed.address);
