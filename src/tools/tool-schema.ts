@@ -9,6 +9,7 @@ export const toolArgsSchemas = {
   lane_attach_current: z.object({ address: text, role_description: text.optional() }).strict(),
   lane_send: z.object({
     target: text,
+    cc: z.array(text).min(1).optional(),
     body: z.string(),
     kind: z.enum(["normal", "correction"]),
     reply_to: text.optional(),

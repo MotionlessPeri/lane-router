@@ -54,21 +54,6 @@ describe("V1 state store", () => {
     }
   });
 
-  it("updates startup metadata without changing binding identity or generation", () => {
-    const { database, store } = setup();
-    try {
-      store.createLane({ address: "alpha/design", project: "alpha", roleDescription: "design", now: 1 });
-      const created = store.createBinding({
-        id: "binding-1", laneAddress: "alpha/design", backend: "codex",
-        conversationId: "thread-1", generation: 3, startup: {}, now: 2,
-      });
-
-      const updated = store.updateBindingStartup(created.id, { cwd: "D:\\project" });
-
-      expect(updated).toEqual({ ...created, startup: { cwd: "D:\\project" } });
-      expect(store.activeBindingForLane("alpha/design")).toEqual(updated);
-    } finally { database.close(); }
-  });
 
   it("stores message metadata and resolves request keys without storing bodies", () => {
     const { database, store } = setup();
@@ -89,5 +74,41 @@ describe("V1 state store", () => {
     } finally {
       database.close();
     }
+  });
+});
+
+describe("binding cwd", () => {
+  it("starts null, is updated for the active conversation binding, and reads back", () => {
+    const { database, store } = setup();
+    try {
+      store.createLane({ address: "alpha/design", project: "alpha", roleDescription: "design", now: 1 });
+      store.createBinding({ id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, now: 2 });
+      expect(store.activeBindingForLane("alpha/design")?.cwd).toBeNull();
+
+      store.updateBindingCwd("claude", "session-1", "E:\\project");
+      expect(store.activeBindingForLane("alpha/design")?.cwd).toBe("E:\\project");
+      expect(store.activeBindingForConversation("claude", "session-1")?.cwd).toBe("E:\\project");
+
+      // The latest report wins: a lane whose conversation moved directories must resume in the new one.
+      store.updateBindingCwd("claude", "session-1", "E:\\elsewhere");
+      expect(store.activeBindingForLane("alpha/design")?.cwd).toBe("E:\\elsewhere");
+    } finally { database.close(); }
+  });
+
+  it("ignores reports for conversations without an active binding", () => {
+    const { database, store } = setup();
+    try {
+      store.createLane({ address: "alpha/design", project: "alpha", roleDescription: "design", now: 1 });
+      store.createBinding({ id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, now: 2 });
+      expect(() => store.updateBindingCwd("claude", "unknown-session", "E:\\project")).not.toThrow();
+      expect(() => store.updateBindingCwd("codex", "session-1", "E:\\project")).not.toThrow();
+      expect(store.activeBindingForLane("alpha/design")?.cwd).toBeNull();
+
+      // An inactive binding keeps the cwd it had; only the active one receives new reports.
+      store.updateBindingCwd("claude", "session-1", "E:\\project");
+      store.deactivateBinding("binding-1", 1, 3);
+      store.updateBindingCwd("claude", "session-1", "E:\\later");
+      expect(store.binding("binding-1")?.cwd).toBe("E:\\project");
+    } finally { database.close(); }
   });
 });

@@ -113,7 +113,7 @@ test("bridges body-free Claude notifications and waits for lifecycle Stop before
   const channel = await connectClaudeChannel(async () => discovery.url, "session-1");
   const notifications: unknown[] = [];
   channel.attach({ notification: async (value) => { notifications.push(value); } });
-  const binding: BindingRecord = { id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, activeAt: 1, inactiveAt: null };
+  const binding: BindingRecord = { id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, activeAt: 1, inactiveAt: null, cwd: null };
   const notification = { laneAddress: "alpha/design", pendingPath: "C:/mailbox/pending", kind: "normal" as const, messageIds: ["message-1"] };
   try {
     // Claude Code queues a mid-turn notification itself, so a busy target is not a different
@@ -133,7 +133,7 @@ test("bridges body-free Claude notifications and waits for lifecycle Stop before
 });
 
 test("a Claude reconnect after Router restart resolves its durable binding and emits attention", async () => {
-  const binding: BindingRecord = { id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, activeAt: 1, inactiveAt: null };
+  const binding: BindingRecord = { id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, activeAt: 1, inactiveAt: null, cwd: null };
   const hub = new ClaudeChannelHub((conversationId) => conversationId === "session-1" ? binding : undefined);
   const attention: string[] = [];
   hub.onAttentionOpportunity((current) => { attention.push(current.laneAddress); });
@@ -145,7 +145,7 @@ test("a Claude reconnect after Router restart resolves its durable binding and e
 });
 
 test("a Claude channel follows the Router that replaced the one it was connected to", async () => {
-  const binding: BindingRecord = { id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, activeAt: 1, inactiveAt: null };
+  const binding: BindingRecord = { id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, activeAt: 1, inactiveAt: null, cwd: null };
   const notification = { laneAddress: "alpha/design", pendingPath: "C:/mailbox/pending", kind: "normal" as const, messageIds: ["message-1"] };
   const startRouter = async () => {
     const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x" });
@@ -290,3 +290,47 @@ function nextJson(socket: WebSocket): Promise<unknown> {
     socket.once("error", reject);
   });
 }
+
+test("hands a lifecycle-reported cwd to the recorder even when no channel is connected", async () => {
+  const recordCwd = vi.fn();
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x", recordCwd });
+  const discovery = await server.start();
+  try {
+    // No channel exists for this conversation, so the hub cannot accept the event — but the cwd
+    // is a fact about the conversation, not about the channel, and must be recorded anyway.
+    const response = await fetch(`${discovery.url}/claude/lifecycle`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ conversationId: "session-9", event: "Stop", cwd: "E:\\project" }),
+    });
+    expect(response.status).toBe(400);
+    expect(recordCwd).toHaveBeenCalledExactlyOnceWith("session-9", "E:\\project");
+
+    const withoutCwd = await fetch(`${discovery.url}/claude/lifecycle`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ conversationId: "session-9", event: "Stop" }),
+    });
+    expect(withoutCwd.status).toBe(400);
+    expect(recordCwd).toHaveBeenCalledTimes(1);
+  } finally { await server.close(); }
+});
+
+test("serves resume info for the lane launcher on loopback", async () => {
+  const info = { state: "bound", backend: "claude", conversationId: "session-1", cwd: "E:\\project", generation: 2, reach: null };
+  const resumeInfo = vi.fn(async () => info);
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x", resumeInfo });
+  const discovery = await server.start();
+  try {
+    const response = await fetch(`${discovery.url}/lanes/resume-info?address=${encodeURIComponent("alpha/design")}`);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ result: info });
+    expect(resumeInfo).toHaveBeenCalledExactlyOnceWith("alpha/design");
+
+    const missingAddress = await fetch(`${discovery.url}/lanes/resume-info`);
+    expect(missingAddress.status).toBe(400);
+
+    resumeInfo.mockImplementation(() => { throw new Error("Invalid lane address"); });
+    const invalid = await fetch(`${discovery.url}/lanes/resume-info?address=bad`);
+    expect(invalid.status).toBe(400);
+    await expect(invalid.json()).resolves.toEqual({ error: "Invalid lane address" });
+  } finally { await server.close(); }
+});

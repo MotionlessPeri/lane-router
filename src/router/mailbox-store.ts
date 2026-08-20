@@ -23,6 +23,12 @@ export interface MailboxMessageInput {
   readonly replyTo: string | null;
   readonly createdAt: number;
   readonly body: string;
+  /**
+   * Everyone this body was addressed to, the same list in every copy. It is part of what the
+   * message says — writing "(cc render)" in the body was how lanes used to say it — so it lives
+   * in the file rather than the database, where nothing queries it.
+   */
+  readonly recipients?: readonly string[];
 }
 
 export interface MailboxFile {
@@ -163,12 +169,16 @@ export class MailboxStore {
 }
 
 function serializeMessage(input: MailboxMessageInput): string {
+  // Only when there is someone else to name: a single-recipient send keeps the header it has
+  // always had, and a lone `cc` naming the target would read as if a copy had gone somewhere.
+  const recipients = input.recipients ?? [];
   return [
     "---",
     `id: ${input.id}`,
     `request_key: ${input.requestKey}`,
     `sender: ${input.senderLane}`,
     `target: ${input.targetLane}`,
+    ...(recipients.length > 1 ? [`cc: ${recipients.join(", ")}`] : []),
     `kind: ${input.kind}`,
     `reply_to: ${input.replyTo ?? ""}`,
     `created_at: ${input.createdAt}`,

@@ -6,10 +6,10 @@ import { pathToFileURL } from "node:url";
 
 import { afterEach, expect, test, vi } from "vitest";
 
+import { launchRotation, terminalTitle } from "../../src/process/rotation-launcher.js";
 import {
-  awaitSuccessorStart, claudeExecutable, launchRotation, rotationChildEnvironment,
-  terminalTitle, withoutVendorSessionIdentity,
-} from "../../src/process/rotation-launcher.js";
+  awaitChildStart, childEnvironment, claudeExecutable, withoutVendorSessionIdentity,
+} from "../../src/process/terminal-spawn.js";
 
 /** Stands in for a terminal that came up and whose CLI reported for itself. */
 const terminalThatStarts = (status = "ok") =>
@@ -115,12 +115,12 @@ test("waits for the successor to report, and repeats its reason when it failed",
 
   const ok = join(dataRoot, "ok.txt");
   writeFileSync(ok, "ok", "utf8");
-  await expect(awaitSuccessorStart(ok, 500, 10)).resolves.toBeUndefined();
+  await expect(awaitChildStart(ok, 500, 10)).resolves.toBeUndefined();
   expect(() => readFileSync(ok)).toThrow();
 
   const failed = join(dataRoot, "failed.txt");
   writeFileSync(failed, "The successor CLI could not be started: spawn claude ENOENT", "utf8");
-  await expect(awaitSuccessorStart(failed, 500, 10)).rejects.toThrow(/spawn claude ENOENT/u);
+  await expect(awaitChildStart(failed, 500, 10)).rejects.toThrow(/spawn claude ENOENT/u);
 });
 
 test("reports a terminal that never came up instead of claiming success", async () => {
@@ -128,7 +128,7 @@ test("reports a terminal that never came up instead of claiming success", async 
   roots.push(dataRoot);
   // Start-Process exiting 0 says only that the request was accepted; with Windows Terminal it does
   // not even say a window appeared. Silence therefore has to be a failure, not a success.
-  await expect(awaitSuccessorStart(join(dataRoot, "never.txt"), 200, 10))
+  await expect(awaitChildStart(join(dataRoot, "never.txt"), 200, 10))
     .rejects.toThrow(/did not start/u);
 });
 
@@ -147,7 +147,7 @@ test("hands the successor an environment with no trace of the outgoing conversat
 
   const environment = spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
   expect(Object.keys(environment).filter((key) => /^claude/iu.test(key) && key !== "CLAUDE_EXE")).toEqual([]);
-  expect(environment.LANE_ROUTER_ROTATION_REQUEST).toContain("alpha/design");
+  expect(environment.LANE_ROUTER_CHILD_REQUEST).toContain("alpha/design");
 });
 
 test("keeps the handoff when the successor never reports, however cleanly the window opened", async () => {
@@ -181,8 +181,8 @@ test("repeats the successor's own reason for failing to start", async () => {
 });
 
 test("builds the child environment from the source it is given, not from this process", () => {
-  const request = { backend: "claude" as const, cwd: "D:\p", prompt: "p", statusPath: "D:\s.txt" };
-  const environment = rotationChildEnvironment(request, {
+  const request = { mode: "prompt" as const, backend: "claude" as const, cwd: "D:\\p", prompt: "p", statusPath: "D:\\s.txt" };
+  const environment = childEnvironment(request, {
     CLAUDE_CODE_SESSION_ID: "bb75097f", CLAUDE_PID: "29496",
     CLAUDE_CODE_EXECPATH: "C:/real/claude.exe", PATH: "/usr/bin",
   });
@@ -201,8 +201,8 @@ test("the wait keeps its own process alive rather than letting it exit early", (
   roots.push(dataRoot);
   const script = join(dataRoot, "wait.mts");
   writeFileSync(script, [
-    `import { awaitSuccessorStart } from ${JSON.stringify(pathToFileURL(resolve("src/process/rotation-launcher.ts")).href)};`,
-    `await awaitSuccessorStart(${JSON.stringify(join(dataRoot, "never.txt"))}, 1500, 50)`,
+    `import { awaitChildStart } from ${JSON.stringify(pathToFileURL(resolve("src/process/terminal-spawn.ts")).href)};`,
+    `await awaitChildStart(${JSON.stringify(join(dataRoot, "never.txt"))}, 1500, 50)`,
     `  .then(() => process.exit(0), () => process.exit(3));`,
   ].join("\n"), "utf8");
 
@@ -228,9 +228,10 @@ test("titles the window with the generation the successor is about to become", a
   });
 
   const environment = spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
-  expect(environment.LANE_ROUTER_ROTATION_TITLE).toBe("alpha/design gen5");
+  expect(environment.LANE_ROUTER_CHILD_TITLE).toBe("alpha/design gen5");
+  expect(environment.LANE_ROUTER_CHILD_WINDOW).toBe("alpha");
   // The title reaches the terminal from the child process, not through this command line.
-  expect(environment.LANE_ROUTER_ROTATION_COMMAND).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_ROTATION_CHILD");
+  expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD");
 });
 
 test("falls back to the bare address when the Router cannot say which generation is next", async () => {
@@ -243,9 +244,42 @@ test("falls back to the bare address when the Router cannot say which generation
 // Windows Terminal splits its command line on `;`. A two-statement command therefore made wt try
 // to launch everything after the semicolon as a program: 0x80070002, file not found.
 test("keeps the terminal command free of anything Windows Terminal would split on", () => {
-  const request = { backend: "claude" as const, cwd: "D:\p", prompt: "p", statusPath: "D:\s.txt" };
-  const environment = rotationChildEnvironment(request, {}, "alpha/design gen5");
-  expect(environment.LANE_ROUTER_ROTATION_COMMAND).not.toContain(";");
+  const request = { mode: "prompt" as const, backend: "claude" as const, cwd: "D:\\p", prompt: "p", statusPath: "D:\\s.txt" };
+  const environment = childEnvironment(request, {}, "alpha/design gen5");
+  expect(environment.LANE_ROUTER_CHILD_COMMAND).not.toContain(";");
   // The title still has to travel, just not through the shell.
-  expect(environment.LANE_ROUTER_ROTATION_TITLE).toBe("alpha/design gen5");
+  expect(environment.LANE_ROUTER_CHILD_TITLE).toBe("alpha/design gen5");
+});
+
+test("passes the terminal choice through to the child environment's command syntax", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  const handoffRoot = join(dataRoot, "rotation-handoffs");
+  mkdirSync(handoffRoot);
+  const handoff = join(handoffRoot, "00000000-0000-4000-8000-000000000007.md");
+  writeFileSync(handoff, "handoff", "utf8");
+  const spawnTerminal = terminalThatStarts();
+
+  await launchRotation(["claude", "alpha/design", "--handoff-file", handoff, "--terminal", "cmd"], {
+    dataRoot, spawnTerminal,
+  });
+
+  const environment = spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
+  expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"\"");
+});
+
+test("rejects an unknown terminal choice without opening anything", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  const handoffRoot = join(dataRoot, "rotation-handoffs");
+  mkdirSync(handoffRoot);
+  const handoff = join(handoffRoot, "00000000-0000-4000-8000-000000000008.md");
+  writeFileSync(handoff, "handoff", "utf8");
+  const spawnTerminal = vi.fn(async () => undefined);
+
+  await expect(launchRotation(["claude", "alpha/design", "--handoff-file", handoff, "--terminal", "konsole"], {
+    dataRoot, spawnTerminal,
+  })).rejects.toThrow(/--terminal/u);
+  expect(spawnTerminal).not.toHaveBeenCalled();
+  expect(readFileSync(handoff, "utf8")).toBe("handoff");
 });

@@ -22,10 +22,14 @@ export async function reportClaudeLifecycle(options: {
       method: "POST",
       headers: { "content-type": "application/json" },
       // session_id is the conversation's own identity and survives a restart; the join key is
-      // what lets the Router match this report to a channel opened by a different process.
+      // what lets the Router match this report to a channel opened by a different process. The
+      // cwd is where the session runs — it is what lets a closed lane be resumed in the directory
+      // that owns its project context — and a malformed one drops silently rather than costing
+      // the lifecycle event itself.
       body: JSON.stringify({
         conversationId: value.session_id,
         event: value.hook_event_name,
+        ...(typeof value.cwd === "string" && value.cwd.length > 0 ? { cwd: value.cwd } : {}),
         ...(env.CLAUDE_PID === undefined ? {} : { joinKey: env.CLAUDE_PID }),
       }),
       signal: AbortSignal.timeout(2_000),
@@ -42,7 +46,7 @@ function discoveryUrl(dataRoot = join(homedir(), ".lane-router")): string | unde
   } catch { return undefined; }
 }
 
-function isLifecycleInput(value: unknown): value is { hook_event_name: "Stop" | "UserPromptSubmit"; session_id: string } {
+function isLifecycleInput(value: unknown): value is { hook_event_name: "Stop" | "UserPromptSubmit"; session_id: string; cwd?: unknown } {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const input = value as Record<string, unknown>;
   return (input.hook_event_name === "Stop" || input.hook_event_name === "UserPromptSubmit")

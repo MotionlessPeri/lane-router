@@ -25,6 +25,7 @@ export class ToolService {
           target: parsed.target,
           body: parsed.body,
           kind: parsed.kind,
+          ...(parsed.cc === undefined ? {} : { cc: parsed.cc }),
           ...(parsed.reply_to === undefined ? {} : { replyTo: parsed.reply_to }),
         });
       }

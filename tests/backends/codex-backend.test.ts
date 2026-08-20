@@ -5,7 +5,7 @@ import type { BindingRecord } from "../../src/router/types.js";
 
 const binding: BindingRecord = {
   id: "binding-1", laneAddress: "alpha/design", backend: "codex", conversationId: "thread-1",
-  generation: 1, startup: {}, activeAt: 1, inactiveAt: null,
+  generation: 1, startup: {}, activeAt: 1, inactiveAt: null, cwd: null,
 };
 const notification = {
   laneAddress: "alpha/design", pendingPath: "C:/mailboxes/alpha/design/pending",

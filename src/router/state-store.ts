@@ -27,6 +27,7 @@ interface BindingRow {
   startup_json: string;
   active_at: number;
   inactive_at: number | null;
+  cwd: string | null;
 }
 
 interface MessageRow {
@@ -124,10 +125,7 @@ export class RouterStateStore {
   }
 
   binding(id: string): BindingRecord | undefined {
-    const row = this.database.prepare(`
-      SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at
-      FROM binding WHERE id=?
-    `).get(id) as BindingRow | undefined;
+    const row = this.database.prepare(`${BINDING_SELECT} WHERE id=?`).get(id) as BindingRow | undefined;
     return row ? mapBinding(row) : undefined;
   }
 
@@ -138,47 +136,42 @@ export class RouterStateStore {
   }
 
   activeBindingForLane(laneAddress: string): BindingRecord | undefined {
-    const row = this.database.prepare(`
-      SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at
-      FROM binding WHERE lane_address=? AND inactive_at IS NULL
+    const row = this.database.prepare(`${BINDING_SELECT}
+      WHERE lane_address=? AND inactive_at IS NULL
     `).get(laneAddress) as BindingRow | undefined;
     return row ? mapBinding(row) : undefined;
   }
 
   activeBindingForConversation(backend: BackendName, conversationId: string): BindingRecord | undefined {
-    const row = this.database.prepare(`
-      SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at
-      FROM binding WHERE backend=? AND conversation_id=? AND inactive_at IS NULL
+    const row = this.database.prepare(`${BINDING_SELECT}
+      WHERE backend=? AND conversation_id=? AND inactive_at IS NULL
     `).get(backend, conversationId) as BindingRow | undefined;
     return row ? mapBinding(row) : undefined;
   }
 
   latestBindingForConversation(backend: BackendName, conversationId: string): BindingRecord | undefined {
-    const row = this.database.prepare(`
-      SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at
-      FROM binding WHERE backend=? AND conversation_id=? ORDER BY active_at DESC,id DESC LIMIT 1
+    const row = this.database.prepare(`${BINDING_SELECT}
+      WHERE backend=? AND conversation_id=? ORDER BY active_at DESC,id DESC LIMIT 1
     `).get(backend, conversationId) as BindingRow | undefined;
     return row ? mapBinding(row) : undefined;
   }
 
   activeBindings(backend?: BackendName): BindingRecord[] {
     const rows = backend === undefined
-      ? this.database.prepare(`
-          SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at
-          FROM binding WHERE inactive_at IS NULL ORDER BY lane_address
-        `).all()
-      : this.database.prepare(`
-          SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at
-          FROM binding WHERE inactive_at IS NULL AND backend=? ORDER BY lane_address
-        `).all(backend);
+      ? this.database.prepare(`${BINDING_SELECT} WHERE inactive_at IS NULL ORDER BY lane_address`).all()
+      : this.database.prepare(`${BINDING_SELECT} WHERE inactive_at IS NULL AND backend=? ORDER BY lane_address`).all(backend);
     return (rows as BindingRow[]).map(mapBinding);
   }
 
-  updateBindingStartup(id: string, startup: Readonly<Record<string, unknown>>): BindingRecord {
-    if (this.database.prepare(`
-      UPDATE binding SET startup_json=? WHERE id=?
-    `).run(JSON.stringify(startup), id).changes !== 1) throw new Error(`Binding not found: ${id}`);
-    return this.requireBinding(id);
+  /**
+   * The latest lifecycle-reported working directory for a conversation. Only the active binding
+   * receives reports: an inactive one keeps the cwd it had, as a record of where it actually ran.
+   * A conversation without an active binding has nowhere to record the fact, so it is dropped.
+   */
+  updateBindingCwd(backend: BackendName, conversationId: string, cwd: string): void {
+    this.database.prepare(`
+      UPDATE binding SET cwd=? WHERE backend=? AND conversation_id=? AND inactive_at IS NULL
+    `).run(cwd, backend, conversationId);
   }
 
   deactivateBinding(id: string, generation: number, now: number): boolean {
@@ -297,6 +290,11 @@ export class RouterStateStore {
   }
 }
 
+const BINDING_SELECT = `
+  SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd
+  FROM binding
+`;
+
 const MESSAGE_SELECT = `
   SELECT id,request_key,sender_lane,target_lane,kind,reply_to,relative_path,
     content_sha256,state,created_at,resolved_at,ack_lane,ack_generation,notification_state
@@ -323,6 +321,7 @@ function mapBinding(row: BindingRow): BindingRecord {
     startup: JSON.parse(row.startup_json) as Record<string, unknown>,
     activeAt: row.active_at,
     inactiveAt: row.inactive_at,
+    cwd: row.cwd,
   };
 }
 

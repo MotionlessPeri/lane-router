@@ -49,10 +49,15 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
       state, backends,
       claudeSessions: new ClaudeSessionLocator(join(homedir(), ".claude", "projects")),
       fallbackCwd: resolve(dirname(fileURLToPath(import.meta.url)), "../.."),
+      dataRoot,
     });
     const core = new RouterCore({ state, mailbox, backends, pump, restore, newId: () => randomUUID(), now: Date.now });
     tools = new ToolService(core);
-    server = new LocalRouterServer({ tools, codex, claude: claudeHub, instanceId: randomUUID() });
+    server = new LocalRouterServer({
+      tools, codex, claude: claudeHub, instanceId: randomUUID(),
+      recordCwd: (conversationId, cwd) => state.updateBindingCwd("claude", conversationId, cwd),
+      resumeInfo: (address) => core.resumeInfo(address),
+    });
     mailbox.reconcile(state);
     const discovery = await server.start();
     writeDiscovery(discoveryPath, discovery);

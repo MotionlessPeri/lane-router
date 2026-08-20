@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const ROUTER_SCHEMA_VERSION = 2;
+export const ROUTER_SCHEMA_VERSION = 3;
 
 const MESSAGE_TABLE_SQL = `
 CREATE TABLE message (
@@ -52,7 +52,8 @@ CREATE TABLE binding (
   generation INTEGER NOT NULL CHECK (generation > 0),
   startup_json TEXT NOT NULL,
   active_at INTEGER NOT NULL,
-  inactive_at INTEGER
+  inactive_at INTEGER,
+  cwd TEXT
 );
 
 CREATE UNIQUE INDEX binding_active_lane_idx
@@ -64,7 +65,7 @@ CREATE UNIQUE INDEX binding_lane_generation_idx
 ${MESSAGE_TABLE_SQL}${MESSAGE_INDEX_SQL}`;
 
 export function initializeRouterSchema(database: Database.Database): void {
-  const version = database.pragma("user_version", { simple: true }) as number;
+  let version = database.pragma("user_version", { simple: true }) as number;
   if (version === ROUTER_SCHEMA_VERSION) return;
   if (version === 0) {
     database.transaction(() => {
@@ -73,11 +74,23 @@ export function initializeRouterSchema(database: Database.Database): void {
     })();
     return;
   }
-  if (version === 1) {
-    migrateNotificationStateVocabulary(database);
-    return;
-  }
-  throw new Error(`Router database version ${version} is not supported`);
+  // Migrations chain: each one lifts the database exactly one version, so an old database walks
+  // through every intermediate shape instead of every migration knowing every starting point.
+  if (version === 1) { migrateNotificationStateVocabulary(database); version = 2; }
+  if (version === 2) { addBindingCwdColumn(database); version = 3; }
+  if (version !== ROUTER_SCHEMA_VERSION) throw new Error(`Router database version ${version} is not supported`);
+}
+
+/**
+ * Version 3 records the working directory a conversation last reported through its lifecycle
+ * hook, so a closed lane can be resumed in the directory that owns its project context. NULL
+ * means no lifecycle report has carried a cwd since the binding became active.
+ */
+function addBindingCwdColumn(database: Database.Database): void {
+  database.transaction(() => {
+    database.exec("ALTER TABLE binding ADD COLUMN cwd TEXT;");
+    database.pragma("user_version = 3");
+  })();
 }
 
 /**
@@ -90,7 +103,7 @@ export function initializeRouterSchema(database: Database.Database): void {
  *   2. 旧表改名让出 message，同名索引一并让出
  *   3. 建 version 2 的表与索引
  *   4. 拷数据；notified 精确映射为 sent —— 它当年的含义就是「帧已写出 / turn 已开」
- *   5. 删旧表、置 user_version
+ *   5. 删旧表、置 user_version = 2（只抬到本迁移产出的形态，后续版本由下一段迁移接力）
  *   6. 复查外键完整性后恢复外键开关
  */
 function migrateNotificationStateVocabulary(database: Database.Database): void {
@@ -109,7 +122,7 @@ function migrateNotificationStateVocabulary(database: Database.Database): void {
         FROM message_legacy;
       `);
       database.exec("DROP TABLE message_legacy;");
-      database.pragma(`user_version = ${ROUTER_SCHEMA_VERSION}`);
+      database.pragma("user_version = 2");
     })();
     const violations = database.pragma("foreign_key_check") as unknown[];
     if (violations.length > 0) {

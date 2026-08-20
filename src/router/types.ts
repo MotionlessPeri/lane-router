@@ -40,6 +40,8 @@ export interface BindingRecord {
   readonly startup: Readonly<Record<string, unknown>>;
   readonly activeAt: number;
   readonly inactiveAt: number | null;
+  /** The working directory the conversation last reported; null until a lifecycle report carries one. */
+  readonly cwd: string | null;
 }
 
 export interface MessageRecord {

@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, expect, test, vi } from "vitest";
 
-import { ConversationRestorer, restoreClientCommand } from "../../src/process/conversation-restorer.js";
+import { ConversationRestorer } from "../../src/process/conversation-restorer.js";
 import { openRouterDatabase } from "../../src/router/database.js";
 import { RouterStateStore } from "../../src/router/state-store.js";
 import type { BindingRecord } from "../../src/router/types.js";
@@ -26,25 +26,19 @@ function setup(backend: "codex" | "claude" = "codex", startup: Record<string, un
   const locate = vi.fn(async () => fallbackCwd);
   const restorer = new ConversationRestorer({
     state, backends: { require: () => { if (!backendAvailable) throw new Error("missing backend"); return { restorePresence: () => presence }; } },
-    claudeSessions: { locate }, fallbackCwd, launch, now: () => now,
+    claudeSessions: { locate }, fallbackCwd, dataRoot: root, launch, now: () => now,
   });
   return { database, state, binding, fallbackCwd, launch, locate, restorer, setPresence: (value: typeof presence) => { presence = value; }, setBackendAvailable: (value: boolean) => { backendAvailable = value; }, advance: (ms: number) => { now += ms; } };
 }
-
-test("uses exact resume commands for Codex and Claude", () => {
-  expect(restoreClientCommand({ backend: "codex", conversationId: "thread-1", cwd: "D:\\p" }, {
-    nodePath: "node.exe", codexLauncherPath: "codex-launcher.js", claudeExe: "claude.exe",
-  })).toEqual({ executable: "node.exe", args: ["codex-launcher.js", "resume", "thread-1"] });
-  expect(restoreClientCommand({ backend: "claude", conversationId: "session-1", cwd: "D:\\p" }, {
-    nodePath: "node.exe", codexLauncherPath: "codex-launcher.js", claudeExe: "claude.exe",
-  })).toEqual({ executable: "claude.exe", args: ["--resume", "session-1", "--dangerously-load-development-channels", "server:lane"] });
-});
 
 test("launches an offline Codex binding and reserves it for thirty seconds", async () => {
   const x = setup();
   try {
     await expect(x.restorer.restore(x.binding)).resolves.toEqual({ status: "launch_requested" });
-    expect(x.launch).toHaveBeenCalledWith({ backend: "codex", conversationId: "thread-1", cwd: x.fallbackCwd });
+    expect(x.launch).toHaveBeenCalledWith({
+      mode: "resume", backend: "codex", conversationId: "thread-1", cwd: x.fallbackCwd,
+      statusPath: expect.stringContaining("lane-status"),
+    }, "alpha/design gen4", "alpha");
     await expect(x.restorer.restore(x.binding)).resolves.toEqual({ status: "skipped_launching" });
     x.advance(30_001);
     await expect(x.restorer.restore(x.binding)).resolves.toEqual({ status: "launch_requested" });
@@ -69,7 +63,19 @@ test("recovers and backfills a legacy Claude cwd without rotating the binding", 
   try {
     await expect(x.restorer.restore(x.binding)).resolves.toEqual({ status: "launch_requested" });
     expect(x.locate).toHaveBeenCalledWith(x.binding.conversationId);
-    expect(x.state.activeBindingForLane("alpha/design")).toMatchObject({ id: x.binding.id, generation: 4, startup: { cwd: x.fallbackCwd } });
+    // The backfill lands in the cwd column — the single home — not in startup metadata.
+    expect(x.state.activeBindingForLane("alpha/design")).toMatchObject({ id: x.binding.id, generation: 4, cwd: x.fallbackCwd });
+  } finally { x.database.close(); }
+});
+
+test("prefers the recorded cwd column over legacy startup metadata", async () => {
+  const x = setup("codex", { cwd: "D:\\stale-legacy" });
+  try {
+    x.state.updateBindingCwd("codex", "thread-1", x.fallbackCwd);
+    const fresh = x.state.activeBindingForLane("alpha/design");
+    if (!fresh) throw new Error("expected an active binding");
+    await expect(x.restorer.restore(fresh)).resolves.toEqual({ status: "launch_requested" });
+    expect(x.launch).toHaveBeenCalledWith(expect.objectContaining({ cwd: x.fallbackCwd }), "alpha/design gen4", "alpha");
   } finally { x.database.close(); }
 });
 

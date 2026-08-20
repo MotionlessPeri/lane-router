@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { PlatformBackend, ReachSnapshot } from "../../src/router/backend.js";
+import type { NotificationOutcome, PlatformBackend, ReachSnapshot } from "../../src/router/backend.js";
 import type { CallerContext, ResolvedIdentity } from "../../src/router/types.js";
 import { BackendRegistry } from "../../src/router/backend.js";
 import { openRouterDatabase } from "../../src/router/database.js";
@@ -29,8 +29,16 @@ class FakeBackend implements PlatformBackend {
 
   reachState: ReachSnapshot = { state: "live", connectedAt: 10, lastLifecycleAt: 20, lastNotifiedAt: 30, believedBusy: false };
 
-  async notifyNormal(binding: BindingRecord): Promise<"sent"> { this.notified.push(binding); return "sent"; }
-  async notifyCorrection(binding: BindingRecord): Promise<"sent"> { this.notified.push(binding); return "sent"; }
+  /** Keyed by conversation so one recipient of a copy can be live while another has no channel. */
+  readonly outcomes = new Map<string, NotificationOutcome>();
+  async notifyNormal(binding: BindingRecord): Promise<NotificationOutcome> {
+    this.notified.push(binding);
+    return this.outcomes.get(binding.conversationId) ?? "sent";
+  }
+  async notifyCorrection(binding: BindingRecord): Promise<NotificationOutcome> {
+    this.notified.push(binding);
+    return this.outcomes.get(binding.conversationId) ?? "sent";
+  }
   onAttentionOpportunity(): () => void { return () => undefined; }
   reach(): ReachSnapshot { return this.reachState; }
   identities = new Map<string, string>();
@@ -57,13 +65,27 @@ function setup() {
   let now = 100;
   const pump = new NotificationPump(state, mailbox, backends);
   const restore = vi.fn(async () => ({ status: "launch_requested" as const }));
+  const resolveCwd = vi.fn(async (): Promise<string | null> => null);
   const core = new RouterCore({
     state, mailbox, backends, pump,
-    restore: { restore },
+    restore: { restore, resolveCwd },
     newId: (kind) => `${kind}-${++sequence}`,
     now: () => ++now,
   });
-  return { root, database, state, mailbox, backend, pump, core, restore };
+  return { root, database, state, mailbox, backend, pump, core, restore, resolveCwd };
+}
+
+/** Every pending message file under a mailbox root, so an all-or-nothing write can be checked. */
+function pendingFileCount(root: string): number {
+  let total = 0;
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) walk(join(directory, entry.name));
+      else if (directory.replaceAll("\\", "/").endsWith("/pending")) total += 1;
+    }
+  };
+  walk(root);
+  return total;
 }
 
 /** Rejects with the signal's reason, so a fake wait can be given up on the way a real one is. */
@@ -134,7 +156,7 @@ describe("RouterCore directory and attach", () => {
       expect(x.state.activeBindingForLane("alpha/design")).toMatchObject({ generation: 1, conversationId: "conversation-1" });
       x.state.createLane({ address: "alpha/other", project: "alpha", roleDescription: "Other.", now: 1 });
       await expect(x.core.send(restarted, { target: "alpha/other", kind: "normal", body: "still me" }))
-        .resolves.toMatchObject({ senderLane: "alpha/design" });
+        .resolves.toMatchObject([{ senderLane: "alpha/design" }]);
     } finally { x.database.close(); }
   });
 
@@ -223,7 +245,9 @@ describe("RouterCore directory and attach", () => {
       const first = await x.core.attachCurrent({ ...caller("thread-a"), cwd: "D:\\project-a" }, {
         address: "alpha/design", roleDescription: "Design.",
       });
-      expect(first.binding.startup).toEqual({ cwd: "D:\\project-a" });
+      // The cwd column is the single home for a conversation's directory; startup stays free of it.
+      expect(first.binding.cwd).toBe("D:\\project-a");
+      expect(first.binding.startup).toEqual({});
 
       x.state.createLane({ address: "alpha/target", project: "alpha", roleDescription: "Target.", now: 1 });
       await x.core.send({ ...caller("thread-a", "send:refresh"), cwd: "D:\\project-b" }, {
@@ -231,7 +255,7 @@ describe("RouterCore directory and attach", () => {
       });
 
       expect(x.state.activeBindingForLane("alpha/design")).toMatchObject({
-        id: first.binding.id, generation: first.binding.generation, startup: { cwd: "D:\\project-b" },
+        id: first.binding.id, generation: first.binding.generation, cwd: "D:\\project-b",
       });
     } finally { x.database.close(); }
   });
@@ -341,11 +365,11 @@ describe("RouterCore send and ack", () => {
       await x.core.attachCurrent(caller("source"), { address: "alpha/source", roleDescription: "Source." });
       await x.core.attachCurrent(caller("target", "attach:target"), { address: "alpha/target", roleDescription: "Target." });
       const input = { target: "alpha/target", body: "Do the work.", kind: "normal" as const };
-      const sent = await x.core.send(caller("source", "send:1"), input);
-      const retried = await x.core.send(caller("source", "send:1"), input);
-      expect(retried.id).toBe(sent.id);
+      const [sent] = await x.core.send(caller("source", "send:1"), input);
+      const [retried] = await x.core.send(caller("source", "send:1"), input);
+      expect(retried!.id).toBe(sent!.id);
       expect(x.state.allMessages()).toHaveLength(1);
-      expect(readFileSync(join(x.root, sent.relativePath), "utf8")).toContain("Do the work.");
+      expect(readFileSync(join(x.root, sent!.relativePath), "utf8")).toContain("Do the work.");
       const columns = x.database.pragma("table_info(message)") as Array<{ name: string }>;
       expect(columns.map((column) => column.name)).not.toContain("body");
     } finally { x.database.close(); }
@@ -370,14 +394,115 @@ describe("RouterCore send and ack", () => {
     try {
       await x.core.attachCurrent(caller("source"), { address: "alpha/source", roleDescription: "Source." });
       await x.core.attachCurrent(caller("target", "attach:target"), { address: "alpha/target", roleDescription: "Target." });
-      const first = await x.core.send(caller("source", "send:1"), { target: "alpha/target", body: "One", kind: "normal" });
-      const second = await x.core.send(caller("source", "send:2"), { target: "alpha/target", body: "Two", kind: "normal" });
-      await expect(x.core.ack(caller("source", "ack:wrong"), { messageIds: [first.id] }))
+      const [first] = await x.core.send(caller("source", "send:1"), { target: "alpha/target", body: "One", kind: "normal" });
+      const [second] = await x.core.send(caller("source", "send:2"), { target: "alpha/target", body: "Two", kind: "normal" });
+      await expect(x.core.ack(caller("source", "ack:wrong"), { messageIds: [first!.id] }))
         .rejects.toMatchObject({ code: "MESSAGE_NOT_OWNED" });
-      const result = await x.core.ack(caller("target", "ack:target"), { messageIds: [first.id, second.id] });
-      expect(result.resolved).toEqual([first.id, second.id]);
-      expect(x.state.requireMessage(first.id)).toEqual(expect.objectContaining({ state: "resolved", ackGeneration: 1 }));
-      expect(join(x.root, x.state.requireMessage(first.id).relativePath).replaceAll("\\", "/")).toContain("/resolved/");
+      const result = await x.core.ack(caller("target", "ack:target"), { messageIds: [first!.id, second!.id] });
+      expect(result.resolved).toEqual([first!.id, second!.id]);
+      expect(x.state.requireMessage(first!.id)).toEqual(expect.objectContaining({ state: "resolved", ackGeneration: 1 }));
+      expect(join(x.root, x.state.requireMessage(first!.id).relativePath).replaceAll("\\", "/")).toContain("/resolved/");
+    } finally { x.database.close(); }
+  });
+
+  it("delivers a carbon copy each recipient owns and acks on its own", async () => {
+    const x = setup();
+    try {
+      for (const lane of ["source", "hub", "render", "ui"]) {
+        await x.core.attachCurrent(caller(lane, `attach:${lane}`), { address: `alpha/${lane}`, roleDescription: `${lane}.` });
+      }
+      const copies = await x.core.send(caller("source", "send:cc"), {
+        target: "alpha/hub", cc: ["alpha/render", "alpha/ui"], body: "Three decisions.", kind: "normal",
+      });
+
+      expect(copies.map((copy) => copy.targetLane)).toEqual(["alpha/hub", "alpha/render", "alpha/ui"]);
+      expect(new Set(copies.map((copy) => copy.id)).size).toBe(3);
+      for (const copy of copies) {
+        expect(readFileSync(join(x.root, copy.relativePath), "utf8")).toContain("Three decisions.");
+      }
+
+      // Independent lifecycles: one recipient acking must leave the other copies untouched,
+      // which is the whole reason a copy is a message rather than a second target on one row.
+      await x.core.ack(caller("render", "ack:render"), { messageIds: [copies[1]!.id] });
+      expect(x.state.requireMessage(copies[1]!.id).state).toBe("resolved");
+      expect(x.state.requireMessage(copies[0]!.id).state).toBe("pending");
+      expect(x.state.requireMessage(copies[2]!.id).state).toBe("pending");
+      await expect(x.core.ack(caller("ui", "ack:wrong"), { messageIds: [copies[0]!.id] }))
+        .rejects.toMatchObject({ code: "MESSAGE_NOT_OWNED" });
+    } finally { x.database.close(); }
+  });
+
+  it("names every recipient in each copy, and writes nothing when one of them is unknown", async () => {
+    const x = setup();
+    try {
+      for (const lane of ["source", "hub", "render"]) {
+        await x.core.attachCurrent(caller(lane, `attach:${lane}`), { address: `alpha/${lane}`, roleDescription: `${lane}.` });
+      }
+      const copies = await x.core.send(caller("source", "send:cc"), {
+        target: "alpha/hub", cc: ["alpha/render"], body: "Body.", kind: "normal",
+      });
+      for (const copy of copies) {
+        expect(readFileSync(join(x.root, copy.relativePath), "utf8")).toContain("cc: alpha/hub, alpha/render");
+      }
+
+      // All or nothing. Counting both sides matters: counting rows alone would miss a half state
+      // where a file was written and its row was not.
+      const before = { rows: x.state.allMessages().length, files: pendingFileCount(x.root) };
+      await expect(x.core.send(caller("source", "send:bad"), {
+        target: "alpha/hub", cc: ["alpha/render", "alpha/nobody"], body: "Body.", kind: "normal",
+      })).rejects.toMatchObject({ code: "LANE_NOT_FOUND" });
+      expect({ rows: x.state.allMessages().length, files: pendingFileCount(x.root) }).toEqual(before);
+    } finally { x.database.close(); }
+  });
+
+  it("replays a carbon copy without duplicating any of it", async () => {
+    const x = setup();
+    try {
+      for (const lane of ["source", "hub", "render"]) {
+        await x.core.attachCurrent(caller(lane, `attach:${lane}`), { address: `alpha/${lane}`, roleDescription: `${lane}.` });
+      }
+      const first = await x.core.send(caller("source", "send:cc"), {
+        target: "alpha/hub", cc: ["alpha/render"], body: "Body.", kind: "normal",
+      });
+      const replay = await x.core.send(caller("source", "send:cc"), {
+        target: "alpha/hub", cc: ["alpha/render"], body: "Body.", kind: "normal",
+      });
+      expect(replay.map((copy) => copy.id)).toEqual(first.map((copy) => copy.id));
+      expect(x.state.allMessages()).toHaveLength(2);
+
+      // A replay naming the recipients the other way round is still the same call, and must still
+      // be free. Honest limit: this does not tell an address-derived key from an index-derived one.
+      // A real retry re-sends the identical body, so the order never actually differs, and both
+      // forms survive this - measured, not assumed. The address form is chosen for being
+      // order-independent by construction, not because anyone has hit the other one.
+      const reordered = await x.core.send(caller("source", "send:cc"), {
+        target: "alpha/render", cc: ["alpha/hub"], body: "Body.", kind: "normal",
+      });
+      const byTarget = (copies: readonly { targetLane: string; id: string }[]) =>
+        Object.fromEntries(copies.map((copy) => [copy.targetLane, copy.id]));
+      expect(byTarget(reordered)).toEqual(byTarget(first));
+      expect(x.state.allMessages()).toHaveLength(2);
+    } finally { x.database.close(); }
+  });
+
+  it("reports what the notification actually did, per recipient", async () => {
+    const x = setup();
+    try {
+      for (const lane of ["source", "hub", "render"]) {
+        await x.core.attachCurrent(caller(lane, `attach:${lane}`), { address: `alpha/${lane}`, roleDescription: `${lane}.` });
+      }
+      x.backend.outcomes.set("render", "no_channel");
+
+      const copies = await x.core.send(caller("source", "send:cc"), {
+        target: "alpha/hub", cc: ["alpha/render"], body: "Body.", kind: "normal",
+      });
+
+      // Returning the row captured before notifyLane makes both of these read `pending`, which is
+      // exactly how "nobody was reachable" used to look identical to "delivered".
+      expect(copies.map((copy) => [copy.targetLane, copy.notificationState])).toEqual([
+        ["alpha/hub", "sent"],
+        ["alpha/render", "no_channel"],
+      ]);
     } finally { x.database.close(); }
   });
 
@@ -420,6 +545,56 @@ describe("RouterCore attach when the lane is held by a busy conversation", () =>
       await expect(x.core.attachCurrent(caller("thread-b"), { address: "alpha/design" }, AbortSignal.abort(new Error("caller left"))))
         .rejects.toMatchObject({ code: "ATTACH_WAIT_ENDED", message: expect.stringContaining("ended before") });
       expect(x.state.activeBindingForLane("alpha/design")).toMatchObject({ generation: 1 });
+    } finally { x.database.close(); }
+  });
+});
+
+describe("resume info", () => {
+  it("reports the facts a resume needs for a bound lane", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("thread-1"), { address: "alpha/design", roleDescription: "design" });
+      x.state.updateBindingCwd("codex", "thread-1", "E:\\project");
+      await expect(x.core.resumeInfo("alpha/design")).resolves.toEqual({
+        state: "bound", backend: "codex", conversationId: "thread-1", cwd: "E:\\project",
+        generation: 1, reach: x.backend.reachState,
+      });
+    } finally { x.database.close(); }
+  });
+
+  it("distinguishes a missing lane from an unbound one and rejects malformed addresses", async () => {
+    const x = setup();
+    try {
+      await expect(x.core.resumeInfo("alpha/ghost")).resolves.toEqual({ state: "missing" });
+      await x.core.attachCurrent(caller("thread-1"), { address: "alpha/design", roleDescription: "design" });
+      const binding = x.state.activeBindingForLane("alpha/design");
+      if (!binding) throw new Error("expected an active binding");
+      x.state.deactivateBinding(binding.id, binding.generation, 50);
+      await expect(x.core.resumeInfo("alpha/design")).resolves.toEqual({ state: "unbound" });
+      await expect(x.core.resumeInfo("not-an-address")).rejects.toThrow(/invalid lane address/iu);
+    } finally { x.database.close(); }
+  });
+
+  it("falls back to legacy startup metadata and then to the restorer's resolver", async () => {
+    const x = setup();
+    try {
+      x.state.createLane({ address: "alpha/legacy", project: "alpha", roleDescription: "legacy", now: 1 });
+      x.state.createBinding({
+        id: "binding-legacy", laneAddress: "alpha/legacy", backend: "codex",
+        conversationId: "thread-legacy", generation: 2, startup: { cwd: "D:\\written-by-old-build" }, now: 2,
+      });
+      await expect(x.core.resumeInfo("alpha/legacy")).resolves.toMatchObject({ cwd: "D:\\written-by-old-build" });
+
+      x.state.createLane({ address: "alpha/blank", project: "alpha", roleDescription: "blank", now: 3 });
+      x.state.createBinding({
+        id: "binding-blank", laneAddress: "alpha/blank", backend: "codex",
+        conversationId: "thread-blank", generation: 1, startup: {}, now: 4,
+      });
+      x.resolveCwd.mockResolvedValueOnce("E:\\located");
+      await expect(x.core.resumeInfo("alpha/blank")).resolves.toMatchObject({ cwd: "E:\\located" });
+      // A resolver that finds nothing leaves the fact honest: null, never a guess.
+      x.resolveCwd.mockResolvedValueOnce(null);
+      await expect(x.core.resumeInfo("alpha/blank")).resolves.toMatchObject({ cwd: null });
     } finally { x.database.close(); }
   });
 });

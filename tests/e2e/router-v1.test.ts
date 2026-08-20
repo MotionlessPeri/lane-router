@@ -56,12 +56,12 @@ test("V1 coordinates two lanes through durable files, correction history, ack, r
       expect.objectContaining({ address: "alpha/target", binding: expect.objectContaining({ generation: 1 }) }),
     ]);
 
-    const normal = await first.core.send({ ...source, requestKey: "send-normal" }, { target: "alpha/target", kind: "normal", body: "Original task." });
-    const correction = await first.core.send({ ...source, requestKey: "send-correction" }, { target: "alpha/target", kind: "correction", replyTo: normal.id, body: "Corrected task." });
-    expect(readFileSync(join(root, normal.relativePath), "utf8")).toContain("Original task.");
-    expect(readFileSync(join(root, correction.relativePath), "utf8")).toContain(`reply_to: ${normal.id}`);
-    await first.core.ack({ ...target, requestKey: "ack-batch" }, { messageIds: [normal.id, correction.id] });
-    expect(first.state.requireMessage(normal.id).state).toBe("resolved");
+    const [normal] = await first.core.send({ ...source, requestKey: "send-normal" }, { target: "alpha/target", kind: "normal", body: "Original task." });
+    const [correction] = await first.core.send({ ...source, requestKey: "send-correction" }, { target: "alpha/target", kind: "correction", replyTo: normal!.id, body: "Corrected task." });
+    expect(readFileSync(join(root, normal!.relativePath), "utf8")).toContain("Original task.");
+    expect(readFileSync(join(root, correction!.relativePath), "utf8")).toContain(`reply_to: ${normal!.id}`);
+    await first.core.ack({ ...target, requestKey: "ack-batch" }, { messageIds: [normal!.id, correction!.id] });
+    expect(first.state.requireMessage(normal!.id).state).toBe("resolved");
 
     await first.core.attachCurrent({ backend: "codex", conversationId: "thread-replacement", requestKey: "rotate" }, { address: "alpha/source" });
     await expect(first.core.send({ ...source, requestKey: "stale-send" }, { target: "alpha/target", kind: "normal", body: "stale" }))

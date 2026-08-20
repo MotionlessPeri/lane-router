@@ -14,6 +14,8 @@ export interface LaneRestoreResult {
 
 export interface LaneRestorePort {
   restore(binding: BindingRecord): Promise<LaneRestoreResult>;
+  /** Recovers a conversation's directory from platform records; null when nothing is found. */
+  resolveCwd?(binding: BindingRecord): Promise<string | null>;
 }
 
 export class RouterError extends Error {
@@ -40,6 +42,24 @@ export interface DirectoryEntry {
   readonly binding: DirectoryBinding | null;
   readonly reach: ReachSnapshot | null;
 }
+
+/**
+ * The facts the lane launcher needs to reopen a closed lane. All three shapes are answers, not
+ * errors: a missing lane and an unbound lane are things the launcher tells its caller apart.
+ * Policy — refusing an online lane, an unsupported backend, a missing cwd — stays with the
+ * launcher; this only reports what the Router knows.
+ */
+export type ResumeInfo =
+  | { readonly state: "missing" }
+  | { readonly state: "unbound" }
+  | {
+      readonly state: "bound";
+      readonly backend: "claude" | "codex";
+      readonly conversationId: string;
+      readonly cwd: string | null;
+      readonly generation: number;
+      readonly reach: ReachSnapshot | null;
+    };
 
 interface RouterCoreDependencies {
   readonly state: RouterStateStore;
@@ -74,6 +94,36 @@ export class RouterCore {
     });
   }
 
+  async resumeInfo(address: string): Promise<ResumeInfo> {
+    const parsed = parseLaneAddress(address);
+    if (!this.dependencies.state.lane(parsed.address)) return { state: "missing" };
+    const binding = this.dependencies.state.activeBindingForLane(parsed.address);
+    if (!binding) return { state: "unbound" };
+    // find, not require, for the same reason as directory(): a query must not throw over a
+    // backend this Router does not run. No backend means no reachability claim at all.
+    const backend = this.dependencies.backends.find(binding.backend);
+    return {
+      state: "bound",
+      backend: binding.backend,
+      conversationId: binding.conversationId,
+      cwd: await this.resolveBindingCwd(binding),
+      generation: binding.generation,
+      reach: backend?.reach(binding) ?? null,
+    };
+  }
+
+  /**
+   * The cwd column is the single home for a conversation's directory; `startup.cwd` is only read
+   * as a legacy fallback for bindings written by builds that stored it there. When neither holds
+   * a value, the restorer's resolver may still recover one from the platform's own records — a
+   * miss stays an honest null, never a guess.
+   */
+  private async resolveBindingCwd(binding: BindingRecord): Promise<string | null> {
+    if (binding.cwd !== null) return binding.cwd;
+    if (typeof binding.startup.cwd === "string") return binding.startup.cwd;
+    return await this.dependencies.restore?.resolveCwd?.(binding) ?? null;
+  }
+
   async attachCurrent(context: CallerContext, input: { address: string; roleDescription?: string }, signal?: AbortSignal) {
     const parsed = parseLaneAddress(input.address);
     const state = this.dependencies.state;
@@ -88,7 +138,7 @@ export class RouterCore {
       if (input.roleDescription !== undefined && input.roleDescription !== state.requireLane(parsed.address).roleDescription) {
         state.updateLaneRole(parsed.address, input.roleDescription, this.dependencies.now());
       }
-      return this.bootstrap(state.requireLane(parsed.address), this.refreshStartup(conversationBinding, context), identity);
+      return this.bootstrap(state.requireLane(parsed.address), this.recordCallerCwd(conversationBinding, context), identity);
     }
 
     let lane = state.lane(parsed.address);
@@ -118,7 +168,7 @@ export class RouterCore {
         backend: context.backend,
         conversationId: identity.value,
         generation,
-        startup: context.cwd === undefined ? {} : { cwd: context.cwd },
+        startup: {},
         roleDescription: input.roleDescription,
         now: this.dependencies.now(),
       });
@@ -129,30 +179,55 @@ export class RouterCore {
       throw error;
     }
     if (!binding) throw new RouterError("BINDING_CHANGED", "The lane binding changed while attach was waiting");
+    binding = this.recordCallerCwd(binding, context);
     // The bootstrap names the pending directory, but a lane that takes over a backlog would
     // otherwise wait for the next incoming message before anything offers it a turn.
     await this.dependencies.pump.notifyLane(parsed.address);
     return this.bootstrap(state.requireLane(parsed.address), binding, identity);
   }
 
-  async send(context: CallerContext, input: { target: string; body: string; kind: MessageKind; replyTo?: string }): Promise<MessageRecord> {
+  /**
+   * One call, one copy per recipient — each a whole message with its own id, file and ack. A
+   * shared row would have to teach `ack` what a partly processed message is; separate copies
+   * leave it untouched, and lanes read the same body at their own pace.
+   */
+  async send(context: CallerContext, input: { target: string; body: string; kind: MessageKind; replyTo?: string; cc?: readonly string[] }): Promise<MessageRecord[]> {
     const state = this.dependencies.state;
     const sender = this.requireCallerBinding(context);
-    const target = parseLaneAddress(input.target).address;
-    if (!state.lane(target)) throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${target}`);
+    // Every recipient is resolved before anything is written. Validating as we go would let a
+    // later bad address leave earlier lanes holding a message the sender was told had failed.
+    const recipients: string[] = [];
+    for (const raw of [input.target, ...(input.cc ?? [])]) {
+      const address = parseLaneAddress(raw).address;
+      if (!state.lane(address)) throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${address}`);
+      if (!recipients.includes(address)) recipients.push(address);
+    }
     if (input.kind === "correction" && !input.replyTo) throw new RouterError("REPLY_TO_REQUIRED", "A correction must identify the message it corrects");
     if (input.replyTo && !state.message(input.replyTo)) throw new RouterError("MESSAGE_NOT_FOUND", `Message not found: ${input.replyTo}`);
-    const existing = state.messageByRequestKey(context.requestKey);
-    if (existing) return existing;
-    const message = {
-      id: this.dependencies.newId("message"), requestKey: context.requestKey,
-      senderLane: sender.laneAddress, targetLane: target, kind: input.kind,
-      replyTo: input.replyTo ?? null, createdAt: this.dependencies.now(), body: input.body,
-    };
-    const file = this.dependencies.mailbox.writePending(message);
-    const stored = state.insertMessage({ ...message, relativePath: file.relativePath, contentSha256: file.contentSha256 });
-    await this.dependencies.pump.notifyLane(target);
-    return stored;
+
+    const ids: string[] = [];
+    for (const targetLane of recipients) {
+      // Derived from the address and never from position: the RPC client retries a request whose
+      // connection was refused, and a key built from an index would mint new ones the moment a
+      // replay named the recipients in another order, delivering the message twice.
+      const requestKey = `${context.requestKey}#${targetLane}`;
+      const existing = state.messageByRequestKey(requestKey);
+      if (existing) { ids.push(existing.id); continue; }
+      const message = {
+        id: this.dependencies.newId("message"), requestKey,
+        senderLane: sender.laneAddress, targetLane, kind: input.kind,
+        replyTo: input.replyTo ?? null, createdAt: this.dependencies.now(), body: input.body,
+      };
+      const file = this.dependencies.mailbox.writePending({ ...message, recipients });
+      ids.push(state.insertMessage({ ...message, relativePath: file.relativePath, contentSha256: file.contentSha256 }).id);
+    }
+    // After every copy exists, or the first recipient could wake to a distribution list naming
+    // files that are not there yet.
+    for (const targetLane of recipients) await this.dependencies.pump.notifyLane(targetLane);
+    // Re-read rather than return what was inserted: those rows predate the notification, so their
+    // notificationState is the initial `pending` — which is how a delivery that reached nobody
+    // used to look exactly like one that arrived.
+    return ids.map((id) => state.requireMessage(id));
   }
 
   async ack(context: CallerContext, input: { messageIds: readonly string[] }): Promise<{ resolved: string[] }> {
@@ -187,7 +262,7 @@ export class RouterCore {
   private requireCallerBinding(context: CallerContext) {
     const binding = this.dependencies.state.activeBindingForConversation(context.backend, this.identity(context).value);
     if (!binding) throw new RouterError("NOT_ATTACHED", "The current conversation is not attached to a lane");
-    return this.refreshStartup(binding, context);
+    return this.recordCallerCwd(binding, context);
   }
 
   async restoreProject(context: CallerContext, input: { lanes?: readonly string[] }) {
@@ -200,7 +275,9 @@ export class RouterCore {
       for (const raw of input.lanes) {
         const parsed = parseLaneAddress(raw);
         if (parsed.project !== callerLane.project) {
-          throw new RouterError("RESTORE_LANE_OUTSIDE_PROJECT", `Lane is outside the current project: ${parsed.address}`);
+          // The refusal is deliberate, but a refusal with no way out reads as "this cannot be
+          // done": one lane concluded exactly that and passed it on. The route exists, in a CLI.
+          throw new RouterError("RESTORE_LANE_OUTSIDE_PROJECT", `Lane is outside the current project: ${parsed.address}; open it from a shell with: lane-router-lane open ${parsed.address}`);
         }
         if (!this.dependencies.state.lane(parsed.address)) throw new RouterError("RESTORE_LANE_NOT_FOUND", `Lane not found: ${parsed.address}`);
         addresses.add(parsed.address);
@@ -230,9 +307,11 @@ export class RouterCore {
     return { project: callerLane.project, results };
   }
 
-  private refreshStartup(binding: NonNullable<ReturnType<RouterStateStore["activeBindingForLane"]>>, context: CallerContext) {
-    if (context.cwd === undefined || binding.startup.cwd === context.cwd) return binding;
-    return this.dependencies.state.updateBindingStartup(binding.id, { ...binding.startup, cwd: context.cwd });
+  /** The caller's reported cwd is a fact about its conversation; the cwd column is its home. */
+  private recordCallerCwd(binding: NonNullable<ReturnType<RouterStateStore["activeBindingForLane"]>>, context: CallerContext) {
+    if (context.cwd === undefined || binding.cwd === context.cwd) return binding;
+    this.dependencies.state.updateBindingCwd(binding.backend, binding.conversationId, context.cwd);
+    return this.dependencies.state.requireBinding(binding.id);
   }
 
   private bootstrap(lane: LaneRecord, binding: NonNullable<ReturnType<RouterStateStore["activeBindingForLane"]>>, identity: ResolvedIdentity) {
