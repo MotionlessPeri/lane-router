@@ -161,11 +161,35 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 **预期：** 第 3 步直接成功返回，不需要重启或轮换这条会话；第 4 步读到的 `url` 与第 1 步不同，说明它接的是接替者而不是原来那个。若第 3 步报 `fetch failed`，就是本修复没生效——先确认这条会话确实起于构建之后。
 
-**同时会被这一步验掉的：** 通知路径不受影响（通道本来就会跟过去），所以第 3 步之后从另一条 lane 发一条消息应当照常送达。
+⚠️ **这一步验不掉通知路径，别顺手当它也过了。** 本条只证明 RPC 跟过去了。**通道是另一条重连路径，2026-08-25 实测它没跟过去**——见下面那条独立记录。
 
 **已于 2026-08-18 验证。** 借 lane open/new 真机验收的受控重启完成：一条构建后新起的真实 Claude 会话在 Router 两次被替换（pid 27528 → 40724 → 5836，`discovery.json` 的 url 每次变化）后，同一会话的 `lane_directory` 直接成功返回，无需重启或轮换该会话；期间 6 条在线 lane（均为当日新起会话）保持可用。原记录保留供背景——2026-08-12 实现当天没有跑这条：当时另外 10 条 lane 全部运行构建之前的代码，停 Router 会把它们一起打断。
 
-**顺带一条环境限制：** Router 启动时无条件要求一个能用的 `codex`（`main.ts` 的 `await codex.start()` 在服务器启动之前）。因此在拿不到 `codex` 的 shell 里无法用独立 data root 起一个 Router 来做端到端探针；2026-08-12 尝试过，Router 以 `Unable to fingerprint Codex executable/version` 退出。这不说明该机器没有装 codex——只说明那个 shell 解析不到它。
+**2026-08-25 再次确认（第二次）。** 受控重启：两个 Router（5836 与孤儿 32808）一并停掉、起新的 71528（url 由 `:52784` 变为 `:50579`）；同一条 08-25 20:30 起的会话随后调 `lane_directory` **直接成功**，无需重启或轮换。
+
+**顺带一条环境限制：** Router 启动时无条件要求一个能用的 `codex`（`main.ts` 的 `await codex.start()` 在服务器启动之前）。在拿不到 `codex` 的 shell 里起不了 Router；2026-08-12 与 08-25 两次都以 `Unable to fingerprint Codex executable/version` 退出。**2026-08-25 找到了它**：`C:\Users\xiedong\.codex\.sandbox-bin\codex.exe`（`codex-cli 0.144.2`），不在 PATH 上。⇒ 要从这类 shell 起 Router，设 `CODEX_EXE` 指向它即可（`main.ts` 读 `CODEX_EXE ?? "codex"`），已实测可起。
+
+> 这条也是「找不到有两种成因」的一个实例：08-12 那次只搜了三个根、深度 2，当时**没有**据此断言机器上没装 codex——那个克制是对的，东西确实在，只是在没搜到的地方。
+
+### Router 被换掉之后，`reach` 会在下一次 lifecycle 之前低报
+
+**结论（2026-08-25 实测，含一次被推翻的中途结论）：** 通道**会**自己回来，实测在新 Router 启动后 **6 秒**（`reach.connectedAt` 20:40:47，Router 起于 20:40:42）。但在该会话的**下一次 lifecycle 事件**到达之前，`lane_directory` 对它报 `reach.state = no_channel`——**连接是在的，只是 Router 查不到**。本次 lifecycle 到达时刻是 20:48:44，正是用户下一次输入触发 hook 的时候；这中间约 8 分钟里 `reach` 一直低报。
+
+⚠️ **这一节最初被写成了「已确认缺陷：通道不会自己回来」，那是错的。** 记在这里而不是删掉，因为错误的推理过程本身有判据价值：
+
+| 当时的观测 | 当时的读法 | 实际含义 |
+|---|---|---|
+| `reach = no_channel` 持续两分钟 | 通道没重连 | 通道早就连上了，是关联没建立 |
+| `POST /claude/lifecycle` 带真 conversationId 返回 `accepted:false`，与全零对照组相同 | Router 那边没有这条通道 | 该请求**没带 joinKey**，所以查不到；这不是「没有连接」的证据 |
+| 手动开 WebSocket 一次就 open，随后 lifecycle 返回 `accepted:true` | 对照组证明 Router 正常、客户端坏了 | 那条 URL **带了 `joinKey`**，于是当场建立了关联——它改变了被观测对象，不是纯对照组 |
+
+⇒ **教训**：那个「对照组」把一个副作用带进了被测系统。它看起来是在旁边独立验证 Router，实际上它做的正是被测对象缺的那一步（带 joinKey 建立关联），于是必然成功，且把成功误读成了对客户端的指控。判据是：**探针除了观测，还改了什么？**
+
+**机制（推断，未逐行核实）：** `reportLifecycle(conversationId, event, joinKey)` 用 joinKey 建立 joinKey → conversationId 的映射；`reach(conversationId)` 依赖该映射查连接。Router 重启后映射清空，直到该会话下一次 lifecycle 上报把它重建。
+
+**影响：** 该窗口里 `lane_directory` 会把在线 lane 报成 `no_channel`。⇒ **Router 重启之后，不要用 `reach` 判断哪些 lane 还活着**，先让目标会话跑一个 turn，或直接看进程。投递不受影响（消息照常入 mailbox）。
+
+**这也重新解释了一条旧观测：** 2026-08-12 那次重启后「10 条 lane 只有 2 条通道重连上」，很可能不是通道没连，而是那 8 条当时没人输入、没触发 lifecycle，所以 `reach` 低报。**未复核**——那批会话已关闭。
 
 ### 新窗口不继承父进程的禁色设置
 
