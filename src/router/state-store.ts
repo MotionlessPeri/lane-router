@@ -16,6 +16,7 @@ interface LaneRow {
   role_description: string;
   created_at: number;
   updated_at: number;
+  model: string | null;
 }
 
 interface BindingRow {
@@ -55,17 +56,18 @@ export class RouterStateStore {
     project: string;
     roleDescription: string;
     now: number;
+    model?: string;
   }): LaneRecord {
     this.database.prepare(`
-      INSERT INTO lane(address,project,role_description,created_at,updated_at)
-      VALUES(?,?,?,?,?)
-    `).run(input.address, input.project, input.roleDescription, input.now, input.now);
+      INSERT INTO lane(address,project,role_description,created_at,updated_at,model)
+      VALUES(?,?,?,?,?,?)
+    `).run(input.address, input.project, input.roleDescription, input.now, input.now, input.model ?? null);
     return this.requireLane(input.address);
   }
 
   lane(address: string): LaneRecord | undefined {
     const row = this.database.prepare(`
-      SELECT address,project,role_description,created_at,updated_at
+      SELECT address,project,role_description,created_at,updated_at,model
       FROM lane WHERE address=?
     `).get(address) as LaneRow | undefined;
     return row ? mapLane(row) : undefined;
@@ -79,9 +81,22 @@ export class RouterStateStore {
 
   listLanes(project: string): LaneRecord[] {
     return (this.database.prepare(`
-      SELECT address,project,role_description,created_at,updated_at
+      SELECT address,project,role_description,created_at,updated_at,model
       FROM lane WHERE project=? ORDER BY address
     `).all(project) as LaneRow[]).map(mapLane);
+  }
+
+  /**
+   * The declaration is written verbatim: no allow-list of model names. Such a list goes stale as
+   * models are added, and a stale one rejects the models that actually exist - a worse failure
+   * than passing an unknown name to the CLI, which reports it precisely.
+   */
+  updateLaneModel(address: string, model: string, now: number): LaneRecord {
+    if (!model.trim()) throw new Error("Model is required");
+    if (this.database.prepare(`
+      UPDATE lane SET model=?,updated_at=? WHERE address=?
+    `).run(model, now, address).changes !== 1) throw new Error(`Lane not found: ${address}`);
+    return this.requireLane(address);
   }
 
   updateLaneRole(address: string, roleDescription: string, now: number): LaneRecord {
@@ -189,6 +204,7 @@ export class RouterStateStore {
     generation: number;
     startup: Readonly<Record<string, unknown>>;
     roleDescription?: string;
+    model?: string;
     now: number;
   }): BindingRecord | undefined {
     return this.database.transaction(() => {
@@ -201,6 +217,7 @@ export class RouterStateStore {
         return undefined;
       }
       if (input.roleDescription !== undefined) this.updateLaneRole(input.laneAddress, input.roleDescription, input.now);
+      if (input.model !== undefined) this.updateLaneModel(input.laneAddress, input.model, input.now);
       return this.createBinding(input);
     })();
   }
@@ -308,6 +325,7 @@ function mapLane(row: LaneRow): LaneRecord {
     roleDescription: row.role_description,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    model: row.model,
   };
 }
 

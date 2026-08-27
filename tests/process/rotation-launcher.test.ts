@@ -6,9 +6,9 @@ import { pathToFileURL } from "node:url";
 
 import { afterEach, expect, test, vi } from "vitest";
 
-import { launchRotation, terminalTitle } from "../../src/process/rotation-launcher.js";
+import { launchRotation, laneFacts } from "../../src/process/rotation-launcher.js";
 import {
-  awaitChildStart, childEnvironment, claudeExecutable, withoutVendorSessionIdentity,
+  awaitChildStart, childEnvironment, claudeExecutable, withoutInheritedConsoleDescription, withoutVendorSessionIdentity,
 } from "../../src/process/terminal-spawn.js";
 
 /** Stands in for a terminal that came up and whose CLI reported for itself. */
@@ -101,6 +101,24 @@ test("strips every vendor session variable from the successor's environment", ()
   expect(scrubbed).toEqual({ PATH: "/usr/bin", APPDATA: "C:/AppData", CODEX_EXE: "C:/codex.exe" });
 });
 
+// Measured 2026-08-20 by reading real environment blocks: four windows opened by hand carry
+// neither NO_COLOR nor TERM and draw in colour, while the rotated chain carried NO_COLOR=1 and
+// TERM=xterm-256color into a TUI that drew its whole interface in monochrome. Unset is the
+// measured shape of a healthy window here, so these are removed rather than corrected.
+test("drops what a parent said about its own stream, which is not the console being created", () => {
+  const scrubbed = withoutInheritedConsoleDescription({
+    NO_COLOR: "1", force_color: "0", TERM: "xterm-256color",
+    NO_COLOR_EXTRA: "not the variable", COLORTERM: "truecolor", WT_SESSION: "cd25d3a8", PATH: "/usr/bin",
+  });
+
+  // Exact names, case-insensitively, and not a prefix: Windows treats NO_COLOR and force_color as
+  // the variables the convention names, while NO_COLOR_EXTRA is simply somebody else's.
+  expect(scrubbed).toEqual({
+    NO_COLOR_EXTRA: "not the variable", COLORTERM: "truecolor",
+    WT_SESSION: "cd25d3a8", PATH: "/usr/bin",
+  });
+});
+
 test("resolves the real Claude executable rather than a name spawn cannot find", () => {
   // PATH has claude, claude.cmd and claude.ps1 but no claude.exe, and Node does not use PATHEXT.
   expect(claudeExecutable({ CLAUDE_CODE_EXECPATH: "C:/real/claude.exe" })).toBe("C:/real/claude.exe");
@@ -185,11 +203,16 @@ test("builds the child environment from the source it is given, not from this pr
   const environment = childEnvironment(request, {
     CLAUDE_CODE_SESSION_ID: "bb75097f", CLAUDE_PID: "29496",
     CLAUDE_CODE_EXECPATH: "C:/real/claude.exe", PATH: "/usr/bin",
+    NO_COLOR: "1", TERM: "xterm-256color",
   });
   expect(environment.CLAUDE_CODE_SESSION_ID).toBeUndefined();
   expect(environment.CLAUDE_PID).toBeUndefined();
   expect(environment.CLAUDE_EXE).toBe("C:/real/claude.exe");
   expect(environment.PATH).toBe("/usr/bin");
+  // Both scrubs have to be wired in here, not merely exist: the second one was written because a
+  // rotated window inherited NO_COLOR=1 and drew a monochrome interface all the way through.
+  expect(environment.NO_COLOR).toBeUndefined();
+  expect(environment.TERM).toBeUndefined();
 });
 
 // Only a real process can catch this one: the poll timer must keep the process alive. Unrefed, the
@@ -224,7 +247,7 @@ test("titles the window with the generation the successor is about to become", a
 
   await launchRotation(["claude", "alpha/design", "--handoff-file", handoff], {
     dataRoot, spawnTerminal,
-    terminalTitle: async (address) => `${address} gen5`,
+    laneFacts: async (address) => ({ title: `${address} gen5`, model: undefined }),
   });
 
   const environment = spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
@@ -238,7 +261,7 @@ test("falls back to the bare address when the Router cannot say which generation
   const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
   roots.push(dataRoot);
   // No discovery.json at all: a rotation must not fail because the title would be plainer.
-  await expect(terminalTitle("alpha/design", dataRoot)).resolves.toBe("alpha/design");
+  await expect(laneFacts("alpha/design", dataRoot)).resolves.toEqual({ title: "alpha/design", model: undefined });
 });
 
 // Windows Terminal splits its command line on `;`. A two-statement command therefore made wt try
@@ -283,3 +306,39 @@ test("rejects an unknown terminal choice without opening anything", async () => 
   expect(spawnTerminal).not.toHaveBeenCalled();
   expect(readFileSync(handoff, "utf8")).toBe("handoff");
 });
+
+test("rotates onto the model the lane declares, taken from the lookup it already makes", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  const handoff = newHandoff(dataRoot, "3");
+  const spawned: Array<{ statusPath: string; model?: string }> = [];
+  await launchRotation(["claude", "alpha/design", "--handoff-file", handoff], {
+    dataRoot,
+    // One lookup, two facts. Rotation already asks the directory for the generation to title the
+    // window; asking again for the model would be a second round trip for something in the same
+    // reply.
+    laneFacts: async () => ({ title: "alpha/design gen5", model: "claude-opus-5" }),
+    spawnTerminal: async (request) => { spawned.push(request); writeFileSync(request.statusPath, "ok", "utf8"); },
+  });
+  expect(spawned[0]!.model).toBe("claude-opus-5");
+
+  const undeclared = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(undeclared);
+  const second = newHandoff(undeclared, "4");
+  const plain: Array<{ statusPath: string; model?: string }> = [];
+  await launchRotation(["claude", "alpha/design", "--handoff-file", second], {
+    dataRoot: undeclared,
+    laneFacts: async () => ({ title: "alpha/design gen5", model: undefined }),
+    spawnTerminal: async (request) => { plain.push(request); writeFileSync(request.statusPath, "ok", "utf8"); },
+  });
+  expect(plain[0]!.model).toBeUndefined();
+});
+
+/** A handoff file with a fresh UUID name, which the launcher requires. */
+function newHandoff(dataRoot: string, digit: string): string {
+  const handoffRoot = join(dataRoot, "rotation-handoffs");
+  mkdirSync(handoffRoot, { recursive: true });
+  const path = join(handoffRoot, `0000000${digit}-0000-4000-8000-00000000000${digit}.md`);
+  writeFileSync(path, "handoff", "utf8");
+  return path;
+}

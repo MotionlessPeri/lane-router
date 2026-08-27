@@ -45,9 +45,13 @@ export class ConversationRestorer {
       if (presence === "online") return this.release(binding.id, { status: "skipped_online" });
       if (presence === "unavailable") return this.release(binding.id, failure("backend_unavailable", `${binding.backend} backend is unavailable`));
       const cwd = await this.requireCwd(binding);
+      // The lane's declaration, not the binding's: a model belongs to the role, so reopening
+      // through the Router honours the same declaration the CLI paths do.
+      const declared = this.dependencies.state.requireLane(binding.laneAddress).model;
       const request = {
         mode: "resume", backend: binding.backend, conversationId: binding.conversationId, cwd,
         statusPath: newStatusPath(this.dependencies.dataRoot),
+        ...(declared === null ? {} : { model: declared }),
       } satisfies TerminalChildRequest;
       await (this.dependencies.launch ?? launchRestoreTerminal)(
         request,

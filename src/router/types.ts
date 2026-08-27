@@ -29,6 +29,8 @@ export interface LaneRecord {
   readonly roleDescription: string;
   readonly createdAt: number;
   readonly updatedAt: number;
+  /** The model this role is to run on, or null when the lane declares nothing and the client decides. */
+  readonly model: string | null;
 }
 
 export interface BindingRecord {

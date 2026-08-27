@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const ROUTER_SCHEMA_VERSION = 3;
+export const ROUTER_SCHEMA_VERSION = 4;
 
 const MESSAGE_TABLE_SQL = `
 CREATE TABLE message (
@@ -39,7 +39,8 @@ CREATE TABLE lane (
   project TEXT NOT NULL,
   role_description TEXT NOT NULL CHECK (length(trim(role_description)) > 0),
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  model TEXT
 );
 
 CREATE INDEX lane_project_address_idx ON lane(project,address);
@@ -78,7 +79,24 @@ export function initializeRouterSchema(database: Database.Database): void {
   // through every intermediate shape instead of every migration knowing every starting point.
   if (version === 1) { migrateNotificationStateVocabulary(database); version = 2; }
   if (version === 2) { addBindingCwdColumn(database); version = 3; }
+  if (version === 3) { addLaneModelColumn(database); version = 4; }
   if (version !== ROUTER_SCHEMA_VERSION) throw new Error(`Router database version ${version} is not supported`);
+}
+
+/**
+ * Version 4 records the model a lane declares for itself, so every incarnation of that role runs
+ * on the model the role calls for rather than on whatever the client defaults to. NULL means the
+ * lane has declared nothing, and a lane that declares nothing is launched exactly as before.
+ *
+ * A declaration rather than an observation on purpose: recording what the previous conversation
+ * happened to be using would carry a temporary `/model` switch into every later generation, with
+ * nothing to make that visible.
+ */
+function addLaneModelColumn(database: Database.Database): void {
+  database.transaction(() => {
+    database.exec("ALTER TABLE lane ADD COLUMN model TEXT;");
+    database.pragma("user_version = 4");
+  })();
 }
 
 /**

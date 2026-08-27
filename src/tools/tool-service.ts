@@ -17,6 +17,7 @@ export class ToolService {
         return this.router.attachCurrent(context, {
           address: parsed.address,
           ...(parsed.role_description === undefined ? {} : { roleDescription: parsed.role_description }),
+          ...(parsed.model === undefined ? {} : { model: parsed.model }),
         }, signal);
       }
       case "lane_send": {

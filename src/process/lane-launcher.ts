@@ -15,7 +15,7 @@ import {
 
 const USAGE = [
   "Usage:",
-  "  lane-router-lane new <project>/<lane> --role \"<role description>\" [--backend claude] [--cwd <dir>] [--terminal <wt|powershell|cmd>]",
+  "  lane-router-lane new <project>/<lane> --role \"<role description>\" [--model <model>] [--backend claude] [--cwd <dir>] [--terminal <wt|powershell|cmd>]",
   "  lane-router-lane open <project>/<lane> [--cwd <dir>] [--terminal <wt|powershell|cmd>]",
 ].join("\n");
 
@@ -42,11 +42,14 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     if (directory.some((entry) => entry.address === invocation.address.address)) {
       throw new Error(`Lane ${invocation.address.address} already exists; open it with: lane-router-lane open ${invocation.address.address}`);
     }
-    const prompt = creationPrompt(invocation.address.address, invocation.role);
+    const prompt = creationPrompt(invocation.address.address, invocation.role, invocation.model);
     if (prompt.length > 24_000) throw new Error("The role description is too long; shorten it before creating the lane");
+    // Both halves matter and they are not the same thing: the request starts this window on the
+    // model, the prompt is what makes the lane declare it so every later generation inherits it.
     const request = {
       mode: "prompt", backend: "claude", cwd: invocation.cwd ?? dependencies.cwd ?? process.cwd(),
       prompt, statusPath: newStatusPath(dataRoot),
+      ...(invocation.model === undefined ? {} : { model: invocation.model }),
     } satisfies TerminalChildRequest;
     await openTerminal(dependencies, invocation.terminal, request, invocation.address.address, invocation.address.project);
     return;
@@ -77,6 +80,7 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
   }
   const request = {
     mode: "resume", backend: "claude", cwd, conversationId: info.conversationId, statusPath: newStatusPath(dataRoot),
+    ...(info.model === null ? {} : { model: info.model }),
   } satisfies TerminalChildRequest;
   await openTerminal(dependencies, invocation.terminal, request, `${invocation.address.address} gen${info.generation}`, invocation.address.project);
 }
@@ -85,6 +89,7 @@ interface ParsedInvocation {
   readonly verb: "new" | "open";
   readonly address: LaneAddress;
   readonly role: string;
+  readonly model: string | undefined;
   readonly cwd: string | undefined;
   readonly terminal: TerminalChoice | undefined;
 }
@@ -92,7 +97,9 @@ interface ParsedInvocation {
 function parseInvocation(args: readonly string[]): ParsedInvocation {
   const [verb, rawAddress, ...rest] = args;
   if ((verb !== "new" && verb !== "open") || !rawAddress) throw new Error(USAGE);
-  const allowed = verb === "new" ? ["--role", "--backend", "--cwd", "--terminal"] : ["--cwd", "--terminal"];
+  // `open` takes no --model on purpose: it reopens what the lane already declares, and a flag
+  // here would read as changing that declaration while only affecting this one window.
+  const allowed = verb === "new" ? ["--role", "--model", "--backend", "--cwd", "--terminal"] : ["--cwd", "--terminal"];
   const flags = new Map<string, string>();
   for (let index = 0; index < rest.length; index += 2) {
     const key = rest[index];
@@ -109,11 +116,14 @@ function parseInvocation(args: readonly string[]): ParsedInvocation {
   }
   const role = flags.get("--role") ?? "";
   if (verb === "new" && !role.trim()) throw new Error("--role is required to create a lane");
-  return { verb, address, role, cwd: flags.get("--cwd"), terminal };
+  return { verb, address, role, model: flags.get("--model"), cwd: flags.get("--cwd"), terminal };
 }
 
-function creationPrompt(address: string, role: string): string {
-  return `This is an approved creation of the new lane ${address}.\n\nRead the repository AGENTS.md and applicable referenced instructions completely. Call lane_directory for the project and verify the address is free, then call lane_attach_current with address \`${address}\` and exactly this role_description:\n\n${role}\n\nAfterwards report that the lane is ready and wait for direction; do not start feature work on your own.`;
+function creationPrompt(address: string, role: string, model: string | undefined): string {
+  // The model is named in the attach instruction rather than left to this window alone: what the
+  // lane declares is what every later incarnation runs on, and this window is only the first one.
+  const declaration = model === undefined ? "" : ` and model \`${model}\``;
+  return `This is an approved creation of the new lane ${address}.\n\nRead the repository AGENTS.md and applicable referenced instructions completely. Call lane_directory for the project and verify the address is free, then call lane_attach_current with address \`${address}\`${declaration} and exactly this role_description:\n\n${role}\n\nAfterwards report that the lane is ready and wait for direction; do not start feature work on your own.`;
 }
 
 async function openTerminal(

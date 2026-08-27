@@ -112,3 +112,39 @@ describe("binding cwd", () => {
     } finally { database.close(); }
   });
 });
+
+describe("declared model", () => {
+  it("defaults to nothing declared, and keeps a declaration across later role edits", () => {
+    const { database, store } = setup();
+    try {
+      // Nothing declared is the state every existing lane is in, and it has to survive being
+      // read back rather than turning into an empty string somewhere in the mapping.
+      const plain = store.createLane({ address: "alpha/design", project: "alpha", roleDescription: "design", now: 1 });
+      expect(plain.model).toBeNull();
+
+      const declared = store.createLane({ address: "alpha/review", project: "alpha", roleDescription: "review", now: 1, model: "claude-opus-5" });
+      expect(declared.model).toBe("claude-opus-5");
+
+      // The role and the model are independent facts about the lane: editing one must not clear
+      // the other, which is what makes `lane_attach_current` safe to call with only a role.
+      expect(store.updateLaneRole("alpha/review", "review, revised", 2).model).toBe("claude-opus-5");
+      expect(store.requireLane("alpha/review")).toMatchObject({ roleDescription: "review, revised", model: "claude-opus-5" });
+    } finally { database.close(); }
+  });
+
+  it("sets, replaces and reports a declaration without validating the name", () => {
+    const { database, store } = setup();
+    try {
+      store.createLane({ address: "alpha/design", project: "alpha", roleDescription: "design", now: 1 });
+      expect(store.updateLaneModel("alpha/design", "sonnet", 2).model).toBe("sonnet");
+      expect(store.updateLaneModel("alpha/design", "claude-opus-5", 3).model).toBe("claude-opus-5");
+
+      // No allow-list: a model this build has never heard of must still be storable, because a
+      // list of valid names goes stale and then rejects the models that actually exist.
+      expect(store.updateLaneModel("alpha/design", "no-such-model-9", 4).model).toBe("no-such-model-9");
+      expect(store.listLanes("alpha")[0]).toMatchObject({ model: "no-such-model-9" });
+
+      expect(() => store.updateLaneModel("alpha/missing", "sonnet", 5)).toThrow(/not found/iu);
+    } finally { database.close(); }
+  });
+});

@@ -38,6 +38,8 @@ export interface DirectoryBinding {
 export interface DirectoryEntry {
   readonly address: string;
   readonly roleDescription: string;
+  /** The model this lane declares, or null when it declares none and the client decides. */
+  readonly model: string | null;
   readonly backend: "claude" | "codex" | null;
   readonly binding: DirectoryBinding | null;
   readonly reach: ReachSnapshot | null;
@@ -59,6 +61,7 @@ export type ResumeInfo =
       readonly cwd: string | null;
       readonly generation: number;
       readonly reach: ReachSnapshot | null;
+      readonly model: string | null;
     };
 
 interface RouterCoreDependencies {
@@ -79,7 +82,7 @@ export class RouterCore {
     return this.dependencies.state.listLanes(project).map((lane) => {
       const binding = this.dependencies.state.activeBindingForLane(lane.address);
       if (!binding) {
-        return { address: lane.address, roleDescription: lane.roleDescription, backend: null, binding: null, reach: null };
+        return { address: lane.address, roleDescription: lane.roleDescription, model: lane.model, backend: null, binding: null, reach: null };
       }
       // find, not require: a lane may name a backend this Router does not run, and a query
       // tool must not throw for that. A missing backend means no reachability claim at all.
@@ -87,6 +90,7 @@ export class RouterCore {
       return {
         address: lane.address,
         roleDescription: lane.roleDescription,
+        model: lane.model,
         backend: binding.backend,
         binding: { generation: binding.generation, attachedAt: binding.activeAt },
         reach: backend?.reach(binding) ?? null,
@@ -109,6 +113,7 @@ export class RouterCore {
       cwd: await this.resolveBindingCwd(binding),
       generation: binding.generation,
       reach: backend?.reach(binding) ?? null,
+      model: this.dependencies.state.requireLane(parsed.address).model,
     };
   }
 
@@ -124,7 +129,7 @@ export class RouterCore {
     return await this.dependencies.restore?.resolveCwd?.(binding) ?? null;
   }
 
-  async attachCurrent(context: CallerContext, input: { address: string; roleDescription?: string }, signal?: AbortSignal) {
+  async attachCurrent(context: CallerContext, input: { address: string; roleDescription?: string; model?: string }, signal?: AbortSignal) {
     const parsed = parseLaneAddress(input.address);
     const state = this.dependencies.state;
     const precondition = this.dependencies.backends.require(context.backend).validateAttach?.(context);
@@ -138,13 +143,21 @@ export class RouterCore {
       if (input.roleDescription !== undefined && input.roleDescription !== state.requireLane(parsed.address).roleDescription) {
         state.updateLaneRole(parsed.address, input.roleDescription, this.dependencies.now());
       }
+      // Omission leaves the declaration alone rather than clearing it: role and model are two
+      // separate facts, and attach is what people call to edit either one on its own.
+      if (input.model !== undefined && input.model !== state.requireLane(parsed.address).model) {
+        state.updateLaneModel(parsed.address, input.model, this.dependencies.now());
+      }
       return this.bootstrap(state.requireLane(parsed.address), this.recordCallerCwd(conversationBinding, context), identity);
     }
 
     let lane = state.lane(parsed.address);
     if (!lane) {
       if (!input.roleDescription?.trim()) throw new RouterError("ROLE_REQUIRED", "A role description is required when creating a lane");
-      lane = state.createLane({ address: parsed.address, project: parsed.project, roleDescription: input.roleDescription, now: this.dependencies.now() });
+      lane = state.createLane({
+        address: parsed.address, project: parsed.project, roleDescription: input.roleDescription,
+        now: this.dependencies.now(), ...(input.model === undefined ? {} : { model: input.model }),
+      });
     }
     const observed = state.activeBindingForLane(parsed.address) ?? null;
     if (observed) {
@@ -170,6 +183,7 @@ export class RouterCore {
         generation,
         startup: {},
         roleDescription: input.roleDescription,
+        model: input.model,
         now: this.dependencies.now(),
       });
     } catch (error) {

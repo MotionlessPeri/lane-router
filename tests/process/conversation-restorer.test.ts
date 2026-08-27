@@ -91,3 +91,24 @@ test("isolates invalid cwd and terminal launch failures into stable results", as
     await expect(failed.restorer.restore(failed.binding)).resolves.toEqual({ status: "launch_requested" });
   } finally { failed.database.close(); }
 });
+
+test("restores a lane onto the model it declares", async () => {
+  // lane_restore_project opens windows through this path rather than through the CLI, so a
+  // declaration has to reach it too - otherwise reopening a project quietly bypasses the model
+  // that rotate and open both honour.
+  const x = setup("claude");
+  try {
+    x.state.updateLaneModel("alpha/design", "claude-opus-5", 3);
+    await expect(x.restorer.restore(x.state.activeBindingForLane("alpha/design")!)).resolves.toEqual({ status: "launch_requested" });
+    expect(x.launch.mock.calls.at(-1)![0]).toMatchObject({ model: "claude-opus-5" });
+  } finally { x.database.close(); }
+});
+
+test("leaves the restore request without a model when the lane declares none", async () => {
+  const x = setup("claude");
+  try {
+    await expect(x.restorer.restore(x.state.activeBindingForLane("alpha/design")!)).resolves.toEqual({ status: "launch_requested" });
+    // Absent, not empty: an empty string would reach the CLI as `--model ""`.
+    expect(x.launch.mock.calls.at(-1)![0]).not.toHaveProperty("model");
+  } finally { x.database.close(); }
+});

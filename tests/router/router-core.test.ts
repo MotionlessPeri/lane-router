@@ -128,7 +128,7 @@ describe("RouterCore directory and attach", () => {
       x.state.createLane({ address: "alpha/design", project: "alpha", roleDescription: "Own design.", now: 1 });
       x.state.createLane({ address: "beta/test", project: "beta", roleDescription: "Own tests.", now: 1 });
       expect(await x.core.directory("alpha")).toEqual([
-        { address: "alpha/design", roleDescription: "Own design.", backend: null, binding: null, reach: null },
+        { address: "alpha/design", roleDescription: "Own design.", model: null, backend: null, binding: null, reach: null },
       ]);
     } finally { x.database.close(); }
   });
@@ -358,6 +358,43 @@ describe("RouterCore project restore", () => {
   });
 });
 
+describe("declared model", () => {
+  it("records a declaration on create, replaces it on request, and never clears it by omission", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("first"), { address: "alpha/design", roleDescription: "design", model: "claude-opus-5" });
+      expect(x.state.requireLane("alpha/design").model).toBe("claude-opus-5");
+
+      // Re-attaching to say something about the role must leave the model alone: the two are
+      // separate facts, and attach is the tool people call to edit either one.
+      await x.core.attachCurrent(caller("first"), { address: "alpha/design", roleDescription: "design, revised" });
+      expect(x.state.requireLane("alpha/design")).toMatchObject({ roleDescription: "design, revised", model: "claude-opus-5" });
+
+      await x.core.attachCurrent(caller("first"), { address: "alpha/design", model: "sonnet" });
+      expect(x.state.requireLane("alpha/design").model).toBe("sonnet");
+
+      // A lane that declares nothing stays null rather than acquiring some default here.
+      await x.core.attachCurrent(caller("second", "attach:second"), { address: "alpha/plain", roleDescription: "plain" });
+      expect(x.state.requireLane("alpha/plain").model).toBeNull();
+    } finally { x.database.close(); }
+  });
+
+  it("reports the declaration through both query surfaces the launchers read", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("first"), { address: "alpha/design", roleDescription: "design", model: "claude-opus-5" });
+      await x.core.attachCurrent(caller("second", "attach:second"), { address: "alpha/plain", roleDescription: "plain" });
+
+      // rotate reads the directory it already fetches for the window title; open reads
+      // resume-info. Both have to carry it, or one of the three entry points goes blind.
+      expect(x.core.directory("alpha").map((entry) => [entry.address, entry.model]))
+        .toEqual([["alpha/design", "claude-opus-5"], ["alpha/plain", null]]);
+      await expect(x.core.resumeInfo("alpha/design")).resolves.toMatchObject({ state: "bound", model: "claude-opus-5" });
+      await expect(x.core.resumeInfo("alpha/plain")).resolves.toMatchObject({ state: "bound", model: null });
+    } finally { x.database.close(); }
+  });
+});
+
 describe("RouterCore send and ack", () => {
   it("writes one immutable message body to the mailbox and deduplicates a tool retry", async () => {
     const x = setup();
@@ -557,7 +594,7 @@ describe("resume info", () => {
       x.state.updateBindingCwd("codex", "thread-1", "E:\\project");
       await expect(x.core.resumeInfo("alpha/design")).resolves.toEqual({
         state: "bound", backend: "codex", conversationId: "thread-1", cwd: "E:\\project",
-        generation: 1, reach: x.backend.reachState,
+        generation: 1, reach: x.backend.reachState, model: null,
       });
     } finally { x.database.close(); }
   });
