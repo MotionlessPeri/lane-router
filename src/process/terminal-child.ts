@@ -25,10 +25,14 @@ export function childCommand(
   // which is what keeps a reopened lane's window and /resume picker entry legible.
   const title = environment.LANE_ROUTER_CHILD_TITLE;
   const name = title ? ["--name", title] : [];
+  // A lane that declares no model contributes nothing here: the argument list stays exactly what
+  // it was before models were recorded at all, which is what keeps every undeclared lane on the
+  // behaviour it has today rather than on a default this code would be choosing for it.
+  const model = request.model ? ["--model", request.model] : [];
   const claude = environment.CLAUDE_EXE ?? "claude";
   return request.mode === "prompt"
-    ? { executable: claude, args: [...name, "--dangerously-load-development-channels", "server:lane", "--", request.prompt] }
-    : { executable: claude, args: [...name, "--resume", request.conversationId, "--dangerously-load-development-channels", "server:lane"] };
+    ? { executable: claude, args: [...name, ...model, "--dangerously-load-development-channels", "server:lane", "--", request.prompt] }
+    : { executable: claude, args: [...name, ...model, "--resume", request.conversationId, "--dangerously-load-development-channels", "server:lane"] };
 }
 
 function run(): void {

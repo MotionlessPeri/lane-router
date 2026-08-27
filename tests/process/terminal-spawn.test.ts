@@ -85,6 +85,35 @@ test("builds the child command for each mode and backend", () => {
   });
 });
 
+test("passes a declared model to Claude, and changes nothing at all without one", () => {
+  const here = join("C:", "dist", "process");
+
+  // The load-bearing half. A lane that declares nothing must produce the argument list this
+  // project shipped before models existed - byte for byte, not merely "close enough". Without
+  // this, an implementation that always appends `--model undefined` passes everything else.
+  expect(childCommand(promptRequest, { CLAUDE_EXE: "C:/claude.exe" }, here).args)
+    .toEqual(["--dangerously-load-development-channels", "server:lane", "--", "hello"]);
+  expect(childCommand(resumeRequest, {}, here).args)
+    .toEqual(["--resume", "4b50f153-0932-4442-840b-98a4b7593a51", "--dangerously-load-development-channels", "server:lane"]);
+
+  expect(childCommand({ ...promptRequest, model: "claude-opus-5" }, { CLAUDE_EXE: "C:/claude.exe" }, here).args)
+    .toEqual(["--model", "claude-opus-5", "--dangerously-load-development-channels", "server:lane", "--", "hello"]);
+  expect(childCommand({ ...resumeRequest, model: "sonnet" }, {}, here).args)
+    .toEqual(["--model", "sonnet", "--resume", "4b50f153-0932-4442-840b-98a4b7593a51", "--dangerously-load-development-channels", "server:lane"]);
+
+  // Codex selects its model its own way; --model is a Claude flag and must not leak into either
+  // codex mode, even when the lane carries a declaration for a later backend switch.
+  expect(childCommand({ ...promptRequest, backend: "codex", model: "claude-opus-5" }, {}, here).args)
+    .toEqual([join(here, "codex-launcher.js"), "--prompt", "hello"]);
+  expect(childCommand({ mode: "resume", backend: "codex", cwd: "D:\p", conversationId: "thread-1", statusPath: "D:\s.txt", model: "sonnet" }, {}, here).args)
+    .toEqual([join(here, "codex-launcher.js"), "resume", "thread-1"]);
+
+  // A name this build has never heard of travels through untouched: validation belongs to the
+  // CLI, which knows the real list, not to a copy of it that would go stale here.
+  expect(childCommand({ ...promptRequest, model: "no-such-model-9" }, {}, here).args)
+    .toContain("no-such-model-9");
+});
+
 test("names the Claude session after the lane so every window and picker entry stays legible", () => {
   const here = join("C:", "dist", "process");
   const titled = { LANE_ROUTER_CHILD_TITLE: "alpha/worker gen3" };

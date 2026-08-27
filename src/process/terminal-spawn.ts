@@ -17,6 +17,8 @@ export type TerminalChildRequest =
       readonly prompt: string;
       /** Where the terminal child reports whether the CLI actually started. */
       readonly statusPath: string;
+      /** The lane's declared model, absent when it declares none. Claude backend only. */
+      readonly model?: string;
     }
   | {
       readonly mode: "resume";
@@ -24,6 +26,8 @@ export type TerminalChildRequest =
       readonly cwd: string;
       readonly conversationId: string;
       readonly statusPath: string;
+      /** The lane's declared model, absent when it declares none. Claude backend only. */
+      readonly model?: string;
     };
 
 export type TerminalChoice = "wt" | "powershell" | "cmd";
