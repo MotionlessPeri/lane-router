@@ -204,6 +204,7 @@ export class RouterStateStore {
     generation: number;
     startup: Readonly<Record<string, unknown>>;
     roleDescription?: string;
+    model?: string;
     now: number;
   }): BindingRecord | undefined {
     return this.database.transaction(() => {
@@ -216,6 +217,7 @@ export class RouterStateStore {
         return undefined;
       }
       if (input.roleDescription !== undefined) this.updateLaneRole(input.laneAddress, input.roleDescription, input.now);
+      if (input.model !== undefined) this.updateLaneModel(input.laneAddress, input.model, input.now);
       return this.createBinding(input);
     })();
   }

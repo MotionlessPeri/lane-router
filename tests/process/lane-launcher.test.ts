@@ -159,3 +159,42 @@ test("passes the terminal choice through and fails when the child never reports"
   const broken = fakes({ spawnTerminal: terminalThatStarts("The lane CLI could not be started: spawn claude ENOENT") });
   await expect(launchLane(["new", "alpha/worker", "--role", "r"], broken)).rejects.toThrow(/spawn claude ENOENT/u);
 });
+
+test("carries a model into a new lane, both to the CLI and into what the lane will declare", async () => {
+  const deps = fakes();
+  await launchLane(["new", "alpha/worker", "--role", "Owns widgets.", "--model", "claude-opus-5"], deps);
+
+  const request = deps.spawnTerminal.mock.calls[0]![0] as TerminalChildRequest & { prompt: string };
+  // Two places, because they answer different questions. The request starts this window on the
+  // right model; the prompt is what makes the lane itself declare it, so the next generation
+  // gets it too rather than only this one.
+  expect(request.model).toBe("claude-opus-5");
+  expect(request.prompt).toContain("claude-opus-5");
+
+  // Omitting it must leave the request without the field at all, not with an empty one: an empty
+  // string would reach the CLI as `--model ""`.
+  const plain = fakes();
+  await launchLane(["new", "alpha/worker", "--role", "Owns widgets."], plain);
+  expect((plain.spawnTerminal.mock.calls[0]![0] as TerminalChildRequest).model).toBeUndefined();
+});
+
+test("reopens a lane on the model that lane declares", async () => {
+  const bound = (model: string | null) => ({
+    state: "bound" as const, backend: "claude" as const, conversationId: "session-1",
+    cwd: "D:\project", generation: 3, reach: reach("no_channel"), model,
+  });
+
+  const declared = fakes({ queryResumeInfo: vi.fn(async () => bound("sonnet")) });
+  await launchLane(["open", "alpha/worker"], declared);
+  expect((declared.spawnTerminal.mock.calls[0]![0] as TerminalChildRequest).model).toBe("sonnet");
+
+  const undeclared = fakes({ queryResumeInfo: vi.fn(async () => bound(null)) });
+  await launchLane(["open", "alpha/worker"], undeclared);
+  expect((undeclared.spawnTerminal.mock.calls[0]![0] as TerminalChildRequest).model).toBeUndefined();
+});
+
+test("refuses --model where there is no lane to declare it on", async () => {
+  // `open` reopens what the lane already declares; accepting a flag here would look like it
+  // changed the declaration when it would only have changed this one window.
+  await expect(launchLane(["open", "alpha/worker", "--model", "sonnet"], fakes())).rejects.toThrow(/Usage/u);
+});

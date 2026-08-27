@@ -16,7 +16,7 @@ interface RotationDependencies {
   readonly cwd?: string;
   readonly spawnTerminal?: (request: TerminalChildRequest, environment: NodeJS.ProcessEnv) => Promise<void>;
   readonly startTimeoutMs?: number;
-  readonly terminalTitle?: (address: string, dataRoot: string) => Promise<string>;
+  readonly laneFacts?: (address: string, dataRoot: string) => Promise<LaneFacts>;
   readonly wtAvailable?: boolean;
 }
 
@@ -47,8 +47,12 @@ export async function launchRotation(args: readonly string[], dependencies: Rota
   mkdirSync(dirname(statusPath), { recursive: true });
   rmSync(statusPath, { force: true });
   const resolved = resolveTerminal(terminal, dependencies.wtAvailable ?? wtOnPath(process.env));
-  const request = { mode: "prompt", backend, cwd: dependencies.cwd ?? process.cwd(), prompt, statusPath } satisfies TerminalChildRequest;
-  const title = await (dependencies.terminalTitle ?? terminalTitle)(address, dataRoot);
+  const facts = await (dependencies.laneFacts ?? laneFacts)(address, dataRoot);
+  const request = {
+    mode: "prompt", backend, cwd: dependencies.cwd ?? process.cwd(), prompt, statusPath,
+    ...(facts.model === undefined ? {} : { model: facts.model }),
+  } satisfies TerminalChildRequest;
+  const title = facts.title;
   const environment = childEnvironment(request, process.env, title, resolved.shell, parsedAddress.project);
   await (dependencies.spawnTerminal ?? ((current, env) => spawnTerminal(current, env, terminalLaunchScript(resolved))))(request, environment);
   // Opening a window proves nothing, so the handoff is not retired until the successor itself
@@ -73,13 +77,21 @@ function bootstrapPrompt(address: string, handoff: string): string {
   return `This is an approved automatic rotation of the existing lane ${address}.\n\nRead the repository AGENTS.md and applicable referenced instructions completely. Call lane_directory for the project, verify the existing lane and role, then call lane_attach_current with address \`${address}\` and no role_description. Read every pending mailbox .md file returned by pendingPath and process or acknowledge it as appropriate. Restore the handoff below, but do not start new feature work; only report that takeover is complete and ready to continue.\n\n## Handoff\n\n${handoff}`;
 }
 
+export interface LaneFacts {
+  /** What the window is called: the lane, and the generation the successor is about to become. */
+  readonly title: string;
+  /** The model the lane declares, undefined when it declares none. */
+  readonly model: string | undefined;
+}
+
 /**
- * Which incarnation of the lane this window is. The generation is only assigned when the successor
- * attaches, which is after the window exists, so the title names the generation the successor is
- * about to become. Asking the Router can fail — it may not be running yet — and a window with a
- * slightly plainer title is not worth failing a rotation over.
+ * Both facts the rotation needs about the lane, from one lookup. The generation is only assigned
+ * when the successor attaches, which is after the window exists, so the title names the generation
+ * it is about to become. Asking the Router can fail — it may not be running yet — and neither a
+ * plainer window title nor a successor on the default model is worth failing a rotation over, so
+ * a miss degrades instead of throwing.
  */
-export async function terminalTitle(address: string, dataRoot: string): Promise<string> {
+export async function laneFacts(address: string, dataRoot: string): Promise<LaneFacts> {
   try {
     const { url } = JSON.parse(readFileSync(resolve(dataRoot, "discovery.json"), "utf8")) as { url: string };
     const response = await fetch(`${url}/rpc`, {
@@ -89,10 +101,14 @@ export async function terminalTitle(address: string, dataRoot: string): Promise<
         context: { backend: "claude", conversationId: "lane-router-rotate", requestKey: `rotate:${randomUUID()}` },
       }),
     });
-    const body = await response.json() as { result?: Array<{ address: string; binding: { generation: number } | null }> };
-    const generation = body.result?.find((entry) => entry.address === address)?.binding?.generation;
-    return generation === undefined ? address : `${address} gen${generation + 1}`;
-  } catch { return address; }
+    const body = await response.json() as { result?: Array<{ address: string; model: string | null; binding: { generation: number } | null }> };
+    const entry = body.result?.find((current) => current.address === address);
+    const generation = entry?.binding?.generation;
+    return {
+      title: generation === undefined ? address : `${address} gen${generation + 1}`,
+      model: entry?.model ?? undefined,
+    };
+  } catch { return { title: address, model: undefined }; }
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
