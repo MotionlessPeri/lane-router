@@ -224,6 +224,15 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 **最后验证：** 尚未真机执行。自动测试覆盖参数构造（四种 backend × mode 组合、声明与未声明）、迁移、四条取值路径与「省略不清空」，并做过 8 个变异检验；**但「窗口里真的跑在那个模型上」只能人眼确认**。
 
+#### TC-MODEL-3：Codex new 与 resume 都采用声明模型
+
+1. 在隔离的 Router data root 中创建一条 Codex lane，声明一个与 `config.toml` 默认值不同的真实模型。
+2. 分别经 prompt 与 resume 开窗路径启动 stock Codex；记录实际进程 argv，并在产生 turn 后检查 rollout 中的 `model`。
+3. 用 `model: null` 重复参数构造，确认 argv 与旧版本逐字相同。
+4. 传入明显不存在的模型名，确认 Lane Router 不提前拒绝，错误来自 stock Codex。
+
+**预期：** prompt 与 resume 的 argv 都含声明模型；能产生 turn 的路径在 rollout 中记录该模型；null 不添加参数；未知模型由 Codex 自己报错。测试结束后停止隔离 Router、App Server 与 TUI 的精确 PID，只删除经解析确认位于临时目录下的 fixture root。生产 discovery、lane/binding/message 数量在测试前后不变。
+
 ### 新窗口不继承父进程的禁色设置
 
 **目标：** rotate / new / open 开出来的窗口里，TUI 是彩色的。
@@ -312,8 +321,18 @@ NO_COLOR=1 lane-router-lane new <project>/<lane> --role "<角色说明>"
 
 ### TC-LANE-REFUSE: 拒绝语义
 
-**目标：** lane 在线时 `open` 拒绝（already online）；不存在的 lane 提示走 `new`；`--backend codex` 与 codex binding 报暂不支持；无记录 cwd 时要求显式 `--cwd`。
+**目标：** lane 在线时 `open` 拒绝（already online）；不存在的 lane 提示走 `new`；backend unavailable 时不启动；无记录 cwd 时要求显式 `--cwd`。Codex binding 在 backend `restorePresence=offline` 时与 Claude 一样恢复，不能因 `reach=unconfirmed` 被跳过。
 **状态：** 参数与拒绝分支已有自动测试覆盖；在线拒绝的真机路径随 TC-LANE-OPEN 顺带验证。
+
+### TC-LANE-BATCH-CODEX：批量打开离线 Codex lanes
+
+**目标：** `scripts/open-project-lanes.mjs <project>` 只跳过 backend 判定为在线的 lane，不把共享 App Server 留下的 `reach=unconfirmed` 当作在线。
+
+1. 使用独立的 `LANE_ROUTER_DATA_ROOT` 启动隔离 Router，准备至少一条 `restorePresence=offline` 且 `reach=unconfirmed` 的 Codex binding，以及一条真正在线的 binding。
+2. 运行批量脚本，确认离线 lane 进入 opening，在线 lane 记为 skipped；backend unavailable 单独记为 failed，不阻断其他 lane。
+3. 核对所有 child launcher 使用同一个隔离 data root，没有连接生产 discovery。
+
+**预期：** 离线 lane 打开、在线 lane 跳过、逐 lane 失败互不影响；脚本退出码只取决于 failed 是否为空。测试前后生产 Router PID 与 lane/binding/message 数量不变。
 
 ## 当前记录
 

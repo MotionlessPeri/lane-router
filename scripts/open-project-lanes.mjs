@@ -23,6 +23,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = process.env.LANE_ROUTER_DATA_ROOT ?? join(homedir(), ".lane-router");
 const launcher = join(repo, "dist", "process", "lane-launcher.js");
+const batchRunner = join(repo, "dist", "process", "open-project-lanes.js");
 
 // A Router will not start without a usable codex, and on some machines it is installed without
 // being on PATH - which surfaces as `Unable to fingerprint Codex executable/version`, naming
@@ -54,9 +55,12 @@ async function askForProject() {
   return Number.isInteger(choice) && choice >= 1 && choice <= projects.length ? projects[choice - 1].project : undefined;
 }
 
-async function lanesOf(project) {
+async function routerUrl() {
   const { ensureRouter } = await import(pathToFileURL(join(repo, "dist", "process", "ensure-router.js")).href);
-  const { url } = await ensureRouter();
+  return (await ensureRouter({ dataRoot })).url;
+}
+
+async function lanesOf(project, url) {
   const response = await fetch(`${url}/rpc`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -71,34 +75,30 @@ async function lanesOf(project) {
   return body.result;
 }
 
+async function resumeInfo(address, url) {
+  const response = await fetch(`${url}/lanes/resume-info?address=${encodeURIComponent(address)}`);
+  const body = await response.json();
+  if (!response.ok || body.result === undefined) throw new Error(body.error ?? `Router request failed (${response.status})`);
+  return body.result;
+}
+
 async function main() {
   if (!existsSync(launcher)) throw new Error(`dist is not built - run \`npm run build\` first (looked for ${launcher})`);
+  if (!existsSync(batchRunner)) throw new Error(`dist is not built - run \`npm run build\` first (looked for ${batchRunner})`);
   const project = process.argv[2] ?? await askForProject();
   if (!project) { console.log("  cancelled."); return 0; }
 
-  const lanes = await lanesOf(project);
-  if (lanes.length === 0) throw new Error(`No lanes in project: ${project}`);
-
-  const opened = [], skipped = [], failed = [];
-  for (const lane of lanes) {
-    if (!lane.binding) { skipped.push([lane.address, "no conversation bound"]); continue; }
-    // `open` refuses an online lane anyway; skipping keeps that out of the failure column.
-    if (lane.reach && lane.reach.state !== "no_channel") { skipped.push([lane.address, "already online"]); continue; }
-
-    process.stdout.write(`  opening ${lane.address} ... `);
-    const run = spawnSync(process.execPath, [launcher, "open", lane.address, "--terminal", "wt"], { encoding: "utf8" });
-    if (run.status === 0) { console.log("ok"); opened.push(lane.address); }
-    else {
-      const reason = (run.stderr || run.stdout || "").trim().split("\n")[0] || `exit ${run.status}`;
-      console.log("FAILED");
-      failed.push([lane.address, reason]);
-    }
-  }
-
-  console.log(`\n  ${project}: ${opened.length} opened, ${skipped.length} skipped, ${failed.length} failed`);
-  for (const [address, reason] of skipped) console.log(`    skipped  ${address}  (${reason})`);
-  for (const [address, reason] of failed) console.log(`    FAILED   ${address}  ${reason}`);
-  return failed.length === 0 ? 0 : 1;
+  const url = await routerUrl();
+  const { runOpenProjectLanes } = await import(pathToFileURL(batchRunner).href);
+  const result = await runOpenProjectLanes(project, {
+    listLanes: (selected) => lanesOf(selected, url),
+    resumeInfo: (address) => resumeInfo(address, url),
+    launch: (address, environment) => spawnSync(
+      process.execPath, [launcher, "open", address, "--terminal", "wt"], { encoding: "utf8", env: environment },
+    ),
+    write: (text) => { process.stdout.write(text); },
+  });
+  return result.failed.length === 0 ? 0 : 1;
 }
 
 main().then((code) => { process.exitCode = code; }, (error) => {
