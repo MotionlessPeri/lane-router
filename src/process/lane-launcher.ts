@@ -31,12 +31,12 @@ export interface LaneLaunchDependencies {
 
 /**
  * One entry point for the two lane-window verbs. The caller never says which agent a lane runs
- * on: `open` reads the backend from the lane's binding, and `new` only knows Claude until the
- * codex side is built. Policy lives here — the Router endpoint this consumes only reports facts.
+ * on: `open` reads the backend from the lane's binding, while `new` creates Claude lanes. Policy
+ * lives here — the Router endpoint this consumes only reports facts.
  */
 export async function launchLane(args: readonly string[], dependencies: LaneLaunchDependencies = {}): Promise<void> {
   const invocation = parseInvocation(args);
-  const dataRoot = dependencies.dataRoot ?? join(homedir(), ".lane-router");
+  const dataRoot = dependencies.dataRoot ?? process.env.LANE_ROUTER_DATA_ROOT ?? join(homedir(), ".lane-router");
   if (invocation.verb === "new") {
     const directory = await (dependencies.queryDirectory ?? ((project: string) => queryDirectoryDefault(dataRoot, project)))(invocation.address.project);
     if (directory.some((entry) => entry.address === invocation.address.address)) {
@@ -64,22 +64,21 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     // change with its own confirmation loop, and must not happen as a side effect of "open".
     throw new Error(`Lane ${invocation.address.address} has no active binding to resume; attach a conversation through the rotation flow instead`);
   }
-  // An open channel — even one that has not reported a lifecycle event yet — means a process is
-  // already speaking for this conversation, and a second one would fight it for the lane. This
-  // gate comes before the backend one so that the "resume it manually" advice below can never be
-  // handed out for a conversation that is still live.
-  if (info.reach !== null && info.reach.state !== "no_channel") {
+  // Reach describes notification transport, not ownership by a visible client. Codex can keep a
+  // thread loaded in the shared App Server after its TUI closes, so only the backend's restore
+  // decision can prevent a duplicate interactive client without also stranding offline lanes.
+  if (info.restorePresence === "online") {
     throw new Error(`Lane ${invocation.address.address} is already online; nothing was opened`);
   }
-  if (info.backend !== "claude") {
-    throw new Error(`The ${info.backend} backend is not supported yet; resume it manually with: lane-router-codex resume ${info.conversationId}`);
+  if (info.restorePresence === "unavailable") {
+    throw new Error(`The ${info.backend} backend is unavailable; ${invocation.address.address} was not opened`);
   }
   const cwd = invocation.cwd ?? info.cwd;
   if (cwd === null || cwd === undefined) {
     throw new Error(`The Router has no recorded working directory for ${invocation.address.address}; pass --cwd <dir>`);
   }
   const request = {
-    mode: "resume", backend: "claude", cwd, conversationId: info.conversationId, statusPath: newStatusPath(dataRoot),
+    mode: "resume", backend: info.backend, cwd, conversationId: info.conversationId, statusPath: newStatusPath(dataRoot),
     ...(info.model === null ? {} : { model: info.model }),
   } satisfies TerminalChildRequest;
   await openTerminal(dependencies, invocation.terminal, request, `${invocation.address.address} gen${info.generation}`, invocation.address.project);

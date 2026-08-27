@@ -8,7 +8,10 @@ import { launchLane } from "../../src/process/lane-launcher.js";
 import type { TerminalChildRequest } from "../../src/process/terminal-spawn.js";
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => {
+  vi.unstubAllEnvs();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 /** Stands in for a terminal that came up and whose CLI reported for itself. */
 const terminalThatStarts = (status = "ok") =>
@@ -76,7 +79,7 @@ test("open resumes the bound conversation in its recorded cwd", async () => {
   const deps = fakes({
     queryResumeInfo: vi.fn(async () => ({
       state: "bound" as const, backend: "claude" as const, conversationId: "4b50f153-0932-4442-840b-98a4b7593a51",
-      cwd: "E:\\proj", generation: 3, reach: reach("no_channel"),
+      cwd: "E:\\proj", generation: 3, reach: reach("no_channel"), restorePresence: "offline" as const, model: null,
     })),
   });
   await launchLane(["open", "alpha/worker"], deps);
@@ -100,25 +103,28 @@ test("open refuses what must not be reopened and says what to do instead", async
   for (const state of ["live", "unconfirmed"] as const) {
     const online = fakes({
       queryResumeInfo: vi.fn(async () => ({
-        state: "bound" as const, backend: "claude" as const, conversationId: "c", cwd: "E:\\proj", generation: 1, reach: reach(state),
+        state: "bound" as const, backend: "claude" as const, conversationId: "c", cwd: "E:\\proj", generation: 1,
+        reach: reach(state), restorePresence: "online" as const, model: null,
       })),
     });
     await expect(launchLane(["open", "alpha/worker"], online)).rejects.toThrow(/already online/iu);
     expect(online.spawnTerminal).not.toHaveBeenCalled();
   }
 
-  const codex = fakes({
+  const unavailable = fakes({
     queryResumeInfo: vi.fn(async () => ({
-      state: "bound" as const, backend: "codex" as const, conversationId: "t", cwd: null, generation: 1, reach: null,
+      state: "bound" as const, backend: "codex" as const, conversationId: "t", cwd: "E:\\proj", generation: 1,
+      reach: reach("unconfirmed"), restorePresence: "unavailable" as const, model: null,
     })),
   });
-  await expect(launchLane(["open", "alpha/worker"], codex)).rejects.toThrow(/not supported yet/iu);
+  await expect(launchLane(["open", "alpha/worker"], unavailable)).rejects.toThrow(/backend.*unavailable/iu);
+  expect(unavailable.spawnTerminal).not.toHaveBeenCalled();
 
-  // An online lane is refused as online whatever its backend: the "resume it manually" advice in
-  // the codex message must never be handed out while a process still speaks for the conversation.
+  // An online lane is refused as online whatever its backend and whatever coarse reach reports.
   const onlineCodex = fakes({
     queryResumeInfo: vi.fn(async () => ({
-      state: "bound" as const, backend: "codex" as const, conversationId: "t", cwd: null, generation: 1, reach: reach("live"),
+      state: "bound" as const, backend: "codex" as const, conversationId: "t", cwd: "E:\\proj", generation: 1,
+      reach: reach("no_channel"), restorePresence: "online" as const, model: null,
     })),
   });
   await expect(launchLane(["open", "alpha/worker"], onlineCodex)).rejects.toThrow(/already online/iu);
@@ -127,6 +133,7 @@ test("open refuses what must not be reopened and says what to do instead", async
 test("open needs a directory: recorded, or given, or refused", async () => {
   const bound = (cwd: string | null) => vi.fn(async () => ({
     state: "bound" as const, backend: "claude" as const, conversationId: "c", cwd, generation: 2, reach: reach("no_channel"),
+    restorePresence: "offline" as const, model: null,
   }));
 
   const unrecorded = fakes({ queryResumeInfo: bound(null) });
@@ -146,7 +153,8 @@ test("open needs a directory: recorded, or given, or refused", async () => {
 test("passes the terminal choice through and fails when the child never reports", async () => {
   const cmd = fakes({
     queryResumeInfo: vi.fn(async () => ({
-      state: "bound" as const, backend: "claude" as const, conversationId: "c", cwd: "E:\\proj", generation: 1, reach: null,
+      state: "bound" as const, backend: "claude" as const, conversationId: "c", cwd: "E:\\proj", generation: 1,
+      reach: null, restorePresence: "offline" as const, model: null,
     })),
   });
   await launchLane(["open", "alpha/worker", "--terminal", "cmd"], cmd);
@@ -181,7 +189,7 @@ test("carries a model into a new lane, both to the CLI and into what the lane wi
 test("reopens a lane on the model that lane declares", async () => {
   const bound = (model: string | null) => ({
     state: "bound" as const, backend: "claude" as const, conversationId: "session-1",
-    cwd: "D:\project", generation: 3, reach: reach("no_channel"), model,
+    cwd: "D:\project", generation: 3, reach: reach("no_channel"), restorePresence: "offline" as const, model,
   });
 
   const declared = fakes({ queryResumeInfo: vi.fn(async () => bound("sonnet")) });
@@ -197,4 +205,32 @@ test("refuses --model where there is no lane to declare it on", async () => {
   // `open` reopens what the lane already declares; accepting a flag here would look like it
   // changed the declaration when it would only have changed this one window.
   await expect(launchLane(["open", "alpha/worker", "--model", "sonnet"], fakes())).rejects.toThrow(/Usage/u);
+});
+
+test("opens an offline Codex binding even when coarse reach is unconfirmed", async () => {
+  const deps = fakes({
+    queryResumeInfo: vi.fn(async () => ({
+      state: "bound" as const, backend: "codex" as const, conversationId: "thread-1", cwd: "E:\\proj", generation: 4,
+      reach: reach("unconfirmed"), restorePresence: "offline" as const, model: "gpt-5.4",
+    })),
+  });
+
+  await launchLane(["open", "alpha/worker"], deps);
+
+  expect(deps.spawnTerminal.mock.calls[0]![0]).toMatchObject({
+    mode: "resume", backend: "codex", conversationId: "thread-1", cwd: "E:\\proj", model: "gpt-5.4",
+  });
+});
+
+test("uses the existing data-root environment for child status and discovery isolation", async () => {
+  const isolatedRoot = mkdtempSync(join(tmpdir(), "lane-router-isolated-"));
+  roots.push(isolatedRoot);
+  vi.stubEnv("LANE_ROUTER_DATA_ROOT", isolatedRoot);
+  const spawnTerminal = terminalThatStarts();
+
+  await launchLane(["new", "alpha/worker", "--role", "Owns workers."], {
+    cwd: "D:\\caller", spawnTerminal, queryDirectory: vi.fn(async () => []),
+  });
+
+  expect((spawnTerminal.mock.calls[0]![0] as TerminalChildRequest).statusPath.startsWith(isolatedRoot)).toBe(true);
 });

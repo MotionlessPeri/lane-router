@@ -1,4 +1,4 @@
-import type { BackendRegistry } from "./backend.js";
+import type { BackendRegistry, RestorePresence } from "./backend.js";
 import { parseLaneAddress } from "./address.js";
 import type { MailboxStore } from "./mailbox-store.js";
 import type { NotificationPump } from "./notification-pump.js";
@@ -61,6 +61,7 @@ export type ResumeInfo =
       readonly cwd: string | null;
       readonly generation: number;
       readonly reach: ReachSnapshot | null;
+      readonly restorePresence: RestorePresence;
       readonly model: string | null;
     };
 
@@ -113,6 +114,7 @@ export class RouterCore {
       cwd: await this.resolveBindingCwd(binding),
       generation: binding.generation,
       reach: backend?.reach(binding) ?? null,
+      restorePresence: backend?.restorePresence(binding) ?? "unavailable",
       model: this.dependencies.state.requireLane(parsed.address).model,
     };
   }

@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { NotificationOutcome, PlatformBackend, ReachSnapshot } from "../../src/router/backend.js";
+import type { NotificationOutcome, PlatformBackend, ReachSnapshot, RestorePresence } from "../../src/router/backend.js";
 import type { CallerContext, ResolvedIdentity } from "../../src/router/types.js";
 import { BackendRegistry } from "../../src/router/backend.js";
 import { openRouterDatabase } from "../../src/router/database.js";
@@ -28,6 +28,7 @@ class FakeBackend implements PlatformBackend {
   constructor(name: "claude" | "codex" = "codex") { this.name = name; }
 
   reachState: ReachSnapshot = { state: "live", connectedAt: 10, lastLifecycleAt: 20, lastNotifiedAt: 30, believedBusy: false };
+  restoreState: RestorePresence = "online";
 
   /** Keyed by conversation so one recipient of a copy can be live while another has no channel. */
   readonly outcomes = new Map<string, NotificationOutcome>();
@@ -41,6 +42,7 @@ class FakeBackend implements PlatformBackend {
   }
   onAttentionOpportunity(): () => void { return () => undefined; }
   reach(): ReachSnapshot { return this.reachState; }
+  restorePresence(): RestorePresence { return this.restoreState; }
   identities = new Map<string, string>();
   resolveIdentity(context: CallerContext): ResolvedIdentity {
     const joined = context.joinKey === undefined ? undefined : this.identities.get(context.joinKey);
@@ -592,9 +594,11 @@ describe("resume info", () => {
     try {
       await x.core.attachCurrent(caller("thread-1"), { address: "alpha/design", roleDescription: "design" });
       x.state.updateBindingCwd("codex", "thread-1", "E:\\project");
+      x.backend.reachState = { state: "unconfirmed", connectedAt: 10, lastLifecycleAt: null, lastNotifiedAt: null, believedBusy: null };
+      x.backend.restoreState = "offline";
       await expect(x.core.resumeInfo("alpha/design")).resolves.toEqual({
         state: "bound", backend: "codex", conversationId: "thread-1", cwd: "E:\\project",
-        generation: 1, reach: x.backend.reachState, model: null,
+        generation: 1, reach: x.backend.reachState, restorePresence: "offline", model: null,
       });
     } finally { x.database.close(); }
   });
