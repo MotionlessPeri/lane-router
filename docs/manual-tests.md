@@ -229,9 +229,11 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 1. 在隔离的 Router data root 中创建一条 Codex lane，声明一个与 `config.toml` 默认值不同的真实模型。
 2. 分别经 prompt 与 resume 开窗路径启动 stock Codex；记录实际进程 argv，并在产生 turn 后检查 rollout 中的 `model`。
 3. 用 `model: null` 重复参数构造，确认 argv 与旧版本逐字相同。
-4. 传入明显不存在的模型名，确认 Lane Router 不提前拒绝，错误来自 stock Codex。
+4. 传入明显不存在的模型名，确认 Lane Router 不提前拒绝，诊断与后续行为来自 stock Codex。
 
-**预期：** prompt 与 resume 的 argv 都含声明模型；能产生 turn 的路径在 rollout 中记录该模型；null 不添加参数；未知模型由 Codex 自己报错。测试结束后停止隔离 Router、App Server 与 TUI 的精确 PID，只删除经解析确认位于临时目录下的 fixture root。生产 discovery、lane/binding/message 数量在测试前后不变。
+**预期：** prompt 与 resume 的 argv 都含声明模型；能产生 turn 的路径在 rollout 中记录该模型；null 不添加参数；未知模型的诊断与 fallback / 退出策略由 Codex 自己决定。测试结束后停止隔离 Router、App Server 与 TUI 的精确 PID，只删除经解析确认位于临时目录下的 fixture root。生产 discovery、lane/binding/message 数量在测试前后不变。
+
+**最后验证：** 2026-08-27 使用真实 Codex CLI 0.148.0 与隔离 Router 完成。prompt 进程 argv 含 `--model gpt-5.6-terra --remote <隔离 endpoint>`，TUI 显示该模型并产出 `ISOLATED_ROUTER_OK`，rollout 对同一 thread 记录 `model: gpt-5.6-terra`；随后把该 thread 作为离线 binding，经批量脚本恢复，实际 resume argv 同时包含相同 `--model`、隔离 endpoint 与原 thread id。`model: null` 的完整旧 argv 由自动测试逐项固定。未知模型 `no-such-model-9` 由 stock Codex 报告 metadata 缺失并采用 fallback metadata，证明 Router 没有抢先校验；这也说明“无效模型必然立即退出”不是 Codex CLI 契约。隔离进程树全部停止，临时 root 经绝对路径核对后删除。部署时生产库在备份后清理了误连验证 fixture，最终恢复既有 `10 lanes / 33 bindings / 4032 messages`。
 
 ### 新窗口不继承父进程的禁色设置
 
@@ -333,6 +335,8 @@ NO_COLOR=1 lane-router-lane new <project>/<lane> --role "<角色说明>"
 3. 核对所有 child launcher 使用同一个隔离 data root，没有连接生产 discovery。
 
 **预期：** 离线 lane 打开、在线 lane 跳过、逐 lane 失败互不影响；脚本退出码只取决于 failed 是否为空。测试前后生产 Router PID 与 lane/binding/message 数量不变。
+
+**最后验证：** 2026-08-27 用真实离线 Codex thread 和隔离 Router 验证离线分支：`resume-info` 为 `reach=unconfirmed`、`restorePresence=offline`，批量脚本报告 `1 opened, 0 skipped, 0 failed`；开出的真实 Codex 进程使用隔离 endpoint，ownership 建立后同一接口变为 `restorePresence=online`。所有 child 都保留同一 `LANE_ROUTER_DATA_ROOT`。在线跳过、backend unavailable 与逐 lane 失败隔离仍由自动测试覆盖；本次真机 fixture 没有额外构造这三种分支。
 
 ## 当前记录
 

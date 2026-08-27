@@ -91,11 +91,11 @@ nullable。**null = 不传 `--model`**，也就是今天的行为——24 条存
 
 只校验「非空、去空白后有内容」，**不校验模型名是否有效**。
 
-模型清单会变，硬编码的清单必然过时——而过时的表现是「拒绝一个其实有效的新模型」，属于本语料库反复警告的那类。无效的名字交给 `claude` 自己拒绝，它的报错比我们的准确。
+模型清单会变，硬编码的清单必然过时——而过时的表现是「拒绝一个其实有效的新模型」，属于本语料库反复警告的那类。无效名字的诊断和后续行为交给对应 CLI；Lane Router 只负责逐字传递。
 
 ### 3.5 两种 backend 使用各自的模型参数
 
-Claude 由 `terminal-child` 直接接收 `--model <值>`。Codex 先由 `terminal-child` 把声明交给 `lane-router-codex --model <值>`，再由 launcher 把相同参数放到 stock Codex 的全局选项中。两边都不维护模型名清单：无效值由各自 CLI 拒绝。`model` 为 null 时，两种 backend 的参数数组都与引入模型声明前逐字相同。
+Claude 由 `terminal-child` 直接接收 `--model <值>`。Codex 先由 `terminal-child` 把声明交给 `lane-router-codex --model <值>`，再由 launcher 把相同参数放到 stock Codex 的全局选项中。两边都不维护模型名清单：无效值由各自 CLI 诊断。真实 Codex 0.148.0 对未知名字会报告缺少 model metadata 并使用 fallback metadata，而不是在本地立即退出；Router 不覆盖这项 CLI 策略。`model` 为 null 时，两种 backend 的参数数组都与引入模型声明前逐字相同。
 
 Codex 的 `reach` 不能用来判断窗口是否在线：共享 App Server 可以在 TUI 关闭后继续加载 thread，使离线 lane 显示 `unconfirmed`。`/lanes/resume-info` 因此同时返回 backend 的 `restorePresence`；`open` 与批量脚本只按这个值决定打开、跳过或报 backend unavailable，`reach` 只保留作通知链诊断。
 
