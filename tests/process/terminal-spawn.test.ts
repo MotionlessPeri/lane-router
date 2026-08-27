@@ -46,6 +46,9 @@ test("each terminal choice yields a launch script for its own host and shell", (
   // Lanes group into one Windows Terminal window per project: the window is targeted by name,
   // and wt creates it when it does not exist yet.
   expect(wt).toContain("'-w', $env:LANE_ROUTER_CHILD_WINDOW, 'new-tab'");
+  // A one-shot OSC title is overwritten as soon as Codex publishes its application title. The
+  // tab therefore needs both a native WT title and the per-tab override that keeps it authoritative.
+  expect(wt).toContain("'--title', ('\"' + $env:LANE_ROUTER_CHILD_TITLE + '\"'), '--suppressApplicationTitle'");
   // The cwd element carries its own quotes: PowerShell joins the argument list verbatim, so an
   // unquoted directory with a space would reach wt.exe as two arguments and break -d.
   expect(wt).toContain("('\"' + $env:LANE_ROUTER_CHILD_CWD + '\"')");

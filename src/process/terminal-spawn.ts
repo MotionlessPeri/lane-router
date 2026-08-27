@@ -79,11 +79,11 @@ export function terminalLaunchScript(resolved: ResolvedTerminal): string {
   if (resolved.host === "wt") {
     // Lanes group into one Windows Terminal window per project: -w targets a window by name and
     // creates it when it does not exist, so the first lane of a project opens the window and the
-    // rest arrive as tabs. The cwd element carries its own quotes: PowerShell 5.1 joins the
-    // argument list verbatim without adding any, so an unquoted directory containing a space
-    // reaches wt.exe as two arguments and -d breaks. wt parses its command line with
-    // CommandLineToArgvW, which folds the embedded quotes back into one argument.
-    return "Start-Process -FilePath 'wt.exe' -ArgumentList @('-w', $env:LANE_ROUTER_CHILD_WINDOW, 'new-tab', '-d', ('\"' + $env:LANE_ROUTER_CHILD_CWD + '\"'), 'powershell.exe', '-NoExit', '-Command', $env:LANE_ROUTER_CHILD_COMMAND)";
+    // rest arrive as tabs. WT must own the title and suppress later application-title updates:
+    // Codex otherwise overwrites the one-shot OSC title as soon as its TUI starts. The title and
+    // cwd elements carry their own quotes because PowerShell 5.1 joins the argument list verbatim
+    // without adding any; WT's CommandLineToArgvW parsing folds them back into single arguments.
+    return "Start-Process -FilePath 'wt.exe' -ArgumentList @('-w', $env:LANE_ROUTER_CHILD_WINDOW, 'new-tab', '--title', ('\"' + $env:LANE_ROUTER_CHILD_TITLE + '\"'), '--suppressApplicationTitle', '-d', ('\"' + $env:LANE_ROUTER_CHILD_CWD + '\"'), 'powershell.exe', '-NoExit', '-Command', $env:LANE_ROUTER_CHILD_COMMAND)";
   }
   if (resolved.shell === "cmd") {
     return "Start-Process -FilePath 'cmd.exe' -ArgumentList @('/k', $env:LANE_ROUTER_CHILD_COMMAND) -WorkingDirectory $env:LANE_ROUTER_CHILD_CWD -WindowStyle Normal";
