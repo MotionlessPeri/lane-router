@@ -74,3 +74,33 @@ test("passes an initial prompt after the Codex option terminator", async () => {
     "-C", process.cwd(), "--remote", "ws://127.0.0.1:3", "--", "take over alpha/design",
   ]);
 });
+
+test("forwards a declared model to stock Codex for new and resumed threads", async () => {
+  const spawnTui = vi.fn(async () => 0);
+  const dependencies = {
+    ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+    spawnTui,
+  };
+
+  await launchCodex(["--model", "gpt-5.4", "--prompt", "take over alpha/design"], dependencies);
+  expect(spawnTui).toHaveBeenLastCalledWith(codexExecutable, [
+    "-C", process.cwd(), "--model", "gpt-5.4", "--remote", "ws://127.0.0.1:3", "--", "take over alpha/design",
+  ]);
+
+  await launchCodex(["--model", "gpt-5.4", "resume", "thread-old"], dependencies);
+  expect(spawnTui).toHaveBeenLastCalledWith(codexExecutable, [
+    "--model", "gpt-5.4", "--remote", "ws://127.0.0.1:3", "resume", "thread-old",
+  ]);
+});
+
+test("passes unknown model names through and rejects only malformed launcher syntax", async () => {
+  const spawnTui = vi.fn(async () => 0);
+  const dependencies = {
+    ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+    spawnTui,
+  };
+
+  await launchCodex(["--model", "no-such-model-9", "resume", "thread-old"], dependencies);
+  expect(spawnTui.mock.calls[0]![1]).toContain("no-such-model-9");
+  await expect(launchCodex(["--model"], dependencies)).rejects.toThrow(/usage/iu);
+});

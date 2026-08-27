@@ -101,12 +101,12 @@ test("passes a declared model to Claude, and changes nothing at all without one"
   expect(childCommand({ ...resumeRequest, model: "sonnet" }, {}, here).args)
     .toEqual(["--model", "sonnet", "--resume", "4b50f153-0932-4442-840b-98a4b7593a51", "--dangerously-load-development-channels", "server:lane"]);
 
-  // Codex selects its model its own way; --model is a Claude flag and must not leak into either
-  // codex mode, even when the lane carries a declaration for a later backend switch.
-  expect(childCommand({ ...promptRequest, backend: "codex", model: "claude-opus-5" }, {}, here).args)
-    .toEqual([join(here, "codex-launcher.js"), "--prompt", "hello"]);
-  expect(childCommand({ mode: "resume", backend: "codex", cwd: "D:\p", conversationId: "thread-1", statusPath: "D:\s.txt", model: "sonnet" }, {}, here).args)
-    .toEqual([join(here, "codex-launcher.js"), "resume", "thread-1"]);
+  // Codex receives its own model names through the shared declaration. The intermediate launcher
+  // owns the stock CLI syntax, so the terminal child passes the declaration to that launcher.
+  expect(childCommand({ ...promptRequest, backend: "codex", model: "gpt-5.4" }, {}, here).args)
+    .toEqual([join(here, "codex-launcher.js"), "--model", "gpt-5.4", "--prompt", "hello"]);
+  expect(childCommand({ mode: "resume", backend: "codex", cwd: "D:\p", conversationId: "thread-1", statusPath: "D:\s.txt", model: "gpt-5.6-sol" }, {}, here).args)
+    .toEqual([join(here, "codex-launcher.js"), "--model", "gpt-5.6-sol", "resume", "thread-1"]);
 
   // A name this build has never heard of travels through untouched: validation belongs to the
   // CLI, which knows the real list, not to a copy of it that would go stale here.
