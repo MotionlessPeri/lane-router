@@ -37,7 +37,7 @@ export async function launchCodex(args: readonly string[], dependencies: Launche
 }
 
 const defaults: LauncherDependencies = {
-  ensure: () => ensureRouter(),
+  ensure: (options) => ensureRouter(options),
   spawnTui: (executable, args) => new Promise<number>((resolveExit, reject) => {
     const child = spawn(executable, [...args], { stdio: "inherit", windowsHide: false });
     child.once("error", reject);
