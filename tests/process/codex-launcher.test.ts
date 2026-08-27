@@ -8,6 +8,17 @@ import { launchCodex } from "../../src/process/codex-launcher.js";
 
 const codexExecutable = process.env.CODEX_EXE ?? "codex";
 
+test("keeps Router discovery inside the inherited isolated data root", async () => {
+  vi.stubEnv("LANE_ROUTER_DATA_ROOT", "D:\\isolated-router");
+  const ensure = vi.fn(async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }));
+  try {
+    await launchCodex([], { ensure, spawnTui: vi.fn(async () => 0) });
+    expect(ensure).toHaveBeenCalledExactlyOnceWith({ dataRoot: "D:\\isolated-router" });
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
+
 test("runs the CLI entrypoint when the package is reached through a symlink", () => {
   const root = mkdtempSync(join(tmpdir(), "lane-router-codex-link-"));
   try {

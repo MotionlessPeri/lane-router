@@ -7,7 +7,7 @@ import { ensureRouter } from "./ensure-router.js";
 import type { RouterDiscovery } from "./local-server.js";
 
 interface LauncherDependencies {
-  readonly ensure: () => Promise<RouterDiscovery>;
+  readonly ensure: (options?: { readonly dataRoot?: string }) => Promise<RouterDiscovery>;
   readonly spawnTui: (executable: string, args: readonly string[]) => Promise<number>;
 }
 
@@ -19,7 +19,10 @@ export async function launchCodex(args: readonly string[], dependencies: Launche
   const resume = remaining.length === 2 && remaining[0] === "resume" && remaining[1] ? remaining : undefined;
   if (args[0] === "--model" && model === undefined) throw new Error(usage);
   if (remaining.length !== 0 && !prompt && !resume) throw new Error(usage);
-  const discovery = await dependencies.ensure();
+  const inheritedDataRoot = process.env.LANE_ROUTER_DATA_ROOT;
+  const discovery = inheritedDataRoot === undefined
+    ? await dependencies.ensure()
+    : await dependencies.ensure({ dataRoot: inheritedDataRoot });
   const modelArgs = model === undefined ? [] : ["--model", model];
   const tuiArgs = resume
     ? [...modelArgs, "--remote", discovery.codexEndpoint, ...resume]
