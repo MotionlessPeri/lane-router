@@ -99,6 +99,11 @@ export class RouterCore {
     });
   }
 
+  /**
+   * Resolve the facts needed to decide whether and how one lane can be reopened.
+   * @param address Canonical project/lane address requested by the local launcher.
+   * @returns Missing, unbound, or bound facts; an absent backend is reported as unavailable.
+   */
   async resumeInfo(address: string): Promise<ResumeInfo> {
     const parsed = parseLaneAddress(address);
     if (!this.dependencies.state.lane(parsed.address)) return { state: "missing" };

@@ -6,7 +6,13 @@ import { fileURLToPath } from "node:url";
 
 import type { TerminalChildRequest } from "./terminal-spawn.js";
 
-/** The exact CLI invocation for a request; pure so the mapping is testable without a window. */
+/**
+ * Build the exact backend CLI invocation without opening a window.
+ * @param request Prompt or resume request carrying the backend and optional lane declaration.
+ * @param environment Executable overrides and the terminal title for this child.
+ * @param here Directory containing the compiled launcher modules.
+ * @returns Executable and argv passed unchanged to `spawn`.
+ */
 export function childCommand(
   request: TerminalChildRequest,
   environment: NodeJS.ProcessEnv,

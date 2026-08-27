@@ -33,10 +33,22 @@ export interface LaneLaunchDependencies {
  * One entry point for the two lane-window verbs. The caller never says which agent a lane runs
  * on: `open` reads the backend from the lane's binding, while `new` creates Claude lanes. Policy
  * lives here — the Router endpoint this consumes only reports facts.
+ *
+ * Flow:
+ * 1. Parse the common address and terminal options.
+ * 2. For `new`, reject an occupied address and launch the bootstrap prompt.
+ * 3. For `open`, resolve binding facts and apply the backend restore decision.
+ * 4. Resume the recorded conversation with its cwd and declared model.
+ *
+ * @param args CLI arguments after the executable name.
+ * @param dependencies Optional process and Router boundaries used by tests and embedded callers.
  */
 export async function launchLane(args: readonly string[], dependencies: LaneLaunchDependencies = {}): Promise<void> {
+  // Step 1: Parse the invocation before touching Router or terminal state.
   const invocation = parseInvocation(args);
   const dataRoot = dependencies.dataRoot ?? process.env.LANE_ROUTER_DATA_ROOT ?? join(homedir(), ".lane-router");
+
+  // Step 2: A new lane starts with a prompt that performs the confirmed attach.
   if (invocation.verb === "new") {
     const directory = await (dependencies.queryDirectory ?? ((project: string) => queryDirectoryDefault(dataRoot, project)))(invocation.address.project);
     if (directory.some((entry) => entry.address === invocation.address.address)) {
@@ -55,6 +67,7 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     return;
   }
 
+  // Step 3: Resume facts distinguish missing, inactive, online, offline, and unavailable lanes.
   const info = await (dependencies.queryResumeInfo ?? ((address: string) => queryResumeInfoDefault(dataRoot, address)))(invocation.address.address);
   if (info.state === "missing") {
     throw new Error(`Lane ${invocation.address.address} does not exist; create it with: lane-router-lane new ${invocation.address.address} --role "<role description>"`);
@@ -77,6 +90,8 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
   if (cwd === null || cwd === undefined) {
     throw new Error(`The Router has no recorded working directory for ${invocation.address.address}; pass --cwd <dir>`);
   }
+
+  // Step 4: The active binding supplies every identity-bearing launch argument.
   const request = {
     mode: "resume", backend: info.backend, cwd, conversationId: info.conversationId, statusPath: newStatusPath(dataRoot),
     ...(info.model === null ? {} : { model: info.model }),

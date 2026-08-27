@@ -11,6 +11,12 @@ interface LauncherDependencies {
   readonly spawnTui: (executable: string, args: readonly string[]) => Promise<number>;
 }
 
+/**
+ * Start stock Codex against the Router-owned remote endpoint.
+ * @param args Optional declared model followed by either a prompt or one Router-owned thread ID.
+ * @param dependencies Router discovery and TUI process boundaries.
+ * @returns The stock Codex process exit code without rewriting CLI errors.
+ */
 export async function launchCodex(args: readonly string[], dependencies: LauncherDependencies = defaults): Promise<number> {
   const usage = "Usage: lane-router-codex [--model <model>] [--prompt <initial-prompt> | resume <thread-id>]";
   const model = args[0] === "--model" && args[1] ? args[1] : undefined;

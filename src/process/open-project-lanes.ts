@@ -17,14 +17,28 @@ export interface OpenProjectDependencies {
   readonly write: (text: string) => void;
 }
 
-/** Open every restorable lane while keeping one lane's failure isolated from its peers. */
+/**
+ * Open every restorable lane while keeping one lane's failure isolated from its peers.
+ *
+ * Flow:
+ * 1. List the project and reject a project with no lanes.
+ * 2. Classify each lane from authoritative resume facts, launching only offline bindings.
+ * 3. Print and return one aggregate result without hiding per-lane failures.
+ *
+ * @param project Project segment whose lanes should be considered.
+ * @param dependencies Router queries, terminal launch boundary, and output sink.
+ * @returns Addresses grouped by opened, skipped, and failed outcome.
+ */
 export async function runOpenProjectLanes(project: string, dependencies: OpenProjectDependencies): Promise<OpenProjectResult> {
+  // Step 1: An empty project name is handled by the Router query; an empty result is user error.
   const lanes = await dependencies.listLanes(project);
   if (lanes.length === 0) throw new Error(`No lanes in project: ${project}`);
 
   const opened: string[] = [];
   const skipped: BatchIssue[] = [];
   const failed: BatchIssue[] = [];
+
+  // Step 2: Each lane gets an independent decision and failure boundary.
   for (const lane of lanes) {
     if (!lane.binding) {
       skipped.push([lane.address, "no conversation bound"]);
@@ -66,6 +80,7 @@ export async function runOpenProjectLanes(project: string, dependencies: OpenPro
     }
   }
 
+  // Step 3: Preserve both a readable CLI summary and a structured exit-code input.
   dependencies.write(`\n  ${project}: ${opened.length} opened, ${skipped.length} skipped, ${failed.length} failed\n`);
   for (const [address, reason] of skipped) dependencies.write(`    skipped  ${address}  (${reason})\n`);
   for (const [address, reason] of failed) dependencies.write(`    FAILED   ${address}  ${reason}\n`);
