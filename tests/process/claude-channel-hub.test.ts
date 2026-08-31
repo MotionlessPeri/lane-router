@@ -32,6 +32,7 @@ function sendableSocket(): WebSocket & { readyState: number } {
 const notification = {
   laneAddress: "alpha/design", pendingPath: "C:/mailbox/pending",
   kind: "normal" as const, messageIds: ["message-1"],
+  messages: [{ id: "message-1", sender: "alpha/hub", summary: "本轮 lane 重构的顺序" }],
 };
 
 /** A clock the test drives, so timestamps are asserted rather than merely present. */

@@ -10,6 +10,7 @@ const binding: BindingRecord = {
 const notification = {
   laneAddress: "alpha/design", pendingPath: "C:/mailboxes/alpha/design/pending",
   kind: "normal" as const, messageIds: ["message-1"],
+  messages: [{ id: "message-1", sender: "alpha/hub", summary: "本轮 lane 重构的顺序" }],
 };
 const live: ReachSnapshot = {
   state: "live", connectedAt: 10, lastLifecycleAt: 20, lastNotifiedAt: 30, believedBusy: false,

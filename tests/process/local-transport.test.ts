@@ -114,7 +114,10 @@ test("bridges body-free Claude notifications and waits for lifecycle Stop before
   const notifications: unknown[] = [];
   channel.attach({ notification: async (value) => { notifications.push(value); } });
   const binding: BindingRecord = { id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, activeAt: 1, inactiveAt: null, cwd: null };
-  const notification = { laneAddress: "alpha/design", pendingPath: "C:/mailbox/pending", kind: "normal" as const, messageIds: ["message-1"] };
+  const notification = {
+    laneAddress: "alpha/design", pendingPath: "C:/mailbox/pending", kind: "normal" as const, messageIds: ["message-1"],
+    messages: [{ id: "message-1", sender: "alpha/hub", summary: "本轮 lane 重构的顺序" }],
+  };
   try {
     // Claude Code queues a mid-turn notification itself, so a busy target is not a different
     // outcome here: both calls only establish that the frame left the Router.
@@ -146,7 +149,10 @@ test("a Claude reconnect after Router restart resolves its durable binding and e
 
 test("a Claude channel follows the Router that replaced the one it was connected to", async () => {
   const binding: BindingRecord = { id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, activeAt: 1, inactiveAt: null, cwd: null };
-  const notification = { laneAddress: "alpha/design", pendingPath: "C:/mailbox/pending", kind: "normal" as const, messageIds: ["message-1"] };
+  const notification = {
+    laneAddress: "alpha/design", pendingPath: "C:/mailbox/pending", kind: "normal" as const, messageIds: ["message-1"],
+    messages: [{ id: "message-1", sender: "alpha/hub", summary: "本轮 lane 重构的顺序" }],
+  };
   const startRouter = async () => {
     const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x" });
     return { server, discovery: await server.start() };

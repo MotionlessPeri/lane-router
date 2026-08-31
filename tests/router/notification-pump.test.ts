@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -46,16 +46,26 @@ function setup() {
   const mailbox = new MailboxStore(root);
   const backend = new RecordingBackend();
   const pump = new NotificationPump(state, mailbox, new BackendRegistry([backend]));
-  for (const address of ["alpha/source", "alpha/target"])
+  for (const address of ["alpha/source", "alpha/hub", "alpha/target"])
     state.createLane({ address, project: "alpha", roleDescription: address, now: 1 });
   state.createBinding({ id: "binding-1", laneAddress: "alpha/target", backend: "codex", conversationId: "target", generation: 1, startup: {}, now: 2 });
-  return { database, state, mailbox, backend, pump };
+  return { root, database, state, mailbox, backend, pump };
 }
 
-function addMessage(x: ReturnType<typeof setup>, id: string, kind: "normal" | "correction", replyTo: string | null = null) {
-  const input = { id, requestKey: `request:${id}`, senderLane: "alpha/source", targetLane: "alpha/target", kind, replyTo, createdAt: 10, body: id };
+function addMessage(
+  x: ReturnType<typeof setup>, id: string, kind: "normal" | "correction", replyTo: string | null = null,
+  options: { sender?: string; body?: string } = {},
+) {
+  const input = {
+    id, requestKey: `request:${id}`, senderLane: options.sender ?? "alpha/source", targetLane: "alpha/target",
+    kind, replyTo, createdAt: 10, body: options.body ?? id,
+  };
   const file = x.mailbox.writePending(input);
   x.state.insertMessage({ ...input, relativePath: file.relativePath, contentSha256: file.contentSha256 });
+}
+
+function messageFile(x: ReturnType<typeof setup>, id: string): string {
+  return join(x.root, x.state.requireMessage(id).relativePath);
 }
 
 describe("NotificationPump", () => {
@@ -123,6 +133,79 @@ describe("NotificationPump", () => {
       await x.pump.onAttentionOpportunity("alpha/target");
       await x.pump.onAttentionOpportunity("alpha/target");
       expect(x.backend.normal).toHaveLength(3);
+    } finally { x.database.close(); }
+  });
+
+  // Acceptance 1 + 2 + 3. One notification stands for every pending message of a lane, and those
+  // can come from different lanes, so the sender belongs to each entry rather than to the batch.
+  it("names each covered message with its own sender and the first line of its body", async () => {
+    const x = setup();
+    try {
+      addMessage(x, "normal-1", "normal", null, { sender: "alpha/source", body: "退役前先关窗口，未读信也会拦\n\n第二段不该出现在通知里" });
+      addMessage(x, "normal-2", "normal", null, { sender: "alpha/hub", body: "\n\n  本轮 lane 重构的顺序  \n更多细节在正文" });
+      await x.pump.notifyLane("alpha/target");
+      expect(x.backend.normal).toHaveLength(1);
+      expect(x.backend.normal[0]!.messages).toEqual([
+        { id: "normal-1", sender: "alpha/source", summary: "退役前先关窗口，未读信也会拦" },
+        { id: "normal-2", sender: "alpha/hub", summary: "本轮 lane 重构的顺序" },
+      ]);
+    } finally { x.database.close(); }
+  });
+
+  // Acceptance 3, the two ends of it. The summary shares one CLI line with the rest of the
+  // payload, so a long first line is cut; a message with nothing to summarise says so with an
+  // empty string rather than with something invented.
+  it("cuts an over-long first line and leaves an empty body without a summary", async () => {
+    const x = setup();
+    try {
+      addMessage(x, "normal-1", "normal", null, { body: "x".repeat(200) });
+      addMessage(x, "normal-2", "normal", null, { body: "y".repeat(80) });
+      addMessage(x, "normal-3", "normal", null, { body: "" });
+      await x.pump.notifyLane("alpha/target");
+      const summaries = x.backend.normal[0]!.messages.map((message) => message.summary);
+      expect(summaries[0]).toBe(`${"x".repeat(79)}…`);
+      // Exactly at the limit is not over it: cutting here would prove the truncation fires on
+      // length rather than on excess.
+      expect(summaries[1]).toBe("y".repeat(80));
+      expect(summaries[2]).toBe("");
+    } finally { x.database.close(); }
+  });
+
+  // Acceptance 5. Reading bodies is the only part of a notification that touches the filesystem,
+  // so it is the only part that can fail on its own. A lane that cannot be woken is a worse fault
+  // than one woken without a summary, so an unreadable file costs its own summary and nothing else.
+  it("still wakes the lane when a message file is missing or corrupt", async () => {
+    const x = setup();
+    try {
+      addMessage(x, "normal-1", "normal", null, { body: "这封的文件还在" });
+      addMessage(x, "normal-2", "normal", null, { body: "这封的文件会被删掉" });
+      addMessage(x, "normal-3", "normal", null, { body: "这封的文件会被写坏" });
+      rmSync(messageFile(x, "normal-2"));
+      writeFileSync(messageFile(x, "normal-3"), "no header at all", "utf8");
+
+      await x.pump.notifyLane("alpha/target");
+      expect(x.backend.normal).toHaveLength(1);
+      expect(x.backend.normal[0]!.messageIds).toEqual(["normal-1", "normal-2", "normal-3"]);
+      expect(x.backend.normal[0]!.messages.map((message) => message.summary)).toEqual(["这封的文件还在", "", ""]);
+      expect(x.backend.normal[0]!.messages.map((message) => message.sender)).toEqual(["alpha/source", "alpha/source", "alpha/source"]);
+      // Acceptance 8: the delivery verdict is what it would have been with every file intact.
+      for (const id of ["normal-1", "normal-2", "normal-3"]) expect(x.state.requireMessage(id).notificationState).toBe("sent");
+    } finally { x.database.close(); }
+  });
+
+  // Acceptance 4 on this side of the wire: a correction stands for exactly one message, and the
+  // notification says which and from whom.
+  it("describes a correction with the single message it stands for", async () => {
+    const x = setup();
+    try {
+      addMessage(x, "normal-1", "normal");
+      addMessage(x, "correction-1", "correction", "normal-1", { sender: "alpha/hub", body: "上一封的第三点写反了" });
+      await x.pump.notifyLane("alpha/target");
+      expect(x.backend.corrections).toHaveLength(1);
+      expect(x.backend.corrections[0]!.kind).toBe("correction");
+      expect(x.backend.corrections[0]!.messages).toEqual([
+        { id: "correction-1", sender: "alpha/hub", summary: "上一封的第三点写反了" },
+      ]);
     } finally { x.database.close(); }
   });
 

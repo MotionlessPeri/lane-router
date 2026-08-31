@@ -2,6 +2,8 @@ import WebSocket from "ws";
 
 import type { ClaudeChannelConnection } from "../mcp/lane-mcp-server.js";
 import type { ClaudeChannelNotification, ClaudeChannelSink } from "../adapters/claude/channel-bridge.js";
+import type { NotificationMessage } from "../router/backend.js";
+import { notificationPayload } from "../router/notification-payload.js";
 import type { CallerContext } from "../router/types.js";
 import type { LaneToolName } from "../tools/tool-contract.js";
 import type { RouterDiscovery } from "./local-server.js";
@@ -134,13 +136,38 @@ function channelUrl(baseUrl: string, conversationId: string, joinKey?: string): 
 
 function toClaudeNotification(value: unknown): ClaudeChannelNotification {
   if (typeof value !== "object" || value === null) throw new Error("invalid notification");
-  const notification = value as { laneAddress?: unknown; pendingPath?: unknown; messageIds?: unknown; kind?: unknown };
+  const notification = value as { laneAddress?: unknown; pendingPath?: unknown; messageIds?: unknown; kind?: unknown; messages?: unknown };
   if (typeof notification.laneAddress !== "string" || typeof notification.pendingPath !== "string" || !Array.isArray(notification.messageIds)) throw new Error("invalid notification");
   return {
     method: "notifications/claude/channel",
     params: {
-      content: JSON.stringify({ kind: "lane_router_mailbox", laneAddress: notification.laneAddress, pendingPath: notification.pendingPath, messageIds: notification.messageIds }),
+      content: notificationPayload({
+        laneAddress: notification.laneAddress,
+        pendingPath: notification.pendingPath,
+        kind: notification.kind === "correction" ? "correction" : "normal",
+        messageIds: notification.messageIds as readonly string[],
+        messages: toNotificationMessages(notification.messages),
+      }),
       meta: { message_id: String(notification.messageIds[0] ?? "lane-router") },
     },
   };
+}
+
+/**
+ * Total on purpose, unlike the fields above: a session outlives the Router that started it, so
+ * this can be handed a frame from a Router built before summaries existed, where `messages` is
+ * simply absent. Rejecting that frame would drop the notification altogether and leave the lane
+ * unwoken, which is a worse fault than the one summaries were added to fix — the same reason the
+ * Router treats an unreadable body as a missing summary rather than a failed notification.
+ */
+function toNotificationMessages(value: unknown): NotificationMessage[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => {
+    const message = entry as { id?: unknown; sender?: unknown; summary?: unknown } | null;
+    return {
+      id: typeof message?.id === "string" ? message.id : "",
+      sender: typeof message?.sender === "string" ? message.sender : "",
+      summary: typeof message?.summary === "string" ? message.summary : "",
+    };
+  });
 }

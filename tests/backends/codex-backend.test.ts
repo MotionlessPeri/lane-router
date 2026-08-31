@@ -10,6 +10,10 @@ const binding: BindingRecord = {
 const notification = {
   laneAddress: "alpha/design", pendingPath: "C:/mailboxes/alpha/design/pending",
   kind: "normal" as const, messageIds: ["message-1", "message-2"],
+  messages: [
+    { id: "message-1", sender: "alpha/hub", summary: "本轮 lane 重构的顺序" },
+    { id: "message-2", sender: "beta/impl", summary: "退役前先关窗口" },
+  ],
 };
 
 function setup(status: "idle" | "active" | "notLoaded" = "idle") {
@@ -63,6 +67,13 @@ describe("CodexBackend", () => {
     expect(JSON.parse(start.input[0]!.text)).toEqual({
       kind: "lane_router_mailbox", laneAddress: "alpha/design",
       pendingPath: notification.pendingPath, messageIds: ["message-1", "message-2"],
+      messageKind: "normal",
+      // Who and roughly what, and no more: still no body, which is what keeps a notification an
+      // index into the mailbox rather than a second copy of it.
+      messages: [
+        { id: "message-1", sender: "alpha/hub", summary: "本轮 lane 重构的顺序" },
+        { id: "message-2", sender: "beta/impl", summary: "退役前先关窗口" },
+      ],
     });
   });
 
@@ -71,7 +82,10 @@ describe("CodexBackend", () => {
     await expect(normal.backend.notifyNormal(binding, notification)).resolves.toBe("deferred");
     expect(normal.request).toHaveBeenCalledTimes(1);
     const correction = setup("active");
-    await expect(correction.backend.notifyCorrection(binding, { ...notification, kind: "correction", messageIds: ["message-2"] }))
+    await expect(correction.backend.notifyCorrection(binding, {
+      ...notification, kind: "correction", messageIds: ["message-2"],
+      messages: [{ id: "message-2", sender: "beta/impl", summary: "退役前先关窗口" }],
+    }))
       .resolves.toBe("sent");
     expect(correction.request).toHaveBeenLastCalledWith("turn/steer", expect.objectContaining({
       threadId: "thread-1", expectedTurnId: "turn-1",

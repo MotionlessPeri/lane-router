@@ -3,11 +3,28 @@ import type { BackendName, BindingRecord, CallerContext, MessageKind, Notificati
 export type { NotificationOutcome, ReachSnapshot, ReachState, ResolvedIdentity } from "./types.js";
 export type RestorePresence = "online" | "offline" | "unavailable";
 
+/**
+ * What one covered message says about itself, so a receiver can judge whether to break off what
+ * it is doing before opening any file. A notification carries no body: this is the whole of what
+ * it reveals, and `summary` is empty whenever the body could not be read.
+ */
+export interface NotificationMessage {
+  readonly id: string;
+  readonly sender: string;
+  readonly summary: string;
+}
+
 export interface Notification {
   readonly laneAddress: string;
   readonly pendingPath: string;
   readonly kind: MessageKind;
   readonly messageIds: readonly string[];
+  /**
+   * One entry per ID in `messageIds`, in the same order. A single notification stands for every
+   * pending message of one lane, and those can come from several senders, so this is a list
+   * rather than a sender-and-subject pair on the notification itself.
+   */
+  readonly messages: readonly NotificationMessage[];
 }
 
 export interface PlatformBackend {

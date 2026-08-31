@@ -5,6 +5,7 @@ import {
   type ThreadResult,
 } from "../adapters/codex/protocol.js";
 import type { Notification, NotificationOutcome, PlatformBackend, ReachSnapshot, RestorePresence } from "../router/backend.js";
+import { notificationPayload } from "../router/notification-payload.js";
 import type { BindingRecord, CallerContext, ResolvedIdentity } from "../router/types.js";
 
 interface CodexNotification {
@@ -103,14 +104,14 @@ export class CodexBackend implements PlatformBackend {
         decodeTurnSteerResult(await this.dependencies.client.request("turn/steer", {
           threadId: binding.conversationId,
           expectedTurnId: turnId,
-          input: [{ type: "text", text: notificationText(notification) }],
+          input: [{ type: "text", text: notificationPayload(notification) }],
         }));
         this.observe(binding.conversationId, "notified");
         return "sent";
       }
       decodeTurnStartResult(await this.dependencies.client.request("turn/start", {
         threadId: binding.conversationId,
-        input: [{ type: "text", text: notificationText(notification) }],
+        input: [{ type: "text", text: notificationPayload(notification) }],
       }));
       this.observe(binding.conversationId, "notified");
       return "sent";
@@ -193,15 +194,6 @@ function activeTurnId(response: ThreadResult): string {
     if (turn?.status === "inProgress") return turn.id;
   }
   throw new Error("Codex thread is active without an authoritative in-progress turn");
-}
-
-function notificationText(notification: Notification): string {
-  return JSON.stringify({
-    kind: "lane_router_mailbox",
-    laneAddress: notification.laneAddress,
-    pendingPath: notification.pendingPath,
-    messageIds: [...notification.messageIds],
-  });
 }
 
 function isMissingThread(error: unknown): boolean {

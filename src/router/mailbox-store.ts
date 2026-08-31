@@ -79,6 +79,21 @@ export class MailboxStore {
     return this.describe(absolutePath, contents);
   }
 
+  /**
+   * The body a message was written with, i.e. the file minus its header block. It is read on
+   * demand rather than kept in the database because a body never changes once written, so there
+   * is no stale value to guard against and nothing to migrate.
+   */
+  readBody(relativePath: string): string {
+    const lines = readFileSync(this.absolute(relativePath), "utf8").split("\n");
+    if (lines[0] !== "---") throw new MailboxCorruptionError("Message header is missing");
+    const end = lines.indexOf("---", 1);
+    if (end < 0) throw new MailboxCorruptionError("Message header is incomplete");
+    // serializeMessage writes one blank line between the header and the body. Dropping it makes
+    // this the inverse of that rather than a body carrying a newline nobody wrote.
+    return lines.slice(lines[end + 1] === "" ? end + 2 : end + 1).join("\n");
+  }
+
   resolve(relativePath: string): MailboxFile {
     const source = this.absolute(relativePath);
     const normalized = relativePath.replaceAll("\\", "/");
