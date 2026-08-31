@@ -233,14 +233,13 @@ export class LocalRouterServer {
     /** Answers what a lane needs to be resumed; serves the lane launcher, not conversation tools. */
     readonly resumeInfo?: (address: string) => unknown;
     /**
-     * Lane retirement, served here rather than as a sixth conversation tool. The CLI cannot decide
+     * Lane archiving, served here rather than as a sixth conversation tool. The CLI cannot decide
      * this alone: refusing an open lane needs the backend's live restore presence, which only the
      * Router holds, and writing the row directly would bypass every precondition. Same shape and
      * same reason as `resumeInfo` — a Router surface for the lane CLI, invisible to agents.
      */
-    readonly retireLane?: (address: string) => Promise<unknown>;
-    readonly unretireLane?: (address: string) => unknown;
-    readonly listRetiredLanes?: (project: string | undefined) => unknown;
+    readonly archiveLane?: (address: string) => Promise<unknown>;
+    readonly listArchivedLanes?: (project: string | undefined) => unknown;
     /**
      * One snapshot for the observation board, given the facts only this server holds. Optional for
      * the same reason as the surfaces above — the board is a face a Router may be built without —
@@ -290,9 +289,9 @@ export class LocalRouterServer {
       if (request.method === "GET" && request.url === "/health") return json(response, 200, this.discovery());
       if (request.method === "GET" && request.url !== undefined) {
         const url = new URL(request.url, "http://127.0.0.1");
-        if (url.pathname === "/lanes/retired" && this.options.listRetiredLanes) {
+        if (url.pathname === "/lanes/archived" && this.options.listArchivedLanes) {
           const project = url.searchParams.get("project") ?? undefined;
-          return json(response, 200, { result: this.options.listRetiredLanes(project) });
+          return json(response, 200, { result: this.options.listArchivedLanes(project) });
         }
         if (url.pathname === "/dashboard" && this.options.dashboardState) {
           const page = readDashboardPage();
@@ -311,16 +310,15 @@ export class LocalRouterServer {
           return json(response, 200, { result: await this.options.resumeInfo(address) });
         }
       }
-      if (request.method === "POST" && (request.url === "/lanes/retire" || request.url === "/lanes/unretire")) {
-        const retiring = request.url === "/lanes/retire";
-        const handler = retiring ? this.options.retireLane : this.options.unretireLane;
+      if (request.method === "POST" && request.url === "/lanes/archive") {
+        const handler = this.options.archiveLane;
         if (!handler) return json(response, 404, { error: "not found" });
         const body = await readJson(request) as { address?: unknown };
         if (typeof body.address !== "string" || body.address.trim() === "") return json(response, 400, { error: "address is required" });
         try { return json(response, 200, { result: await handler(body.address) }); }
         // A refusal is an answer the CLI has to print, not a crash: 409 says the Router declined,
         // and the body carries the sentence naming which precondition and by how much.
-        catch (error) { return json(response, 409, { error: error instanceof Error ? error.message : "retirement refused" }); }
+        catch (error) { return json(response, 409, { error: error instanceof Error ? error.message : "archiving refused" }); }
       }
       if (request.method === "POST" && request.url === "/claude/lifecycle") {
         const body = await readJson(request) as { conversationId?: unknown; event?: unknown; joinKey?: unknown; cwd?: unknown };

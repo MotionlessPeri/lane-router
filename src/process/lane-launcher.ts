@@ -17,9 +17,8 @@ const USAGE = [
   "Usage:",
   "  lane-router-lane new <project>/<lane> --role \"<role description>\" [--model <model>] [--backend claude] [--cwd <dir>] [--terminal <wt|powershell|cmd>]",
   "  lane-router-lane open <project>/<lane> [--cwd <dir>] [--terminal <wt|powershell|cmd>]",
-  "  lane-router-lane retire <project>/<lane>",
-  "  lane-router-lane unretire <project>/<lane>",
-  "  lane-router-lane list-retired [<project>]",
+  "  lane-router-lane archive <project>/<lane>",
+  "  lane-router-lane list-archived [<project>]",
 ].join("\n");
 
 export interface LaneLaunchDependencies {
@@ -30,9 +29,8 @@ export interface LaneLaunchDependencies {
   readonly wtAvailable?: boolean;
   readonly queryDirectory?: (project: string) => Promise<ReadonlyArray<{ address: string }>>;
   readonly queryResumeInfo?: (address: string) => Promise<ResumeInfo>;
-  readonly retireLane?: (address: string) => Promise<unknown>;
-  readonly unretireLane?: (address: string) => Promise<unknown>;
-  readonly listRetiredLanes?: (project: string | undefined) => Promise<ReadonlyArray<{ address: string; retiredAt: number | null }>>;
+  readonly archiveLane?: (address: string) => Promise<unknown>;
+  readonly listArchivedLanes?: (project: string | undefined) => Promise<ReadonlyArray<{ address: string; archivedAt: number | null }>>;
   readonly write?: (text: string) => void;
 }
 
@@ -56,27 +54,21 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
   const dataRoot = dependencies.dataRoot ?? process.env.LANE_ROUTER_DATA_ROOT ?? join(homedir(), ".lane-router");
 
   // Step 2: The state verbs answer before any window logic, and open no window at all.
-  if (invocation.verb === "list-retired") {
+  if (invocation.verb === "list-archived") {
     const write = dependencies.write ?? ((text: string) => { process.stdout.write(text); });
-    const retired = await (dependencies.listRetiredLanes ?? ((project?: string) => listRetiredDefault(dataRoot, project)))(invocation.project);
-    if (retired.length === 0) { write("  no retired lanes\n"); return; }
-    for (const lane of retired) write(`  ${lane.address}  retired ${new Date(lane.retiredAt ?? 0).toISOString()}\n`);
+    const archived = await (dependencies.listArchivedLanes ?? ((project?: string) => listArchivedDefault(dataRoot, project)))(invocation.project);
+    if (archived.length === 0) { write("  no archived lanes\n"); return; }
+    for (const lane of archived) write(`  ${lane.address}  archived ${new Date(lane.archivedAt ?? 0).toISOString()}\n`);
     return;
   }
-  if (invocation.verb === "retire" || invocation.verb === "unretire") {
+  if (invocation.verb === "archive") {
     const address = invocation.address!.address;
     const write = dependencies.write ?? ((text: string) => { process.stdout.write(text); });
     // The Router's refusal names which precondition stopped it and by how much; that sentence is
     // the whole value of the refusal, so it travels out as-is rather than as a generic failure.
-    if (invocation.verb === "retire") {
-      await (dependencies.retireLane ?? ((current: string) => laneStateDefault(dataRoot, "retire", current)))(address);
-      write(`  retired ${address}
+    await (dependencies.archiveLane ?? ((current: string) => archiveLaneDefault(dataRoot, current)))(address);
+    write(`  archived ${address}
 `);
-    } else {
-      await (dependencies.unretireLane ?? ((current: string) => laneStateDefault(dataRoot, "unretire", current)))(address);
-      write(`  returned ${address} to service
-`);
-    }
     return;
   }
 
@@ -104,8 +96,8 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
   if (info.state === "missing") {
     throw new Error(`Lane ${invocation.address!.address} does not exist; create it with: lane-router-lane new ${invocation.address!.address} --role "<role description>"`);
   }
-  if (info.state === "retired") {
-    throw new Error(`Lane ${invocation.address!.address} is retired; return it to service first with: lane-router-lane unretire ${invocation.address!.address}`);
+  if (info.state === "archived") {
+    throw new Error(`Lane ${invocation.address!.address} is archived and cannot be returned to service; create a new lane at a different address`);
   }
   if (info.state === "unbound") {
     // A lane without an active binding has no conversation to reopen. Reattaching is a topology
@@ -135,8 +127,8 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
 }
 
 interface ParsedInvocation {
-  readonly verb: "new" | "open" | "retire" | "unretire" | "list-retired";
-  /** Absent only for `list-retired`, whose argument is a project rather than a lane. */
+  readonly verb: "new" | "open" | "archive" | "list-archived";
+  /** Absent only for `list-archived`, whose argument is a project rather than a lane. */
   readonly address: LaneAddress | undefined;
   readonly project: string | undefined;
   readonly role: string;
@@ -145,21 +137,21 @@ interface ParsedInvocation {
   readonly terminal: TerminalChoice | undefined;
 }
 
-const WINDOWLESS_VERBS = ["retire", "unretire", "list-retired"] as const;
+const WINDOWLESS_VERBS = ["archive", "list-archived"] as const;
 
 function parseInvocation(args: readonly string[]): ParsedInvocation {
   const [verb, rawAddress, ...rest] = args;
-  // The three state verbs open no window, so they take none of the window options: accepting
+  // The state verbs open no window, so they take none of the window options: accepting
   // --terminal there would promise something the verb cannot do.
   if ((WINDOWLESS_VERBS as readonly string[]).includes(verb ?? "")) {
     if (rest.length > 0) throw new Error(USAGE);
-    if (verb !== "list-retired" && !rawAddress) throw new Error(USAGE);
-    // `list-retired` takes a project, the other two take a lane. Parsing the argument as an
-    // address either way would reject `list-retired alpha`, which is the common invocation.
+    if (verb !== "list-archived" && !rawAddress) throw new Error(USAGE);
+    // `list-archived` takes a project, `archive` takes a lane. Parsing the argument as an
+    // address either way would reject `list-archived alpha`, which is the common invocation.
     return {
       verb: verb as ParsedInvocation["verb"],
-      address: verb === "list-retired" || rawAddress === undefined ? undefined : parseLaneAddress(rawAddress),
-      project: verb === "list-retired" ? rawAddress : undefined,
+      address: verb === "list-archived" || rawAddress === undefined ? undefined : parseLaneAddress(rawAddress),
+      project: verb === "list-archived" ? rawAddress : undefined,
       role: "", model: undefined, cwd: undefined, terminal: undefined,
     };
   }
@@ -213,8 +205,8 @@ async function routerUrl(dataRoot: string): Promise<string> {
   return (await ensureRouter({ dataRoot })).url;
 }
 
-async function laneStateDefault(dataRoot: string, verb: "retire" | "unretire", address: string): Promise<unknown> {
-  const response = await fetch(`${await routerUrl(dataRoot)}/lanes/${verb}`, {
+async function archiveLaneDefault(dataRoot: string, address: string): Promise<unknown> {
+  const response = await fetch(`${await routerUrl(dataRoot)}/lanes/archive`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address }),
   });
   const body = await response.json() as { result?: unknown; error?: string };
@@ -222,10 +214,10 @@ async function laneStateDefault(dataRoot: string, verb: "retire" | "unretire", a
   return body.result;
 }
 
-async function listRetiredDefault(dataRoot: string, project: string | undefined): Promise<ReadonlyArray<{ address: string; retiredAt: number | null }>> {
+async function listArchivedDefault(dataRoot: string, project: string | undefined): Promise<ReadonlyArray<{ address: string; archivedAt: number | null }>> {
   const query = project === undefined ? "" : `?project=${encodeURIComponent(project)}`;
-  const response = await fetch(`${await routerUrl(dataRoot)}/lanes/retired${query}`);
-  const body = await response.json() as { result?: Array<{ address: string; retiredAt: number | null }>; error?: string };
+  const response = await fetch(`${await routerUrl(dataRoot)}/lanes/archived${query}`);
+  const body = await response.json() as { result?: Array<{ address: string; archivedAt: number | null }>; error?: string };
   if (!response.ok) throw new Error(body.error ?? `Router request failed (${response.status})`);
   return body.result ?? [];
 }

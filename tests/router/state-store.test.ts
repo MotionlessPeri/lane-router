@@ -17,7 +17,7 @@ describe("V1 state store", () => {
         WHERE type='table' AND name NOT LIKE 'sqlite_%'
         ORDER BY name
       `).all() as Array<{ name: string }>;
-      expect(tables.map((row) => row.name)).toEqual(["binding", "lane", "message"]);
+      expect(tables.map((row) => row.name)).toEqual(["binding", "lane", "message", "message_archive"]);
       const messageColumns = database.pragma("table_info(message)") as Array<{ name: string }>;
       expect(messageColumns.map((column) => column.name)).not.toContain("body");
       expect(messageColumns.map((column) => column.name)).not.toContain("metadata_json");
@@ -149,22 +149,39 @@ describe("declared model", () => {
   });
 });
 
-describe("retirement", () => {
-  it("retires and returns a lane to service without touching anything else about it", () => {
+describe("archiving", () => {
+  it("archives a lane without touching anything else about it", () => {
     const { database, store } = setup();
     try {
-      store.createLane({ address: "alpha/design", project: "alpha", roleDescription: "design", now: 1, model: "sonnet" });
-      expect(store.requireLane("alpha/design").retiredAt).toBeNull();
+      const created = store.createLane({ address: "alpha/design", project: "alpha", roleDescription: "design", now: 1, model: "sonnet" });
+      expect(created.archivedAt).toBeNull();
 
-      expect(store.retireLane("alpha/design", 50).retiredAt).toBe(50);
-      // Retiring is a state change, not an edit: everything the lane says about itself has to
-      // survive it, or returning it to service would come back a different lane.
-      expect(store.requireLane("alpha/design")).toMatchObject({
-        roleDescription: "design", model: "sonnet", createdAt: 1, retiredAt: 50,
+      expect(store.archiveLane("alpha/design", 50).archivedAt).toBe(50);
+      // Archiving is a state change, not an edit: the row and everything the lane says about
+      // itself stay, which is the whole difference between this and deleting it. Read by id,
+      // because the address it used to answer to no longer belongs to it.
+      expect(store.laneById(created.id)).toMatchObject({
+        id: created.id, address: "alpha/design", roleDescription: "design", model: "sonnet", createdAt: 1, archivedAt: 50,
       });
+    } finally { database.close(); }
+  });
 
-      expect(store.unretireLane("alpha/design", 60).retiredAt).toBeNull();
-      expect(store.requireLane("alpha/design")).toMatchObject({ roleDescription: "design", model: "sonnet" });
+  // The address goes straight back into circulation, and the new lane is a different lane: same
+  // name, own identity, so every message already pointing at the old one still means the old one.
+  it("frees the address for a new lane that is not the old one", () => {
+    const { database, store } = setup();
+    try {
+      const original = store.createLane({ address: "alpha/design", project: "alpha", roleDescription: "first", now: 1 });
+      store.archiveLane("alpha/design", 50);
+
+      const replacement = store.createLane({ address: "alpha/design", project: "alpha", roleDescription: "second", now: 60 });
+      expect(replacement.id).not.toBe(original.id);
+      expect(store.requireLane("alpha/design")).toMatchObject({ id: replacement.id, roleDescription: "second", archivedAt: null });
+      expect(store.laneById(original.id)).toMatchObject({ roleDescription: "first", archivedAt: 50 });
+
+      // Only one of them may be in service: that is the half the address still has to guarantee.
+      expect(() => store.createLane({ address: "alpha/design", project: "alpha", roleDescription: "third", now: 61 }))
+        .toThrow(/constraint/iu);
     } finally { database.close(); }
   });
 
@@ -174,21 +191,24 @@ describe("retirement", () => {
       for (const address of ["alpha/one", "alpha/two", "beta/three"]) {
         store.createLane({ address, project: address.split("/")[0]!, roleDescription: address, now: 1 });
       }
-      store.retireLane("alpha/two", 50);
-      store.retireLane("beta/three", 51);
+      store.archiveLane("alpha/two", 50);
+      store.archiveLane("beta/three", 51);
 
-      // listLanes stays the in-service view every existing caller already expects; the retired
+      // listLanes stays the in-service view every existing caller already expects; the archived
       // ones need their own query because nothing else can see them once they leave the directory.
       expect(store.listLanes("alpha").map((lane) => lane.address)).toEqual(["alpha/one"]);
-      expect(store.listRetiredLanes("alpha").map((lane) => lane.address)).toEqual(["alpha/two"]);
-      expect(store.listRetiredLanes(undefined).map((lane) => lane.address)).toEqual(["alpha/two", "beta/three"]);
+      expect(store.listArchivedLanes("alpha").map((lane) => lane.address)).toEqual(["alpha/two"]);
+      expect(store.listArchivedLanes(undefined).map((lane) => lane.address)).toEqual(["alpha/two", "beta/three"]);
 
-      // `lane` and `requireLane` still find a retired lane: the callers that refuse delivery have
-      // to be able to tell "retired" from "never existed" to say which one it is.
-      expect(store.lane("alpha/two")?.retiredAt).toBe(50);
+      // An address stops naming a lane the moment it is archived — the address is free again, so
+      // answering with the archived row would be answering about the wrong lane. It is still
+      // reachable two other ways: by identity, and by asking what used to be here.
+      expect(store.lane("alpha/two")).toBeUndefined();
+      expect(store.archivedLaneAt("alpha/two")?.archivedAt).toBe(50);
+      const archivedId = store.listArchivedLanes("alpha")[0]!.id;
+      expect(store.laneById(archivedId)?.archivedAt).toBe(50);
 
-      expect(() => store.retireLane("alpha/ghost", 60)).toThrow(/not found/iu);
-      expect(() => store.unretireLane("alpha/ghost", 60)).toThrow(/not found/iu);
+      expect(() => store.archiveLane("alpha/ghost", 60)).toThrow(/not found/iu);
     } finally { database.close(); }
   });
 });

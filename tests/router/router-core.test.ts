@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -410,8 +410,8 @@ describe("declared model", () => {
   });
 });
 
-describe("retirement, read surfaces", () => {
-  it("drops a retired lane from the directory while leaving the others exactly as they were", async () => {
+describe("archiving, read surfaces", () => {
+  it("drops an archived lane from the directory while leaving the others exactly as they were", async () => {
     const x = setup();
     try {
       await x.core.attachCurrent(caller("a"), { address: "alpha/keep", roleDescription: "keep" });
@@ -419,7 +419,7 @@ describe("retirement, read surfaces", () => {
       const before = x.core.directory("alpha");
       expect(before.map((entry) => entry.address)).toEqual(["alpha/gone", "alpha/keep"]);
 
-      x.state.retireLane("alpha/gone", 500);
+      x.state.archiveLane("alpha/gone", 500);
 
       const after = x.core.directory("alpha");
       // The surviving entry must be identical, not merely present: a filter that also reshaped
@@ -428,68 +428,75 @@ describe("retirement, read surfaces", () => {
     } finally { x.database.close(); }
   });
 
-  it("tells a retired lane apart from one that never existed", async () => {
+  it("tells an archived lane apart from one that never existed", async () => {
     const x = setup();
     try {
       await x.core.attachCurrent(caller("a"), { address: "alpha/gone", roleDescription: "gone" });
-      x.state.retireLane("alpha/gone", 500);
+      x.state.archiveLane("alpha/gone", 500);
 
-      // Three different answers for three different situations. Collapsing retired into missing
+      // Three different answers for three different situations. Collapsing archived into missing
       // would send someone off to create a lane whose address is already taken by its own history.
-      await expect(x.core.resumeInfo("alpha/gone")).resolves.toEqual({ state: "retired" });
+      await expect(x.core.resumeInfo("alpha/gone")).resolves.toEqual({ state: "archived" });
       await expect(x.core.resumeInfo("alpha/ghost")).resolves.toEqual({ state: "missing" });
       expect((await x.core.resumeInfo("alpha/gone") as { state: string }).state).not.toBe("bound");
     } finally { x.database.close(); }
   });
 
-  it("refuses to attach a conversation to a retired address instead of reviving it silently", async () => {
+  // Attaching to an archived address builds a new lane rather than reviving the old one, and the
+  // two are different rows: nothing returns an archived lane to service, and nothing that already
+  // names the old one starts meaning the new one.
+  it("attaches to an archived address by creating a new lane, not by reviving the old one", async () => {
     const x = setup();
     try {
       await x.core.attachCurrent(caller("a"), { address: "alpha/gone", roleDescription: "gone" });
-      x.state.retireLane("alpha/gone", 500);
+      const original = x.state.requireLane("alpha/gone");
+      x.state.archiveLane("alpha/gone", 500);
 
-      await expect(x.core.attachCurrent(caller("newcomer", "attach:newcomer"), { address: "alpha/gone", roleDescription: "different role" }))
-        .rejects.toMatchObject({ code: "LANE_RETIRED" });
-      // The address stays occupied by its own history: reusing it would make every message that
-      // names it ambiguous about which lane it meant.
-      expect(x.state.requireLane("alpha/gone")).toMatchObject({ roleDescription: "gone", retiredAt: 500 });
+      await x.core.attachCurrent(caller("newcomer", "attach:newcomer"), { address: "alpha/gone", roleDescription: "different role" });
+
+      const current = x.state.requireLane("alpha/gone");
+      expect(current.id).not.toBe(original.id);
+      expect(current).toMatchObject({ roleDescription: "different role", archivedAt: null });
+      // The archived one is untouched, and still carries the role it had: it was not edited,
+      // renamed, or brought back — it simply stopped being what this address means.
+      expect(x.state.laneById(original.id)).toMatchObject({ roleDescription: "gone", archivedAt: 500 });
     } finally { x.database.close(); }
   });
 });
 
-describe("retirement, write surface and preconditions", () => {
-  it("refuses delivery to a retired lane and says which lane it is", async () => {
+describe("archiving, write surface and preconditions", () => {
+  it("refuses delivery to an archived lane and says which lane it is", async () => {
     const x = setup();
     try {
       await x.core.attachCurrent(caller("source"), { address: "alpha/source", roleDescription: "source" });
       await x.core.attachCurrent(caller("target", "attach:target"), { address: "alpha/target", roleDescription: "target" });
       const before = x.state.allMessages().length;
-      x.state.retireLane("alpha/target", 500);
+      x.state.archiveLane("alpha/target", 500);
 
       await expect(x.core.send(caller("source", "send:1"), { target: "alpha/target", body: "hi", kind: "normal" }))
-        .rejects.toMatchObject({ code: "LANE_RETIRED" });
+        .rejects.toMatchObject({ code: "LANE_ARCHIVED" });
       // Nothing written: a message accepted into a mailbox nobody will ever read again is the
-      // silent loss retirement exists to prevent.
+      // silent loss archiving exists to prevent.
       expect(x.state.allMessages()).toHaveLength(before);
       expect(pendingFileCount(x.root)).toBe(0);
     } finally { x.database.close(); }
   });
 
-  it("refuses to retire a lane whose conversation is still open", async () => {
+  it("refuses to archive a lane whose conversation is still open", async () => {
     const x = setup();
     try {
       await x.core.attachCurrent(caller("live"), { address: "alpha/live", roleDescription: "live" });
       x.backend.restoreState = "online";
 
-      await expect(x.core.retireLane("alpha/live")).rejects.toMatchObject({ code: "LANE_ONLINE" });
-      expect(x.state.requireLane("alpha/live").retiredAt).toBeNull();
-      // The binding must survive a refused retirement untouched, or a failed attempt would have
+      await expect(x.core.archiveLane("alpha/live")).rejects.toMatchObject({ code: "LANE_ONLINE" });
+      expect(x.state.requireLane("alpha/live").archivedAt).toBeNull();
+      // The binding must survive a refused archiving untouched, or a failed attempt would have
       // orphaned the very conversation it declined to disturb.
       expect(x.state.activeBindingForLane("alpha/live")).not.toBeUndefined();
     } finally { x.database.close(); }
   });
 
-  it("refuses to retire a lane that still has unread messages, and counts them", async () => {
+  it("refuses to archive a lane that still has unread messages, and counts them", async () => {
     const x = setup();
     try {
       await x.core.attachCurrent(caller("source"), { address: "alpha/source", roleDescription: "source" });
@@ -500,36 +507,49 @@ describe("retirement, write surface and preconditions", () => {
       // separately load-bearing and one implementation must not be able to satisfy both tests.
       x.backend.restoreState = "offline";
 
-      await expect(x.core.retireLane("alpha/target")).rejects.toMatchObject({ code: "LANE_HAS_PENDING" });
-      await expect(x.core.retireLane("alpha/target")).rejects.toThrow(/2/u);
-      expect(x.state.requireLane("alpha/target").retiredAt).toBeNull();
+      await expect(x.core.archiveLane("alpha/target")).rejects.toMatchObject({ code: "LANE_HAS_PENDING" });
+      await expect(x.core.archiveLane("alpha/target")).rejects.toThrow(/2/u);
+      expect(x.state.requireLane("alpha/target").archivedAt).toBeNull();
     } finally { x.database.close(); }
   });
 
-  it("retires an offline lane, releases its binding, and leaves all history in place", async () => {
+  // Its own mail leaves the working set; what it sent stays where it is. Those files sit in other
+  // lanes' mailboxes and belong to them, so archiving must not reach into them — and their sender
+  // goes on pointing at the row this lane leaves behind, which is what the anchor is for.
+  it("archives an offline lane, moving its own mail out and leaving other lanes' alone", async () => {
     const x = setup();
     try {
       await x.core.attachCurrent(caller("source"), { address: "alpha/source", roleDescription: "source" });
       await x.core.attachCurrent(caller("target", "attach:target"), { address: "alpha/target", roleDescription: "target" });
-      const [sent] = await x.core.send(caller("source", "send:1"), { target: "alpha/target", body: "one", kind: "normal" });
-      await x.core.ack(caller("target", "ack:1"), { messageIds: [sent!.id] });
+      const [toTarget] = await x.core.send(caller("source", "send:1"), { target: "alpha/target", body: "for target", kind: "normal" });
+      await x.core.ack(caller("target", "ack:1"), { messageIds: [toTarget!.id] });
+      const [toSource] = await x.core.send(caller("target", "send:2"), { target: "alpha/source", body: "for source", kind: "normal" });
       x.backend.restoreState = "offline";
 
-      const messages = x.state.allMessages().length;
+      const archivedLane = x.state.requireLane("alpha/target");
       const bindingRows = () => (x.database.prepare("SELECT COUNT(*) n FROM binding").get() as { n: number }).n;
       const bindings = bindingRows();
-      const files = resolvedFileCount(x.root) + pendingFileCount(x.root);
 
-      await expect(x.core.retireLane("alpha/target")).resolves.toMatchObject({ address: "alpha/target" });
+      await expect(x.core.archiveLane("alpha/target")).resolves.toMatchObject({ address: "alpha/target" });
 
-      expect(x.state.requireLane("alpha/target").retiredAt).not.toBeNull();
-      // Released, so the lane is not left retired-and-owned - a state the directory now hides.
+      expect(x.state.laneById(archivedLane.id)!.archivedAt).not.toBeNull();
+      // Released, so the lane is not left archived-and-owned - a state the directory now hides.
       expect(x.state.activeBindingForLane("alpha/target")).toBeUndefined();
-      // Counted on both sides: rows alone would miss a file deleted without its row, and files
-      // alone would miss the reverse.
-      expect(x.state.allMessages()).toHaveLength(messages);
+      // Bindings are not deleted: they still reference the anchor, and they are the record of
+      // which conversations this lane ever was.
       expect(bindingRows()).toBe(bindings);
-      expect(resolvedFileCount(x.root) + pendingFileCount(x.root)).toBe(files);
+
+      // Moved, not deleted: out of the live table and into the archive, one for one.
+      expect(x.state.allMessages().map((message) => message.id)).toEqual([toSource!.id]);
+      expect(x.state.archivedMessage(toTarget!.id)).toMatchObject({ id: toTarget!.id, targetLaneId: archivedLane.id });
+      // The message it sent is untouched, and still names it as sender.
+      expect(x.state.requireMessage(toSource!.id)).toMatchObject({ senderLane: "alpha/target", targetLane: "alpha/source" });
+
+      // Files counted on both sides, because rows alone would miss a file left behind and files
+      // alone would miss a row moved without one.
+      expect(existsSync(join(x.root, x.state.archivedMessage(toTarget!.id)!.relativePath))).toBe(true);
+      expect(resolvedFileCount(x.root)).toBe(0);
+      expect(pendingFileCount(x.root)).toBe(1);
     } finally { x.database.close(); }
   });
 });

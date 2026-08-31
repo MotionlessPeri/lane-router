@@ -24,6 +24,12 @@ export interface ReachSnapshot {
 }
 
 export interface LaneRecord {
+  /**
+   * Who this lane is, as opposed to what it is called. The address is a label that belongs to one
+   * lane at a time and returns to circulation when that lane is archived, so anything that has to
+   * go on meaning the same lane — a binding, a message, a line of history — holds this instead.
+   */
+  readonly id: string;
   readonly address: string;
   readonly project: string;
   readonly roleDescription: string;
@@ -31,8 +37,8 @@ export interface LaneRecord {
   readonly updatedAt: number;
   /** The model this role is to run on, or null when the lane declares nothing and the client decides. */
   readonly model: string | null;
-  /** When this lane left service, or null while it is in service. Retiring never deletes a row. */
-  readonly retiredAt: number | null;
+  /** When this lane left service, or null while it is in service. Archiving never deletes a row. */
+  readonly archivedAt: number | null;
 }
 
 export interface BindingRecord {

@@ -51,10 +51,10 @@ export async function runOpenProjectLanes(project: string, dependencies: OpenPro
       failed.push([lane.address, firstLine(error)]);
       continue;
     }
-    // A lane can leave service between listing and asking about it, and a retired one is not a
+    // A lane can leave service between listing and asking about it, and an archived one is not a
     // failure to report - it is simply not a target any more.
-    if (info.state === "retired") {
-      skipped.push([lane.address, "retired"]);
+    if (info.state === "archived") {
+      skipped.push([lane.address, "archived"]);
       continue;
     }
     if (info.state !== "bound") {

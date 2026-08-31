@@ -248,31 +248,59 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 **最后验证：** 2026-08-27 使用真实 Codex CLI 0.148.0 与隔离 Router 完成。prompt 进程 argv 含 `--model gpt-5.6-terra --remote <隔离 endpoint>`，TUI 显示该模型并产出 `ISOLATED_ROUTER_OK`，rollout 对同一 thread 记录 `model: gpt-5.6-terra`；随后把该 thread 作为离线 binding，经批量脚本恢复，实际 resume argv 同时包含相同 `--model`、隔离 endpoint 与原 thread id。`model: null` 的完整旧 argv 由自动测试逐项固定。未知模型 `no-such-model-9` 由 stock Codex 报告 metadata 缺失并采用 fallback metadata，证明 Router 没有抢先校验；这也说明“无效模型必然立即退出”不是 Codex CLI 契约。隔离进程树全部停止，临时 root 经绝对路径核对后删除。部署时生产库在备份后清理了误连验证 fixture，最终恢复既有 `10 lanes / 33 bindings / 4032 messages`。
 
-### lane 退役
+### lane 归档
 
-**前提：** 已构建 `dist/`，且 **Router 已受控重启到含 schema v5 的版本**（`lane-router-lane list-retired` 能跑通即说明生效——旧 Router 进程持旧代码，库升到 v5 也不会自己认得 `retired_at`）。
+**前提：** 已构建 `dist/`，且 **Router 已受控重启到含 schema v6 的版本**。判据用「它做了什么」：`lane-router-lane list-archived` 能跑通即说明生效。
+
+⚠️ **v6 是一次建表重建，三张表全重建、四条外键换指向。** 迁移自己会核对三张表的行数，对不上就整个事务失败而不是少搬几行。升级前记下四个数（当前 lane 25 / binding 63 / message 4637 / 已归档 5），升级后逐条回查。
+
+#### TC-ARCHIVE-3：归档之后同名新建
+
+这条是整份改造要买的东西，所以要真机走一遍。
+
+1. 挑一条已归档的 lane（例如 `mocap/render`），确认 `lane_directory` 里没有它、`list-archived` 里有它。
+2. 用**同一个地址**新建一条 lane（`lane-router-lane new mocap/render --role "..."`）。
+3. 新窗口 attach 完成后，`lane_directory` 应显示它。
+4. 打开看板 `/dashboard`，在「已归档」折叠区里找旧那条。
+
+**预期：** 第 2 步成功；第 3 步显示的是**新**那条（角色说明是你刚写的）；第 4 步旧那条仍在归档区、角色说明是它原来的。两条同名、id 不同、互不影响。
+
+⚠️ **最容易验错的一点：** 只看「新建成功了」不够——**必须回头确认旧那条还在、且内容没被改**。「新建成功」和「把旧的改了个角色说明」在第 3 步的观测上一模一样。
+
+⚠️ **attach 到已归档地址会新建一条 lane，不会把旧的放回来**（用户 2026-08-31 确认）。没有任何路径能让归档的 lane 回到在役状态。
+
+#### TC-ARCHIVE-4：归档搬走了自己的信，没动别人的
+
+1. 归档一条有历史的 lane，记下归档前它的 `pending` / `resolved` 目录文件数，以及**它发给别人的**信数。
+2. 归档后再数一次两侧。
+
+**预期：** 它自己目录里的文件**清空**、出现在 `~/.lane-router/archive/<lane-id>/` 下；**别人目录里的文件数一个不变**。库里 `message` 表少掉的行数 = `message_archive` 多出的行数。
+
+⚠️ **两侧都要数。** 只数库会漏掉「删了行没挪文件」，只数文件会漏掉反过来的那种。
 
 自动测试覆盖迁移、四个读面、两条前置检查、三个 CLI 动词、端点的 409 语义与工具说明里的指针，并做过 13 个变异检验。下面两条依赖真实 backend 判定与真实 MCP 会话，fake 代替不了。
 
-#### TC-RETIRE-1：在线拒绝、离线放行
+#### TC-ARCHIVE-1：在线拒绝、离线放行
 
 ⚠️ **必须对同一条 lane 先开后关各试一次。** 只试关着的那次，「按 `restorePresence` 判」和「根本没判」在观测上一模一样——那不是通过，是没测到。
 
-1. 挑一条**窗口开着**的 lane，跑 `lane-router-lane retire <project>/<lane>`。
+1. 挑一条**窗口开着**的 lane，跑 `lane-router-lane archive <project>/<lane>`。
 2. 关掉那个窗口，等几秒，再跑同一条命令。
-3. `lane-router-lane list-retired <project>`。
-4. `lane-router-lane unretire <project>/<lane>`，再 `lane_directory` 看它回来没有。
+3. `lane-router-lane list-archived <project>`。
+4. 跑 `lane-router-lane unarchive <project>/<lane>`，确认它**不是一个动词**。
 
-**预期：** 第 1 步被拒，错误里指明它是哪个 backend 的哪个 conversation；第 2 步成功；第 3 步列出它与退役时间；第 4 步之后它重新出现在 `lane_directory` 里，`role_description` 与 `model` 与退役前一致。
+**预期：** 第 1 步被拒，错误里指明它是哪个 backend 的哪个 conversation；第 2 步成功；第 3 步列出它与归档时间；第 4 步打印用法并以非零退出——**归档是终态，没有回头路**，要那条角色就用另一个地址新建。
 
 **Codex lane 要单独走一遍**：共享 App Server 会让已关闭的 Codex lane 显示 `reach=unconfirmed`。若第 2 步对 Codex lane 被拒，说明在线判定退回了 `reach`——那正是本设计明确避开的失效。
 
-#### TC-RETIRE-2：退役后真实 agent 发不进去，且未读消息拦得住退役
+#### TC-ARCHIVE-2：归档后真实 agent 发不进去，且未读消息拦得住归档
 
-1. 从一条在线 lane 用 `lane_send` 发给已退役的地址。
-2. `unretire` 它，再发一条**不 ack**，然后 `retire`。
+1. 从一条在线 lane 用 `lane_send` 发给已归档的地址。
+2. 挑**另一条在役**的 lane，给它发一条**不 ack**，关掉它的窗口，然后 `archive` 它。
 
-**预期：** 第 1 步收到指名「已退役」的错误，且该 lane 的 `pending` 目录文件数不变；第 2 步被拒，错误里报出未读条数与发信方。
+**预期：** 第 1 步收到指名「已归档」的错误，且该 lane 的 `pending` 目录文件数不变；第 2 步被拒，错误里报出未读条数与发信方。
+
+⚠️ **第 2 步必须换一条 lane，不能把第 1 步那条放回来** —— 归档没有反向动词。这也是这条用例现在唯一的做法。
 
 **最后验证：** 尚未真机执行。自动测试覆盖到「历史不受影响」是数了 message 行数、binding 行数与 mailbox 文件数三者（文件与数据库**两侧都数**），但**真实窗口的在线判定只能人眼确认**。
 
@@ -306,7 +334,7 @@ NO_COLOR=1 lane-router-lane new <project>/<lane> --role "<角色说明>"
 
 ### TC-NOTIFY-1：一眼能分诊
 
-1. 两条在线 lane。从 A 向 B 发一封 normal，正文首行写一句明确主旨（例如「退役前先关窗口，未读信也会拦」）。
+1. 两条在线 lane。从 A 向 B 发一封 normal，正文首行写一句明确主旨（例如「归档前先关窗口，未读信也会拦」）。
 2. 在 B 那边看 `← lane:` 那一行，**先不要打开文件**。
 3. 让两条不同的 lane 各发一封给 B，B 都不 ack，等下一次通知把它们合成一条。
 4. 从 A 发一封 `correction`，`reply_to` 指向第 1 步那封。
@@ -323,7 +351,7 @@ NO_COLOR=1 lane-router-lane new <project>/<lane> --role "<角色说明>"
 
 ## 观测看板
 
-自动测试覆盖快照形状（全项目 + 退役 lane、binding / reach / 积压三段的有值与无值两侧）、有界（多于与少于 limit 各一次）、正文原样透传与读不到时为 `null`、精确键集（新增派生量会红）、两个端点的 `text/html` 与 JSON、未注入时 404、POST 不受理，以及页面在真实 DOM 里渲染敌意文本，并做过五个变异（结果见设计稿第六节）。下面这条不能自动化：**数据对**与**这一屏看了能判断出问题**是两件事。
+自动测试覆盖快照形状（全项目 + 归档 lane、binding / reach / 积压三段的有值与无值两侧）、有界（多于与少于 limit 各一次）、正文原样透传与读不到时为 `null`、精确键集（新增派生量会红）、两个端点的 `text/html` 与 JSON、未注入时 404、POST 不受理，以及页面在真实 DOM 里渲染敌意文本，并做过五个变异（结果见设计稿第六节）。下面这条不能自动化：**数据对**与**这一屏看了能判断出问题**是两件事。
 
 **前提：** 已构建 `dist/`（构建会把页面拷进 `dist/process/dashboard.html`，拷不成整个 build 失败）；**Router 已受控重启到本构建**。这里跟通知那条不同：**只需要换 Router**，不需要参与的会话是新的——看板整个住在 Router 进程里，浏览器直接连它。
 
@@ -334,9 +362,9 @@ NO_COLOR=1 lane-router-lane new <project>/<lane> --role "<角色说明>"
 1. 浏览器打开 `http://127.0.0.1:<port>/dashboard`。
 2. 不做任何操作，看三块是否都有内容：lane 拓扑、积压队列、消息流。
 3. 从一条 lane 向另一条发一封 normal，**故意不 ack**，等页面自己轮询刷新（约 5 秒）。
-4. 找一条已退役的 lane，确认它默认折叠在「已退役 N 条」里，展开后能看到。
+4. 找一条已归档的 lane，确认它默认折叠在「已归档 N 条」里，展开后能看到。
 
-**预期：** 第 2 步三块都有内容且 lane 拓扑的 `可达` 一列有值（这一列只有 Router 进程知道，是整个看板住在 Router 里的原因）；第 3 步那封出现在消息流顶部，「欠 ack」一列的时长**自己在走**，同时积压队列多出这条 lane；第 4 步退役 lane 不占视线但找得到。
+**预期：** 第 2 步三块都有内容且 lane 拓扑的 `可达` 一列有值（这一列只有 Router 进程知道，是整个看板住在 Router 里的原因）；第 3 步那封出现在消息流顶部，「欠 ack」一列的时长**自己在走**，同时积压队列多出这条 lane；第 4 步归档 lane 不占视线但找得到。
 
 **关键看点：** 「欠 ack」和积压队列的「最老一封已等」——它们是唯一能看出「有人没在处理」的量。封数不是，十封新的不如一封压了两天要紧。
 

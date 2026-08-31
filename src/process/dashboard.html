@@ -118,16 +118,16 @@
   var LANE_HEADINGS = ["lane", "角色", "backend", "generation", "model", "可达", "上次活动", "cwd"];
 
   function renderLanes(snapshot) {
-    var live = snapshot.lanes.filter(function (lane) { return !lane.retired; });
-    var retired = snapshot.lanes.filter(function (lane) { return lane.retired; });
+    var live = snapshot.lanes.filter(function (lane) { return !lane.archived; });
+    var archived = snapshot.lanes.filter(function (lane) { return lane.archived; });
     var host = document.createElement("div");
     host.appendChild(table(LANE_HEADINGS, live.map(function (lane) { return laneRow(snapshot, lane); })));
-    if (retired.length > 0) {
-      // Folded, not dropped: retired lanes should not take up the view, but "where did that lane
+    if (archived.length > 0) {
+      // Folded, not dropped: archived lanes should not take up the view, but "where did that lane
       // go" is a question people actually ask, and it has no other answer here.
       var details = document.createElement("details");
-      details.appendChild(el("summary", null, "已退役 " + retired.length + " 条"));
-      details.appendChild(table(LANE_HEADINGS, retired.map(function (lane) { return laneRow(snapshot, lane); })));
+      details.appendChild(el("summary", null, "已归档 " + archived.length + " 条"));
+      details.appendChild(table(LANE_HEADINGS, archived.map(function (lane) { return laneRow(snapshot, lane); })));
       host.appendChild(details);
     }
     replace(document.getElementById("lanes"), host);

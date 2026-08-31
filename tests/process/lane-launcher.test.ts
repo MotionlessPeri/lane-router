@@ -235,41 +235,45 @@ test("uses the existing data-root environment for child status and discovery iso
   expect((spawnTerminal.mock.calls[0]![0] as TerminalChildRequest).statusPath.startsWith(isolatedRoot)).toBe(true);
 });
 
-test("retires, returns to service, and lists, without opening any window", async () => {
+test("archives and lists, without opening any window", async () => {
   const calls: Array<[string, string | undefined]> = [];
   const deps = fakes({
-    retireLane: async (address: string) => { calls.push(["retire", address]); return { address, retiredAt: 500 }; },
-    unretireLane: async (address: string) => { calls.push(["unretire", address]); return { address, retiredAt: null }; },
-    listRetiredLanes: async (project: string | undefined) => { calls.push(["list", project]); return [{ address: "alpha/gone", retiredAt: 500 }]; },
+    archiveLane: async (address: string) => { calls.push(["archive", address]); return { address, archivedAt: 500 }; },
+    listArchivedLanes: async (project: string | undefined) => { calls.push(["list", project]); return [{ address: "alpha/gone", archivedAt: 500 }]; },
   });
 
-  await launchLane(["retire", "alpha/gone"], deps);
-  await launchLane(["unretire", "alpha/gone"], deps);
-  await launchLane(["list-retired", "alpha"], deps);
-  await launchLane(["list-retired"], deps);
+  await launchLane(["archive", "alpha/gone"], deps);
+  await launchLane(["list-archived", "alpha"], deps);
+  await launchLane(["list-archived"], deps);
 
-  expect(calls).toEqual([["retire", "alpha/gone"], ["unretire", "alpha/gone"], ["list", "alpha"], ["list", undefined]]);
-  // None of the three opens a window: they change or read lane state, and spawning a terminal
-  // would be the one irreversible thing in an otherwise reversible operation.
+  expect(calls).toEqual([["archive", "alpha/gone"], ["list", "alpha"], ["list", undefined]]);
+  // Neither opens a window: they change or read lane state, and spawning a terminal would be an
+  // unrelated side effect of a verb whose whole job is a row.
   expect(deps.spawnTerminal).not.toHaveBeenCalled();
 });
 
-test("rejects window options on the retirement verbs, which have no window", async () => {
-  const deps = fakes({ retireLane: async () => ({}) });
-  await expect(launchLane(["retire", "alpha/gone", "--terminal", "wt"], deps)).rejects.toThrow(/Usage/u);
-  await expect(launchLane(["retire", "alpha/gone", "--cwd", "D:/x"], deps)).rejects.toThrow(/Usage/u);
-  await expect(launchLane(["retire"], deps)).rejects.toThrow(/Usage/u);
-  // list-retired is the only verb whose address is optional; the other two must name one.
-  await expect(launchLane(["unretire"], deps)).rejects.toThrow(/Usage/u);
+// There is no verb for the other direction, and that is the design rather than a gap: archiving is
+// terminal, so a CLI that offered a way back would be promising something the Router will refuse.
+test("offers no way to return an archived lane to service", async () => {
+  const deps = fakes({ archiveLane: async () => ({}) });
+  await expect(launchLane(["unarchive", "alpha/gone"], deps)).rejects.toThrow(/Usage/u);
+  await expect(launchLane(["restore", "alpha/gone"], deps)).rejects.toThrow(/Usage/u);
+});
+
+test("rejects window options on the archiving verbs, which have no window", async () => {
+  const deps = fakes({ archiveLane: async () => ({}) });
+  await expect(launchLane(["archive", "alpha/gone", "--terminal", "wt"], deps)).rejects.toThrow(/Usage/u);
+  await expect(launchLane(["archive", "alpha/gone", "--cwd", "D:/x"], deps)).rejects.toThrow(/Usage/u);
+  await expect(launchLane(["archive"], deps)).rejects.toThrow(/Usage/u);
 });
 
 test("prints the Router's refusal instead of turning it into a bare failure", async () => {
   const written: string[] = [];
   const deps = fakes({
-    retireLane: async () => { throw new Error("Lane alpha/busy still has 2 unread message(s) from alpha/source"); },
+    archiveLane: async () => { throw new Error("Lane alpha/busy still has 2 unread message(s) from alpha/source"); },
     write: (text: string) => { written.push(text); },
   });
   // The Router names which precondition stopped it and by how much; that sentence is the whole
   // value of the refusal and has to survive the trip to the terminal.
-  await expect(launchLane(["retire", "alpha/busy"], deps)).rejects.toThrow(/2 unread message/u);
+  await expect(launchLane(["archive", "alpha/busy"], deps)).rejects.toThrow(/2 unread message/u);
 });

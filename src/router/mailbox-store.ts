@@ -8,7 +8,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 import { mailboxLanePath, parseLaneAddress } from "./address.js";
 import type { RouterStateStore } from "./state-store.js";
@@ -80,6 +80,33 @@ export class MailboxStore {
   }
 
   /**
+   * Where an archived lane's files live. Keyed by lane id, not by address, and that is load-bearing:
+   * an archived address goes straight back into circulation, so an address-keyed archive would be
+   * written into by whichever lane holds the name next.
+   */
+  archivePath(laneId: string): string {
+    return join(this.root, "archive", encodeURIComponent(laneId));
+  }
+
+  /**
+   * Move one message file out of a live mailbox and into a lane's archive, answering with the path
+   * to record. Idempotent on the file that is already there, because this runs after the database
+   * has already been changed: a crash between the two leaves this to be finished by `reconcile`,
+   * which must be able to run it again without failing.
+   */
+  archiveFile(laneId: string, relativePath: string): MailboxFile {
+    const source = this.absolute(relativePath);
+    const destination = join(this.archivePath(laneId), basename(relativePath));
+    if (!existsSync(source)) {
+      if (existsSync(destination)) return this.describe(destination, readFileSync(destination, "utf8"));
+      throw new MailboxCorruptionError(`Message file is missing: ${relativePath}`);
+    }
+    mkdirSync(dirname(destination), { recursive: true });
+    renameSync(source, destination);
+    return this.describe(destination, readFileSync(destination, "utf8"));
+  }
+
+  /**
    * The body a message was written with, i.e. the file minus its header block. It is read on
    * demand rather than kept in the database because a body never changes once written, so there
    * is no stale value to guard against and nothing to migrate.
@@ -119,7 +146,19 @@ export class MailboxStore {
       const parsed = parseMessage(contents);
       const relativePath = this.relative(absolutePath);
       const existing = state.message(parsed.id) ?? state.messageByRequestKey(parsed.requestKey);
-      return existing ? undefined : { ...parsed, relativePath, contentSha256: sha256(contents) };
+      if (existing) return undefined;
+      // A file with no row is usually a message that was written and never recorded, and the right
+      // repair is to insert it. But archiving removes the row first and moves the file second, so
+      // the same shape is also an archive that stopped halfway — and inserting there would put an
+      // archived lane's mail back in the working set, silently undoing the archive. The archive
+      // table is what tells the two apart, so it is consulted before the insert, not after.
+      const archived = state.archivedMessage(parsed.id);
+      if (archived) {
+        state.updateArchivedMessagePath(parsed.id, this.archiveFile(archived.targetLaneId, relativePath).relativePath);
+        moved += 1;
+        return undefined;
+      }
+      return { ...parsed, relativePath, contentSha256: sha256(contents) };
     }).filter((message): message is NewMessageRecord => message !== undefined);
     while (orphanFiles.length > 0) {
       const index = orphanFiles.findIndex((message) => message.replyTo === null || state.message(message.replyTo) !== undefined);

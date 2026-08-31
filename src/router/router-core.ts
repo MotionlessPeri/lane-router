@@ -56,7 +56,7 @@ export type ResumeInfo =
   | { readonly state: "unbound" }
   /** The lane exists and holds its history, but has left service. Its own answer, not `missing`: a
    *  caller told the lane does not exist would go and create one at an address already spoken for. */
-  | { readonly state: "retired" }
+  | { readonly state: "archived" }
   | {
       readonly state: "bound";
       readonly backend: "claude" | "codex";
@@ -110,8 +110,10 @@ export class RouterCore {
   async resumeInfo(address: string): Promise<ResumeInfo> {
     const parsed = parseLaneAddress(address);
     const lane = this.dependencies.state.lane(parsed.address);
-    if (!lane) return { state: "missing" };
-    if (lane.retiredAt !== null) return { state: "retired" };
+    // Nothing in service at this address, but something used to be: the launcher and the batch
+    // reopen both need that told apart from an address that never existed, or they would offer to
+    // create a lane where the answer is "that one is finished with".
+    if (!lane) return this.dependencies.state.archivedLaneAt(parsed.address) ? { state: "archived" } : { state: "missing" };
     const binding = this.dependencies.state.activeBindingForLane(parsed.address);
     if (!binding) return { state: "unbound" };
     // find, not require, for the same reason as directory(): a query must not throw over a
@@ -164,11 +166,10 @@ export class RouterCore {
     }
 
     let lane = state.lane(parsed.address);
-    // A retired address stays occupied by the history that names it. Attaching here would put a
-    // second, differently-scoped lane behind an address every earlier message already refers to.
-    if (lane?.retiredAt != null) {
-      throw new RouterError("LANE_RETIRED", `Lane is retired: ${parsed.address}; return it to service first with: lane-router-lane unretire ${parsed.address}`);
-    }
+    // An archived lane is never reached here, and that is the point rather than an oversight: the
+    // address is free again, so attaching to it creates a new lane with a new identity. The old
+    // one does not come back — nothing can return it to service — and the history that names it
+    // goes on meaning it, because it is a different row.
     if (!lane) {
       if (!input.roleDescription?.trim()) throw new RouterError("ROLE_REQUIRED", "A role description is required when creating a lane");
       lane = state.createLane({
@@ -223,44 +224,52 @@ export class RouterCore {
    *
    * The presence check reads the backend's `restorePresence`, never `reach`: a shared Codex App
    * Server keeps a thread loaded after its TUI closes, so `reach` calls a closed lane
-   * `unconfirmed` and would refuse to retire the very lanes this exists for.
+   * `unconfirmed` and would refuse to archive the very lanes this exists for.
    */
-  async retireLane(address: string): Promise<LaneRecord> {
+  async archiveLane(address: string): Promise<LaneRecord> {
     const parsed = parseLaneAddress(address);
     const state = this.dependencies.state;
     const lane = state.lane(parsed.address);
     if (!lane) throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${parsed.address}`);
-    if (lane.retiredAt !== null) return lane;
+    if (lane.archivedAt !== null) return lane;
 
     const binding = state.activeBindingForLane(parsed.address);
     if (binding) {
       const presence = this.dependencies.backends.find(binding.backend)?.restorePresence(binding) ?? "unavailable";
       if (presence === "online") {
-        throw new RouterError("LANE_ONLINE", `Lane ${parsed.address} is still open as ${binding.backend} conversation ${binding.conversationId}; close it before retiring`);
+        throw new RouterError("LANE_ONLINE", `Lane ${parsed.address} is still open as ${binding.backend} conversation ${binding.conversationId}; close it before archiving`);
       }
     }
 
     const pending = state.pendingMessages(parsed.address);
     if (pending.length > 0) {
       const senders = [...new Set(pending.map((message) => message.senderLane))].join(", ");
-      throw new RouterError("LANE_HAS_PENDING", `Lane ${parsed.address} still has ${pending.length} unread message(s) from ${senders}; process or ack them before retiring`);
+      throw new RouterError("LANE_HAS_PENDING", `Lane ${parsed.address} still has ${pending.length} unread message(s) from ${senders}; process or ack them before archiving`);
     }
 
-    // Released as part of retiring, or the lane would be retired and still owned - a state the
+    const now = this.dependencies.now();
+    // Released as part of archiving, or the lane would be archived and still owned - a state the
     // directory now hides, so nobody would ever see it.
-    if (binding) state.deactivateBinding(binding.id, binding.generation, this.dependencies.now());
-    return state.retireLane(parsed.address, this.dependencies.now());
+    if (binding) state.deactivateBinding(binding.id, binding.generation, now);
+    // Its own mail leaves the working set with it. What it sent stays where it is: those files sit
+    // in other lanes' mailboxes and belong to them, and their sender keeps pointing at the row
+    // this lane leaves behind.
+    const moved = state.archiveLaneMessages(lane.id, now);
+    const archived = state.archiveLane(parsed.address, now);
+
+    // Database first, files second, and never the other way round. A crash here leaves files in a
+    // live mailbox with no row, which `reconcile` finishes by moving them; the reverse order would
+    // leave rows with no files, which it reports as corruption. The database is the authority and
+    // the files are made to agree with it.
+    for (const message of moved) {
+      const file = this.dependencies.mailbox.archiveFile(archived.id, message.relativePath);
+      state.updateArchivedMessagePath(message.id, file.relativePath);
+    }
+    return archived;
   }
 
-  unretireLane(address: string): LaneRecord {
-    const parsed = parseLaneAddress(address);
-    const lane = this.dependencies.state.lane(parsed.address);
-    if (!lane) throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${parsed.address}`);
-    return lane.retiredAt === null ? lane : this.dependencies.state.unretireLane(parsed.address, this.dependencies.now());
-  }
-
-  listRetiredLanes(project: string | undefined): LaneRecord[] {
-    return this.dependencies.state.listRetiredLanes(project);
+  listArchivedLanes(project: string | undefined): LaneRecord[] {
+    return this.dependencies.state.listArchivedLanes(project);
   }
 
   /**
@@ -277,11 +286,14 @@ export class RouterCore {
     for (const raw of [input.target, ...(input.cc ?? [])]) {
       const address = parseLaneAddress(raw).address;
       const recipient = state.lane(address);
-      if (!recipient) throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${address}`);
-      // Before anything is written, like the existence check beside it: a copy accepted into the
-      // mailbox of a lane nobody will reopen is exactly the silent loss retiring guards against.
-      if (recipient.retiredAt !== null) {
-        throw new RouterError("LANE_RETIRED", `Lane is retired: ${address}; return it to service first with: lane-router-lane unretire ${address}`);
+      // Refused before anything is written, and refused with the reason: a copy accepted into the
+      // mailbox of a lane nobody will reopen is exactly the silent loss archiving guards against.
+      // "Archived" and "never existed" are told apart because the sender can act on the first.
+      if (!recipient) {
+        if (state.archivedLaneAt(address)) {
+          throw new RouterError("LANE_ARCHIVED", `Lane is archived: ${address}; archiving is permanent, so send to a different lane`);
+        }
+        throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${address}`);
       }
       if (!recipients.includes(address)) recipients.push(address);
     }

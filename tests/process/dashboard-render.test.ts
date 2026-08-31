@@ -18,7 +18,7 @@ const snapshot = {
   capturedAt: 1_788_180_000_000,
   router: { pid: 1, port: 52494, instanceId: "instance-1", schemaVersion: 5 },
   lanes: [{
-    address: "alpha/one", project: "alpha", roleDescription: `role ${HOSTILE_IMAGE}`, model: null, retired: false,
+    address: "alpha/one", project: "alpha", roleDescription: `role ${HOSTILE_IMAGE}`, model: null, archived: false,
     binding: { backend: "claude", conversationId: "conversation-1", generation: 1, cwd: `C:/${HOSTILE_SCRIPT}`, attachedAt: 1_788_179_000_000 },
     reach: { state: "live", connectedAt: null, lastLifecycleAt: 1_788_179_500_000, lastNotifiedAt: null, believedBusy: false },
     pending: { count: 1, oldestCreatedAt: 1_788_179_000_000 },

@@ -47,7 +47,7 @@ test("the page is served as self-contained HTML that reaches for nothing", async
   } finally { await server.close(); }
 });
 
-// Acceptance 11. The dashboard is an optional face, exactly like /lanes/retired: a Router built
+// Acceptance 11. The dashboard is an optional face, exactly like /lanes/archived: a Router built
 // without it must not answer these paths at all, rather than answer them emptily.
 test("both paths are absent when the dashboard is not wired in", async () => {
   const server = startServer();

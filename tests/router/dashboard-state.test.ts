@@ -48,7 +48,7 @@ function setup() {
 
 type Setup = ReturnType<typeof setup>;
 
-function addLane(x: Setup, address: string, options: { retired?: boolean; bound?: boolean } = {}) {
+function addLane(x: Setup, address: string, options: { archived?: boolean; bound?: boolean } = {}) {
   const project = address.split("/")[0]!;
   x.state.createLane({ address, project, roleDescription: `role of ${address}`, now: 1 });
   if (options.bound) {
@@ -57,7 +57,7 @@ function addLane(x: Setup, address: string, options: { retired?: boolean; bound?
       generation: 3, startup: {}, now: 2,
     });
   }
-  if (options.retired) x.state.retireLane(address, 500);
+  if (options.archived) x.state.archiveLane(address, 500);
 }
 
 function addMessage(x: Setup, id: string, options: { from: string; to: string; body?: string; createdAt?: number }) {
@@ -70,17 +70,17 @@ function addMessage(x: Setup, id: string, options: { from: string; to: string; b
 }
 
 describe("dashboardSnapshot", () => {
-  // Acceptance 2. Today's lane_directory answers one project at a time and hides the retired,
+  // Acceptance 2. Today's lane_directory answers one project at a time and hides the archived,
   // which is exactly why "which lane went where" cannot be answered in one look.
-  it("covers every project's lanes, retired ones included", () => {
+  it("covers every project's lanes, archived ones included", () => {
     const x = setup();
     try {
       addLane(x, "alpha/design");
       addLane(x, "beta/impl");
-      addLane(x, "gamma/gone", { retired: true });
+      addLane(x, "gamma/gone", { archived: true });
       const lanes = x.snapshot().lanes;
       expect(lanes.map((lane) => lane.address)).toEqual(["alpha/design", "beta/impl", "gamma/gone"]);
-      expect(lanes.map((lane) => lane.retired)).toEqual([false, false, true]);
+      expect(lanes.map((lane) => lane.archived)).toEqual([false, false, true]);
       expect(lanes.map((lane) => lane.project)).toEqual(["alpha", "beta", "gamma"]);
     } finally { x.database.close(); }
   });
@@ -172,7 +172,7 @@ describe("dashboardSnapshot", () => {
       expect(state.capturedAt).toBe(9_999);
       expect(state.router).toEqual({ ...ROUTER, schemaVersion: ROUTER_SCHEMA_VERSION });
       expect(Object.keys(state.lanes[0]!).sort())
-        .toEqual(["address", "binding", "model", "pending", "project", "reach", "retired", "roleDescription"]);
+        .toEqual(["address", "archived", "binding", "model", "pending", "project", "reach", "roleDescription"]);
       expect(Object.keys(state.lanes[0]!.binding!).sort())
         .toEqual(["attachedAt", "backend", "conversationId", "cwd", "generation"]);
       // No owed-ack duration: it is capturedAt − createdAt, and a second copy of a number is a

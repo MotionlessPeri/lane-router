@@ -31,7 +31,7 @@ export interface DashboardLane {
   readonly project: string;
   readonly roleDescription: string;
   readonly model: string | null;
-  readonly retired: boolean;
+  readonly archived: boolean;
   readonly binding: DashboardBinding | null;
   /** Null when the lane is unbound, or when this Router does not run that backend at all. */
   readonly reach: ReachSnapshot | null;
@@ -94,7 +94,7 @@ export function dashboardSnapshot(
         project: lane.project,
         roleDescription: lane.roleDescription,
         model: lane.model,
-        retired: lane.retiredAt !== null,
+        archived: lane.archivedAt !== null,
         binding: binding === undefined ? null : {
           backend: binding.backend,
           conversationId: binding.conversationId,

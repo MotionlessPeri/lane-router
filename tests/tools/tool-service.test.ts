@@ -46,13 +46,13 @@ test.each([
   await expect(x.tools.call(name, args, context)).rejects.toThrow(/unrecognized/i);
 });
 
-test("points at the retirement CLI from the surface an agent can actually see", async () => {
+test("points at the archiving CLI from the surface an agent can actually see", async () => {
   const { LANE_TOOLS } = await import("../../src/tools/tool-contract.js");
   const directory = LANE_TOOLS.find((tool) => tool.name === "lane_directory")!;
   // Measured 2026-08-25: `lane-router-lane open` existed and worked cross-project, and a lane
   // still concluded it could not be done and forwarded that - because nothing in its always-
-  // visible tool list mentioned the CLI. Retirement is CLI-only for the same reasons, so the
+  // visible tool list mentioned the CLI. Archiving is CLI-only for the same reasons, so the
   // pointer has to live where the absence would otherwise be read as impossibility.
-  expect(directory.description).toContain("lane-router-lane retire");
-  expect(directory.description).toMatch(/retired/iu);
+  expect(directory.description).toContain("lane-router-lane archive");
+  expect(directory.description).toMatch(/archived/iu);
 });
