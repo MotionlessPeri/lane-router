@@ -375,6 +375,21 @@ export class RouterStateStore {
     `).all(laneAddress) as MessageRow[]).map(mapMessage);
   }
 
+  /** By identity, so the precondition still answers for a lane its address no longer names. */
+  pendingMessagesByLaneId(laneId: string): MessageRecord[] {
+    return (this.database.prepare(`${MESSAGE_SELECT}
+      WHERE m.target_lane_id=? AND m.state='pending' ORDER BY m.created_at,m.id
+    `).all(laneId) as MessageRow[]).map(mapMessage);
+  }
+
+  /** What this lane's archive holds, so a half-moved file set can be finished without guessing. */
+  archivedMessagesForLane(laneId: string): Array<{ id: string; relativePath: string }> {
+    return (this.database.prepare(
+      "SELECT id,relative_path FROM message_archive WHERE target_lane_id=? ORDER BY created_at,id",
+    ).all(laneId) as Array<{ id: string; relative_path: string }>)
+      .map((row) => ({ id: row.id, relativePath: row.relative_path }));
+  }
+
   pendingLaneAddresses(): string[] {
     return (this.database.prepare(`
       SELECT DISTINCT t.address AS target_lane FROM message m

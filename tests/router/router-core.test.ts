@@ -552,6 +552,90 @@ describe("archiving, write surface and preconditions", () => {
       expect(pendingFileCount(x.root)).toBe(1);
     } finally { x.database.close(); }
   });
+
+  /**
+   * A lane can be marked archived while its mail is still in the working set — that is what every
+   * lane archived under the older meaning of the word looks like, because the migration turned
+   * those markers into identity anchors without going back to move anything. Asking to archive
+   * such a lane finishes it rather than reporting that there is nothing to do.
+   */
+  it("finishes an archive that was only ever half done", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("source"), { address: "alpha/source", roleDescription: "source" });
+      await x.core.attachCurrent(caller("target", "attach:target"), { address: "alpha/target", roleDescription: "target" });
+      const [toTarget] = await x.core.send(caller("source", "send:1"), { target: "alpha/target", body: "for target", kind: "normal" });
+      await x.core.ack(caller("target", "ack:1"), { messageIds: [toTarget!.id] });
+      const [toSource] = await x.core.send(caller("target", "send:2"), { target: "alpha/source", body: "for source", kind: "normal" });
+
+      // Exactly the state the migration left behind: the older archive released the binding and
+      // wrote the marker, and moving the mail was not yet part of what the word meant.
+      const lane = x.state.requireLane("alpha/target");
+      const held = x.state.activeBindingForLane("alpha/target")!;
+      x.state.deactivateBinding(held.id, held.generation, 499);
+      x.state.archiveLane("alpha/target", 500);
+      expect(x.state.allMessages().map((message) => message.id)).toEqual([toTarget!.id, toSource!.id]);
+      expect(resolvedFileCount(x.root)).toBe(1);
+
+      await expect(x.core.archiveLane("alpha/target")).resolves.toMatchObject({ id: lane.id, address: "alpha/target" });
+
+      // Finished on both sides, and the message it sent is still untouched in the other mailbox.
+      expect(x.state.allMessages().map((message) => message.id)).toEqual([toSource!.id]);
+      const archived = x.state.archivedMessage(toTarget!.id)!;
+      expect(archived.targetLaneId).toBe(lane.id);
+      expect(existsSync(join(x.root, archived.relativePath))).toBe(true);
+      expect(resolvedFileCount(x.root)).toBe(0);
+      expect(pendingFileCount(x.root)).toBe(1);
+      // Not archived a second time: it left service once, and that is when.
+      expect(x.state.laneById(lane.id)!.archivedAt).toBe(500);
+    } finally { x.database.close(); }
+  });
+
+  // Running it again must be a no-op rather than a second move: the repair will be run by hand on
+  // real data, and "did that take?" is answered by running it again.
+  it("can be asked to archive the same lane twice without moving anything twice", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("source"), { address: "alpha/source", roleDescription: "source" });
+      await x.core.attachCurrent(caller("target", "attach:target"), { address: "alpha/target", roleDescription: "target" });
+      const [sent] = await x.core.send(caller("source", "send:1"), { target: "alpha/target", body: "one", kind: "normal" });
+      await x.core.ack(caller("target", "ack:1"), { messageIds: [sent!.id] });
+      x.backend.restoreState = "offline";
+
+      await x.core.archiveLane("alpha/target");
+      const afterFirst = x.state.archivedMessage(sent!.id)!;
+      const archiveFiles = () => readdirSync(join(x.root, "archive"), { recursive: true, withFileTypes: true })
+        .filter((entry) => entry.isFile()).length;
+      expect(archiveFiles()).toBe(1);
+
+      await expect(x.core.archiveLane("alpha/target")).resolves.toMatchObject({ address: "alpha/target" });
+
+      // One row, one file, same path: nothing was copied a second time or left in two places.
+      expect(x.state.archivedMessage(sent!.id)).toEqual(afterFirst);
+      expect(archiveFiles()).toBe(1);
+      expect(x.state.allMessages()).toEqual([]);
+    } finally { x.database.close(); }
+  });
+
+  // The precondition is not relaxed for a half-finished lane. It happens not to bite on the real
+  // data — those five have nothing unread — but a rule that only holds when the data is already
+  // clean is not a rule.
+  it("still refuses to finish an archive while unread mail is waiting", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("source"), { address: "alpha/source", roleDescription: "source" });
+      await x.core.attachCurrent(caller("target", "attach:target"), { address: "alpha/target", roleDescription: "target" });
+      await x.core.send(caller("source", "send:1"), { target: "alpha/target", body: "unread", kind: "normal" });
+      const held = x.state.activeBindingForLane("alpha/target")!;
+      x.state.deactivateBinding(held.id, held.generation, 499);
+      x.state.archiveLane("alpha/target", 500);
+
+      await expect(x.core.archiveLane("alpha/target")).rejects.toMatchObject({ code: "LANE_HAS_PENDING" });
+      // Refused means nothing moved: the message is still where the reader will find it.
+      expect(x.state.allMessages()).toHaveLength(1);
+      expect(pendingFileCount(x.root)).toBe(1);
+    } finally { x.database.close(); }
+  });
 });
 
 describe("RouterCore send and ack", () => {

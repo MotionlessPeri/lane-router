@@ -229,11 +229,14 @@ export class RouterCore {
   async archiveLane(address: string): Promise<LaneRecord> {
     const parsed = parseLaneAddress(address);
     const state = this.dependencies.state;
-    const lane = state.lane(parsed.address);
+    // The lane in service at this address, or — when none is — the one that left service under it.
+    // Archiving is several steps, and a lane can be sitting between them: marked but with its mail
+    // still in the working set, which is what every lane archived under the older meaning looks
+    // like. Asking to archive such a lane finishes it rather than reporting nothing to do.
+    const lane = state.lane(parsed.address) ?? state.archivedLaneAt(parsed.address);
     if (!lane) throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${parsed.address}`);
-    if (lane.archivedAt !== null) return lane;
 
-    const binding = state.activeBindingForLane(parsed.address);
+    const binding = state.activeBindingForLaneId(lane.id);
     if (binding) {
       const presence = this.dependencies.backends.find(binding.backend)?.restorePresence(binding) ?? "unavailable";
       if (presence === "online") {
@@ -241,7 +244,10 @@ export class RouterCore {
       }
     }
 
-    const pending = state.pendingMessages(parsed.address);
+    // Checked by identity, and checked every time: a rule that only holds while the data happens
+    // to be clean is not a rule. An unread message is one nobody has read, whether or not somebody
+    // already wrote the marker down.
+    const pending = state.pendingMessagesByLaneId(lane.id);
     if (pending.length > 0) {
       const senders = [...new Set(pending.map((message) => message.senderLane))].join(", ");
       throw new RouterError("LANE_HAS_PENDING", `Lane ${parsed.address} still has ${pending.length} unread message(s) from ${senders}; process or ack them before archiving`);
@@ -254,16 +260,22 @@ export class RouterCore {
     // Its own mail leaves the working set with it. What it sent stays where it is: those files sit
     // in other lanes' mailboxes and belong to them, and their sender keeps pointing at the row
     // this lane leaves behind.
-    const moved = state.archiveLaneMessages(lane.id, now);
-    const archived = state.archiveLane(parsed.address, now);
+    state.archiveLaneMessages(lane.id, now);
+    // Already-archived keeps the instant it recorded: a lane leaves service once, and finishing
+    // the move later does not make that a second departure.
+    const archived = lane.archivedAt === null ? state.archiveLane(parsed.address, now) : lane;
 
     // Database first, files second, and never the other way round. A crash here leaves files in a
     // live mailbox with no row, which `reconcile` finishes by moving them; the reverse order would
     // leave rows with no files, which it reports as corruption. The database is the authority and
     // the files are made to agree with it.
-    for (const message of moved) {
+    //
+    // Every archived row of this lane, not only the ones just moved, so a run that stopped partway
+    // is finished by running it again. `archiveFile` is idempotent, so a file already in place
+    // costs a stat and nothing else.
+    for (const message of state.archivedMessagesForLane(archived.id)) {
       const file = this.dependencies.mailbox.archiveFile(archived.id, message.relativePath);
-      state.updateArchivedMessagePath(message.id, file.relativePath);
+      if (file.relativePath !== message.relativePath) state.updateArchivedMessagePath(message.id, file.relativePath);
     }
     return archived;
   }
