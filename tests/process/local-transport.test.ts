@@ -281,6 +281,45 @@ test("a Router client gives up when re-resolution names the same dead address", 
   } finally { vi.unstubAllGlobals(); }
 });
 
+test("serves the lane retirement endpoints and reports refusals as refusals", async () => {
+  const calls: string[] = [];
+  const server = new LocalRouterServer({
+    tools: { call: vi.fn() } as never,
+    codex: { endpoint: "ws://127.0.0.1:1" } as never,
+    instanceId: "x",
+    retireLane: async (address: string) => {
+      calls.push(`retire:${address}`);
+      if (address === "alpha/busy") throw Object.assign(new Error("Lane alpha/busy is still open"), { code: "LANE_ONLINE" });
+      return { address, retiredAt: 500 };
+    },
+    unretireLane: (address: string) => { calls.push(`unretire:${address}`); return { address, retiredAt: null }; },
+    listRetiredLanes: (project: string | undefined) => { calls.push(`list:${project ?? "*"}`); return [{ address: "alpha/gone", retiredAt: 500 }]; },
+  } as never);
+  const discovery = await server.start();
+  try {
+    const post = (path: string, body: unknown) => fetch(`${discovery.url}${path}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+
+    await expect(post("/lanes/retire", { address: "alpha/gone" }).then((r) => r.json()))
+      .resolves.toEqual({ result: { address: "alpha/gone", retiredAt: 500 } });
+    await expect(post("/lanes/unretire", { address: "alpha/gone" }).then((r) => r.json()))
+      .resolves.toEqual({ result: { address: "alpha/gone", retiredAt: null } });
+    await expect(fetch(`${discovery.url}/lanes/retired?project=alpha`).then((r) => r.json()))
+      .resolves.toEqual({ result: [{ address: "alpha/gone", retiredAt: 500 }] });
+
+    // A refusal is an answer, not a crash: the CLI has to print the Router's reason, so the
+    // status has to say "refused" while the body carries the sentence a human reads.
+    const refused = await post("/lanes/retire", { address: "alpha/busy" });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: expect.stringContaining("still open") });
+
+    // Address is required, and a missing one must not reach the Router as an empty retirement.
+    expect((await post("/lanes/retire", {})).status).toBe(400);
+    expect(calls).toEqual(["retire:alpha/gone", "unretire:alpha/gone", "list:alpha", "retire:alpha/busy"]);
+  } finally { await server.close(); }
+});
+
 function nextJson(socket: WebSocket): Promise<unknown> {
   return new Promise((resolve, reject) => {
     socket.once("message", (raw) => {

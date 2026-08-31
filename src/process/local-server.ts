@@ -229,6 +229,15 @@ export class LocalRouterServer {
     readonly recordCwd?: (conversationId: string, cwd: string) => void;
     /** Answers what a lane needs to be resumed; serves the lane launcher, not conversation tools. */
     readonly resumeInfo?: (address: string) => unknown;
+    /**
+     * Lane retirement, served here rather than as a sixth conversation tool. The CLI cannot decide
+     * this alone: refusing an open lane needs the backend's live restore presence, which only the
+     * Router holds, and writing the row directly would bypass every precondition. Same shape and
+     * same reason as `resumeInfo` — a Router surface for the lane CLI, invisible to agents.
+     */
+    readonly retireLane?: (address: string) => Promise<unknown>;
+    readonly unretireLane?: (address: string) => unknown;
+    readonly listRetiredLanes?: (project: string | undefined) => unknown;
   }) {
     this.host = options.host ?? "127.0.0.1";
     if (this.host !== "127.0.0.1" && this.host !== "::1") throw new Error("Router internal server must bind to loopback");
@@ -269,15 +278,30 @@ export class LocalRouterServer {
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
       if (request.method === "GET" && request.url === "/health") return json(response, 200, this.discovery());
-      if (request.method === "GET" && request.url !== undefined && this.options.resumeInfo) {
+      if (request.method === "GET" && request.url !== undefined) {
         const url = new URL(request.url, "http://127.0.0.1");
-        if (url.pathname === "/lanes/resume-info") {
+        if (url.pathname === "/lanes/retired" && this.options.listRetiredLanes) {
+          const project = url.searchParams.get("project") ?? undefined;
+          return json(response, 200, { result: this.options.listRetiredLanes(project) });
+        }
+        if (url.pathname === "/lanes/resume-info" && this.options.resumeInfo) {
           const address = url.searchParams.get("address");
           if (!address) return json(response, 400, { error: "address is required" });
           // Awaited, not passed through: the resolver is async (it may consult the session
           // locator), and serializing the pending promise answered `{}` on the real machine.
           return json(response, 200, { result: await this.options.resumeInfo(address) });
         }
+      }
+      if (request.method === "POST" && (request.url === "/lanes/retire" || request.url === "/lanes/unretire")) {
+        const retiring = request.url === "/lanes/retire";
+        const handler = retiring ? this.options.retireLane : this.options.unretireLane;
+        if (!handler) return json(response, 404, { error: "not found" });
+        const body = await readJson(request) as { address?: unknown };
+        if (typeof body.address !== "string" || body.address.trim() === "") return json(response, 400, { error: "address is required" });
+        try { return json(response, 200, { result: await handler(body.address) }); }
+        // A refusal is an answer the CLI has to print, not a crash: 409 says the Router declined,
+        // and the body carries the sentence naming which precondition and by how much.
+        catch (error) { return json(response, 409, { error: error instanceof Error ? error.message : "retirement refused" }); }
       }
       if (request.method === "POST" && request.url === "/claude/lifecycle") {
         const body = await readJson(request) as { conversationId?: unknown; event?: unknown; joinKey?: unknown; cwd?: unknown };

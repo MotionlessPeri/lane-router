@@ -57,6 +57,9 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
       tools, codex, claude: claudeHub, instanceId: randomUUID(),
       recordCwd: (conversationId, cwd) => state.updateBindingCwd("claude", conversationId, cwd),
       resumeInfo: (address) => core.resumeInfo(address),
+      retireLane: (address) => core.retireLane(address),
+      unretireLane: (address) => core.unretireLane(address),
+      listRetiredLanes: (project) => core.listRetiredLanes(project),
     });
     mailbox.reconcile(state);
     const discovery = await server.start();

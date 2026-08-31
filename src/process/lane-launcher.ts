@@ -17,6 +17,9 @@ const USAGE = [
   "Usage:",
   "  lane-router-lane new <project>/<lane> --role \"<role description>\" [--model <model>] [--backend claude] [--cwd <dir>] [--terminal <wt|powershell|cmd>]",
   "  lane-router-lane open <project>/<lane> [--cwd <dir>] [--terminal <wt|powershell|cmd>]",
+  "  lane-router-lane retire <project>/<lane>",
+  "  lane-router-lane unretire <project>/<lane>",
+  "  lane-router-lane list-retired [<project>]",
 ].join("\n");
 
 export interface LaneLaunchDependencies {
@@ -27,6 +30,10 @@ export interface LaneLaunchDependencies {
   readonly wtAvailable?: boolean;
   readonly queryDirectory?: (project: string) => Promise<ReadonlyArray<{ address: string }>>;
   readonly queryResumeInfo?: (address: string) => Promise<ResumeInfo>;
+  readonly retireLane?: (address: string) => Promise<unknown>;
+  readonly unretireLane?: (address: string) => Promise<unknown>;
+  readonly listRetiredLanes?: (project: string | undefined) => Promise<ReadonlyArray<{ address: string; retiredAt: number | null }>>;
+  readonly write?: (text: string) => void;
 }
 
 /**
@@ -48,13 +55,38 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
   const invocation = parseInvocation(args);
   const dataRoot = dependencies.dataRoot ?? process.env.LANE_ROUTER_DATA_ROOT ?? join(homedir(), ".lane-router");
 
-  // Step 2: A new lane starts with a prompt that performs the confirmed attach.
-  if (invocation.verb === "new") {
-    const directory = await (dependencies.queryDirectory ?? ((project: string) => queryDirectoryDefault(dataRoot, project)))(invocation.address.project);
-    if (directory.some((entry) => entry.address === invocation.address.address)) {
-      throw new Error(`Lane ${invocation.address.address} already exists; open it with: lane-router-lane open ${invocation.address.address}`);
+  // Step 2: The state verbs answer before any window logic, and open no window at all.
+  if (invocation.verb === "list-retired") {
+    const write = dependencies.write ?? ((text: string) => { process.stdout.write(text); });
+    const retired = await (dependencies.listRetiredLanes ?? ((project?: string) => listRetiredDefault(dataRoot, project)))(invocation.project);
+    if (retired.length === 0) { write("  no retired lanes\n"); return; }
+    for (const lane of retired) write(`  ${lane.address}  retired ${new Date(lane.retiredAt ?? 0).toISOString()}\n`);
+    return;
+  }
+  if (invocation.verb === "retire" || invocation.verb === "unretire") {
+    const address = invocation.address!.address;
+    const write = dependencies.write ?? ((text: string) => { process.stdout.write(text); });
+    // The Router's refusal names which precondition stopped it and by how much; that sentence is
+    // the whole value of the refusal, so it travels out as-is rather than as a generic failure.
+    if (invocation.verb === "retire") {
+      await (dependencies.retireLane ?? ((current: string) => laneStateDefault(dataRoot, "retire", current)))(address);
+      write(`  retired ${address}
+`);
+    } else {
+      await (dependencies.unretireLane ?? ((current: string) => laneStateDefault(dataRoot, "unretire", current)))(address);
+      write(`  returned ${address} to service
+`);
     }
-    const prompt = creationPrompt(invocation.address.address, invocation.role, invocation.model);
+    return;
+  }
+
+  // Step 3: A new lane starts with a prompt that performs the confirmed attach.
+  if (invocation.verb === "new") {
+    const directory = await (dependencies.queryDirectory ?? ((project: string) => queryDirectoryDefault(dataRoot, project)))(invocation.address!.project);
+    if (directory.some((entry) => entry.address === invocation.address!.address)) {
+      throw new Error(`Lane ${invocation.address!.address} already exists; open it with: lane-router-lane open ${invocation.address!.address}`);
+    }
+    const prompt = creationPrompt(invocation.address!.address, invocation.role, invocation.model);
     if (prompt.length > 24_000) throw new Error("The role description is too long; shorten it before creating the lane");
     // Both halves matter and they are not the same thing: the request starts this window on the
     // model, the prompt is what makes the lane declare it so every later generation inherits it.
@@ -63,35 +95,35 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
       prompt, statusPath: newStatusPath(dataRoot),
       ...(invocation.model === undefined ? {} : { model: invocation.model }),
     } satisfies TerminalChildRequest;
-    await openTerminal(dependencies, invocation.terminal, request, invocation.address.address, invocation.address.project);
+    await openTerminal(dependencies, invocation.terminal, request, invocation.address!.address, invocation.address!.project);
     return;
   }
 
   // Step 3: Resume facts distinguish missing, inactive, online, offline, and unavailable lanes.
-  const info = await (dependencies.queryResumeInfo ?? ((address: string) => queryResumeInfoDefault(dataRoot, address)))(invocation.address.address);
+  const info = await (dependencies.queryResumeInfo ?? ((address: string) => queryResumeInfoDefault(dataRoot, address)))(invocation.address!.address);
   if (info.state === "missing") {
-    throw new Error(`Lane ${invocation.address.address} does not exist; create it with: lane-router-lane new ${invocation.address.address} --role "<role description>"`);
+    throw new Error(`Lane ${invocation.address!.address} does not exist; create it with: lane-router-lane new ${invocation.address!.address} --role "<role description>"`);
   }
   if (info.state === "retired") {
-    throw new Error(`Lane ${invocation.address.address} is retired; return it to service first with: lane-router-lane unretire ${invocation.address.address}`);
+    throw new Error(`Lane ${invocation.address!.address} is retired; return it to service first with: lane-router-lane unretire ${invocation.address!.address}`);
   }
   if (info.state === "unbound") {
     // A lane without an active binding has no conversation to reopen. Reattaching is a topology
     // change with its own confirmation loop, and must not happen as a side effect of "open".
-    throw new Error(`Lane ${invocation.address.address} has no active binding to resume; attach a conversation through the rotation flow instead`);
+    throw new Error(`Lane ${invocation.address!.address} has no active binding to resume; attach a conversation through the rotation flow instead`);
   }
   // Reach describes notification transport, not ownership by a visible client. Codex can keep a
   // thread loaded in the shared App Server after its TUI closes, so only the backend's restore
   // decision can prevent a duplicate interactive client without also stranding offline lanes.
   if (info.restorePresence === "online") {
-    throw new Error(`Lane ${invocation.address.address} is already online; nothing was opened`);
+    throw new Error(`Lane ${invocation.address!.address} is already online; nothing was opened`);
   }
   if (info.restorePresence === "unavailable") {
-    throw new Error(`The ${info.backend} backend is unavailable; ${invocation.address.address} was not opened`);
+    throw new Error(`The ${info.backend} backend is unavailable; ${invocation.address!.address} was not opened`);
   }
   const cwd = invocation.cwd ?? info.cwd;
   if (cwd === null || cwd === undefined) {
-    throw new Error(`The Router has no recorded working directory for ${invocation.address.address}; pass --cwd <dir>`);
+    throw new Error(`The Router has no recorded working directory for ${invocation.address!.address}; pass --cwd <dir>`);
   }
 
   // Step 4: The active binding supplies every identity-bearing launch argument.
@@ -99,20 +131,38 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     mode: "resume", backend: info.backend, cwd, conversationId: info.conversationId, statusPath: newStatusPath(dataRoot),
     ...(info.model === null ? {} : { model: info.model }),
   } satisfies TerminalChildRequest;
-  await openTerminal(dependencies, invocation.terminal, request, `${invocation.address.address} gen${info.generation}`, invocation.address.project);
+  await openTerminal(dependencies, invocation.terminal, request, `${invocation.address!.address} gen${info.generation}`, invocation.address!.project);
 }
 
 interface ParsedInvocation {
-  readonly verb: "new" | "open";
-  readonly address: LaneAddress;
+  readonly verb: "new" | "open" | "retire" | "unretire" | "list-retired";
+  /** Absent only for `list-retired`, whose argument is a project rather than a lane. */
+  readonly address: LaneAddress | undefined;
+  readonly project: string | undefined;
   readonly role: string;
   readonly model: string | undefined;
   readonly cwd: string | undefined;
   readonly terminal: TerminalChoice | undefined;
 }
 
+const WINDOWLESS_VERBS = ["retire", "unretire", "list-retired"] as const;
+
 function parseInvocation(args: readonly string[]): ParsedInvocation {
   const [verb, rawAddress, ...rest] = args;
+  // The three state verbs open no window, so they take none of the window options: accepting
+  // --terminal there would promise something the verb cannot do.
+  if ((WINDOWLESS_VERBS as readonly string[]).includes(verb ?? "")) {
+    if (rest.length > 0) throw new Error(USAGE);
+    if (verb !== "list-retired" && !rawAddress) throw new Error(USAGE);
+    // `list-retired` takes a project, the other two take a lane. Parsing the argument as an
+    // address either way would reject `list-retired alpha`, which is the common invocation.
+    return {
+      verb: verb as ParsedInvocation["verb"],
+      address: verb === "list-retired" || rawAddress === undefined ? undefined : parseLaneAddress(rawAddress),
+      project: verb === "list-retired" ? rawAddress : undefined,
+      role: "", model: undefined, cwd: undefined, terminal: undefined,
+    };
+  }
   if ((verb !== "new" && verb !== "open") || !rawAddress) throw new Error(USAGE);
   // `open` takes no --model on purpose: it reopens what the lane already declares, and a flag
   // here would read as changing that declaration while only affecting this one window.
@@ -133,7 +183,7 @@ function parseInvocation(args: readonly string[]): ParsedInvocation {
   }
   const role = flags.get("--role") ?? "";
   if (verb === "new" && !role.trim()) throw new Error("--role is required to create a lane");
-  return { verb, address, role, model: flags.get("--model"), cwd: flags.get("--cwd"), terminal };
+  return { verb, address, project: undefined, role, model: flags.get("--model"), cwd: flags.get("--cwd"), terminal };
 }
 
 function creationPrompt(address: string, role: string, model: string | undefined): string {
@@ -161,6 +211,23 @@ async function openTerminal(
 /** The launcher asks whichever Router is current, exactly like the conversation tools do. */
 async function routerUrl(dataRoot: string): Promise<string> {
   return (await ensureRouter({ dataRoot })).url;
+}
+
+async function laneStateDefault(dataRoot: string, verb: "retire" | "unretire", address: string): Promise<unknown> {
+  const response = await fetch(`${await routerUrl(dataRoot)}/lanes/${verb}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address }),
+  });
+  const body = await response.json() as { result?: unknown; error?: string };
+  if (!response.ok) throw new Error(body.error ?? `Router request failed (${response.status})`);
+  return body.result;
+}
+
+async function listRetiredDefault(dataRoot: string, project: string | undefined): Promise<ReadonlyArray<{ address: string; retiredAt: number | null }>> {
+  const query = project === undefined ? "" : `?project=${encodeURIComponent(project)}`;
+  const response = await fetch(`${await routerUrl(dataRoot)}/lanes/retired${query}`);
+  const body = await response.json() as { result?: Array<{ address: string; retiredAt: number | null }>; error?: string };
+  if (!response.ok) throw new Error(body.error ?? `Router request failed (${response.status})`);
+  return body.result ?? [];
 }
 
 async function queryDirectoryDefault(dataRoot: string, project: string): Promise<ReadonlyArray<{ address: string }>> {
