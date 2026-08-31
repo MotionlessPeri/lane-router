@@ -3,6 +3,39 @@ import type { DirectoryEntry } from "../router/router-core.js";
 
 type BatchIssue = [address: string, reason: string];
 
+export interface ProjectLaneCount {
+  readonly project: string;
+  readonly lanes: number;
+}
+
+/**
+ * Just enough of a database to run one read. Structural rather than a concrete type because the
+ * two callers open the database differently: the batch script wants a read-only handle that will
+ * not migrate or lock the file it peeks at, while the tests build one from the schema.
+ */
+export interface LaneCountReader {
+  prepare(sql: string): { all(): unknown[] };
+}
+
+/**
+ * Every project with at least one lane still in service, most lanes first, for the chooser to
+ * number. The count is a promise about what a run would open, so archived lanes are excluded —
+ * they are skipped further down, and a chooser offering eight where three will open is worse
+ * than one offering no number at all.
+ *
+ * This lives here, rather than in the script that calls it, because it is the one lane read in
+ * the tool that goes to the database instead of through `RouterStateStore`. While it sat in the
+ * script it was outside every enumeration of the store's reads — which is exactly how it kept a
+ * missing archived-lane filter after all of those reads had been checked and fixed.
+ */
+export function listProjectLaneCounts(database: LaneCountReader): ProjectLaneCount[] {
+  return database.prepare(`
+    SELECT project, COUNT(*) AS lanes FROM lane
+    WHERE archived_at IS NULL
+    GROUP BY project ORDER BY lanes DESC, project
+  `).all() as ProjectLaneCount[];
+}
+
 export interface OpenProjectResult {
   readonly project: string;
   readonly opened: string[];

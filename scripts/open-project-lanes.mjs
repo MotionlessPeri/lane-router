@@ -34,21 +34,18 @@ if (!process.env.CODEX_EXE) {
   if (existsSync(bundled)) process.env.CODEX_EXE = bundled;
 }
 
-// The count has to mean "lanes this will open", so archived ones are excluded: they are skipped
-// further down, and a number that promises more than the run delivers is worse than no number.
-// This is the one read in the tool that goes to the database instead of through the Router, which
-// is why the store's own filter does not cover it.
-function listProjects() {
+// Read-only on purpose: this is a peek at a database a running Router owns, so it must neither
+// migrate it nor hold a write lock. The query itself lives in src/ where it can be tested — it is
+// the one lane read here that goes to the database rather than through the Router.
+async function listProjects() {
+  const { listProjectLaneCounts } = await import(pathToFileURL(batchRunner).href);
   const database = new DatabaseSync(join(dataRoot, "router.sqlite").replaceAll("\\", "/"), { readOnly: true });
-  try {
-    return database.prepare(
-      "SELECT project, COUNT(*) AS lanes FROM lane WHERE archived_at IS NULL GROUP BY project ORDER BY lanes DESC, project",
-    ).all();
-  } finally { database.close(); }
+  try { return listProjectLaneCounts(database); }
+  finally { database.close(); }
 }
 
 async function askForProject() {
-  const projects = listProjects();
+  const projects = await listProjects();
   console.log("\n   #   lanes   project");
   console.log("  ---  -----   -------");
   projects.forEach((row, index) => {

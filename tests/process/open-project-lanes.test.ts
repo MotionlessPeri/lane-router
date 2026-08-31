@@ -1,6 +1,9 @@
-import { expect, test, vi } from "vitest";
+import Database from "better-sqlite3";
 
-import { runOpenProjectLanes } from "../../src/process/open-project-lanes.js";
+import { afterEach, expect, test, vi } from "vitest";
+
+import { listProjectLaneCounts, runOpenProjectLanes } from "../../src/process/open-project-lanes.js";
+import { ROUTER_SCHEMA_SQL } from "../../src/router/schema.js";
 
 const binding = { generation: 2, attachedAt: 10 };
 const reach = { state: "unconfirmed" as const, connectedAt: 10, lastLifecycleAt: null, lastNotifiedAt: null, believedBusy: null };
@@ -61,4 +64,53 @@ test("isolates a lane launch failure and reports a nonzero result", async () => 
 
   expect(result.failed).toEqual([["alpha/offline", "terminal failed"]]);
   expect(result.opened).toEqual([]);
+});
+
+const databases: Database.Database[] = [];
+afterEach(() => { for (const database of databases.splice(0)) database.close(); });
+
+function projectFixture(lanes: ReadonlyArray<{ address: string; archived?: boolean }>) {
+  const database = new Database(":memory:");
+  databases.push(database);
+  database.exec(ROUTER_SCHEMA_SQL);
+  const insert = database.prepare("INSERT INTO lane(id,address,project,role_description,created_at,updated_at,archived_at) VALUES(?,?,?,?,1,1,?)");
+  lanes.forEach((lane, index) => {
+    insert.run(`lane-${index}`, lane.address, lane.address.split("/")[0]!, lane.address, lane.archived ? 500 : null);
+  });
+  return database;
+}
+
+// The number beside a project is a promise about what the run will open, so it has to count the
+// lanes that can be opened rather than the rows that exist. Archived ones are skipped further
+// down, and a chooser that offers eight where three will open is worse than one offering none.
+test("counts only the lanes a run would actually open", () => {
+  // Both sides on purpose: with no archived lanes in the fixture, an implementation that counts
+  // every row passes — which is exactly the defect this replaces.
+  const database = projectFixture([
+    { address: "alpha/one" },
+    { address: "alpha/two" },
+    { address: "alpha/gone", archived: true },
+    { address: "alpha/also-gone", archived: true },
+    { address: "beta/only" },
+    { address: "gamma/archived-away", archived: true },
+  ]);
+
+  // A project whose every lane is archived drops out entirely rather than appearing as a zero:
+  // it has nothing to open, so offering it as a choice would be offering a dead end.
+  expect(listProjectLaneCounts(database)).toEqual([
+    { project: "alpha", lanes: 2 },
+    { project: "beta", lanes: 1 },
+  ]);
+});
+
+// The order is what the printed numbers refer to, so it is part of the interface a person uses:
+// they type "2", not a project name.
+test("orders projects by how many lanes they have, then by name", () => {
+  const database = projectFixture([
+    { address: "zeta/one" }, { address: "zeta/two" },
+    { address: "alpha/one" }, { address: "alpha/two" },
+    { address: "beta/only" },
+  ]);
+
+  expect(listProjectLaneCounts(database).map((row) => row.project)).toEqual(["alpha", "zeta", "beta"]);
 });
