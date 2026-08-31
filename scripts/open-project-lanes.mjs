@@ -8,6 +8,12 @@
 // - or point a shortcut at the .cmd beside it.
 //
 // With a project name it goes straight there; without one it lists the projects and asks.
+//
+// Installing it elsewhere: put a shim that RUNS this file, never a copy of it. A copy drifts in
+// silence - a wrong lane count was fixed here and went on being wrong on the desktop for as long
+// as the shortcut kept running its own week-old copy, and the fix looked verified because it was
+// verified against this file rather than against the thing being launched. A shim that cannot
+// find the repo should say so and stop, which is the failure a copy never gives you.
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
