@@ -54,6 +54,9 @@ export interface DirectoryEntry {
 export type ResumeInfo =
   | { readonly state: "missing" }
   | { readonly state: "unbound" }
+  /** The lane exists and holds its history, but has left service. Its own answer, not `missing`: a
+   *  caller told the lane does not exist would go and create one at an address already spoken for. */
+  | { readonly state: "retired" }
   | {
       readonly state: "bound";
       readonly backend: "claude" | "codex";
@@ -106,7 +109,9 @@ export class RouterCore {
    */
   async resumeInfo(address: string): Promise<ResumeInfo> {
     const parsed = parseLaneAddress(address);
-    if (!this.dependencies.state.lane(parsed.address)) return { state: "missing" };
+    const lane = this.dependencies.state.lane(parsed.address);
+    if (!lane) return { state: "missing" };
+    if (lane.retiredAt !== null) return { state: "retired" };
     const binding = this.dependencies.state.activeBindingForLane(parsed.address);
     if (!binding) return { state: "unbound" };
     // find, not require, for the same reason as directory(): a query must not throw over a
@@ -159,6 +164,11 @@ export class RouterCore {
     }
 
     let lane = state.lane(parsed.address);
+    // A retired address stays occupied by the history that names it. Attaching here would put a
+    // second, differently-scoped lane behind an address every earlier message already refers to.
+    if (lane?.retiredAt != null) {
+      throw new RouterError("LANE_RETIRED", `Lane is retired: ${parsed.address}; return it to service first with: lane-router-lane unretire ${parsed.address}`);
+    }
     if (!lane) {
       if (!input.roleDescription?.trim()) throw new RouterError("ROLE_REQUIRED", "A role description is required when creating a lane");
       lane = state.createLane({

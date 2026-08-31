@@ -397,6 +397,53 @@ describe("declared model", () => {
   });
 });
 
+describe("retirement, read surfaces", () => {
+  it("drops a retired lane from the directory while leaving the others exactly as they were", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("a"), { address: "alpha/keep", roleDescription: "keep" });
+      await x.core.attachCurrent(caller("b", "attach:b"), { address: "alpha/gone", roleDescription: "gone" });
+      const before = x.core.directory("alpha");
+      expect(before.map((entry) => entry.address)).toEqual(["alpha/gone", "alpha/keep"]);
+
+      x.state.retireLane("alpha/gone", 500);
+
+      const after = x.core.directory("alpha");
+      // The surviving entry must be identical, not merely present: a filter that also reshaped
+      // the rows would pass a length check and quietly change what every caller reads.
+      expect(after).toEqual(before.filter((entry) => entry.address === "alpha/keep"));
+    } finally { x.database.close(); }
+  });
+
+  it("tells a retired lane apart from one that never existed", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("a"), { address: "alpha/gone", roleDescription: "gone" });
+      x.state.retireLane("alpha/gone", 500);
+
+      // Three different answers for three different situations. Collapsing retired into missing
+      // would send someone off to create a lane whose address is already taken by its own history.
+      await expect(x.core.resumeInfo("alpha/gone")).resolves.toEqual({ state: "retired" });
+      await expect(x.core.resumeInfo("alpha/ghost")).resolves.toEqual({ state: "missing" });
+      expect((await x.core.resumeInfo("alpha/gone") as { state: string }).state).not.toBe("bound");
+    } finally { x.database.close(); }
+  });
+
+  it("refuses to attach a conversation to a retired address instead of reviving it silently", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("a"), { address: "alpha/gone", roleDescription: "gone" });
+      x.state.retireLane("alpha/gone", 500);
+
+      await expect(x.core.attachCurrent(caller("newcomer", "attach:newcomer"), { address: "alpha/gone", roleDescription: "different role" }))
+        .rejects.toMatchObject({ code: "LANE_RETIRED" });
+      // The address stays occupied by its own history: reusing it would make every message that
+      // names it ambiguous about which lane it meant.
+      expect(x.state.requireLane("alpha/gone")).toMatchObject({ roleDescription: "gone", retiredAt: 500 });
+    } finally { x.database.close(); }
+  });
+});
+
 describe("RouterCore send and ack", () => {
   it("writes one immutable message body to the mailbox and deduplicates a tool retry", async () => {
     const x = setup();

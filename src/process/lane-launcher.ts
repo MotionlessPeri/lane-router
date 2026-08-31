@@ -72,6 +72,9 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
   if (info.state === "missing") {
     throw new Error(`Lane ${invocation.address.address} does not exist; create it with: lane-router-lane new ${invocation.address.address} --role "<role description>"`);
   }
+  if (info.state === "retired") {
+    throw new Error(`Lane ${invocation.address.address} is retired; return it to service first with: lane-router-lane unretire ${invocation.address.address}`);
+  }
   if (info.state === "unbound") {
     // A lane without an active binding has no conversation to reopen. Reattaching is a topology
     // change with its own confirmation loop, and must not happen as a side effect of "open".
