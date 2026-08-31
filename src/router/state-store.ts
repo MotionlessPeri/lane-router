@@ -17,6 +17,7 @@ interface LaneRow {
   created_at: number;
   updated_at: number;
   model: string | null;
+  retired_at: number | null;
 }
 
 interface BindingRow {
@@ -67,7 +68,7 @@ export class RouterStateStore {
 
   lane(address: string): LaneRecord | undefined {
     const row = this.database.prepare(`
-      SELECT address,project,role_description,created_at,updated_at,model
+      SELECT address,project,role_description,created_at,updated_at,model,retired_at
       FROM lane WHERE address=?
     `).get(address) as LaneRow | undefined;
     return row ? mapLane(row) : undefined;
@@ -81,8 +82,8 @@ export class RouterStateStore {
 
   listLanes(project: string): LaneRecord[] {
     return (this.database.prepare(`
-      SELECT address,project,role_description,created_at,updated_at,model
-      FROM lane WHERE project=? ORDER BY address
+      SELECT address,project,role_description,created_at,updated_at,model,retired_at
+      FROM lane WHERE project=? AND retired_at IS NULL ORDER BY address
     `).all(project) as LaneRow[]).map(mapLane);
   }
 
@@ -97,6 +98,34 @@ export class RouterStateStore {
       UPDATE lane SET model=?,updated_at=? WHERE address=?
     `).run(model, now, address).changes !== 1) throw new Error(`Lane not found: ${address}`);
     return this.requireLane(address);
+  }
+
+  /**
+   * Retiring is what "deleting a lane" means here: the row stays, and with it every message and
+   * binding that references it. `lane` and `requireLane` still find it, because the callers that
+   * refuse delivery have to tell "retired" apart from "never existed".
+   */
+  retireLane(address: string, now: number): LaneRecord {
+    if (this.database.prepare(`
+      UPDATE lane SET retired_at=?,updated_at=? WHERE address=?
+    `).run(now, now, address).changes !== 1) throw new Error(`Lane not found: ${address}`);
+    return this.requireLane(address);
+  }
+
+  unretireLane(address: string, now: number): LaneRecord {
+    if (this.database.prepare(`
+      UPDATE lane SET retired_at=NULL,updated_at=? WHERE address=?
+    `).run(now, address).changes !== 1) throw new Error(`Lane not found: ${address}`);
+    return this.requireLane(address);
+  }
+
+  /** The retired ones, which `listLanes` deliberately no longer returns. All projects when omitted. */
+  listRetiredLanes(project: string | undefined): LaneRecord[] {
+    const columns = "address,project,role_description,created_at,updated_at,model,retired_at";
+    const rows = project === undefined
+      ? this.database.prepare(`SELECT ${columns} FROM lane WHERE retired_at IS NOT NULL ORDER BY address`).all()
+      : this.database.prepare(`SELECT ${columns} FROM lane WHERE project=? AND retired_at IS NOT NULL ORDER BY address`).all(project);
+    return (rows as LaneRow[]).map(mapLane);
   }
 
   updateLaneRole(address: string, roleDescription: string, now: number): LaneRecord {
@@ -326,6 +355,7 @@ function mapLane(row: LaneRow): LaneRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     model: row.model,
+    retiredAt: row.retired_at,
   };
 }
 

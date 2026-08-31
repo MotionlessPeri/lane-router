@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const ROUTER_SCHEMA_VERSION = 4;
+export const ROUTER_SCHEMA_VERSION = 5;
 
 const MESSAGE_TABLE_SQL = `
 CREATE TABLE message (
@@ -40,7 +40,8 @@ CREATE TABLE lane (
   role_description TEXT NOT NULL CHECK (length(trim(role_description)) > 0),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  model TEXT
+  model TEXT,
+  retired_at INTEGER
 );
 
 CREATE INDEX lane_project_address_idx ON lane(project,address);
@@ -80,7 +81,22 @@ export function initializeRouterSchema(database: Database.Database): void {
   if (version === 1) { migrateNotificationStateVocabulary(database); version = 2; }
   if (version === 2) { addBindingCwdColumn(database); version = 3; }
   if (version === 3) { addLaneModelColumn(database); version = 4; }
+  if (version === 4) { addLaneRetiredAtColumn(database); version = 5; }
   if (version !== ROUTER_SCHEMA_VERSION) throw new Error(`Router database version ${version} is not supported`);
+}
+
+/**
+ * Version 5 records when a lane was retired. A lane cannot be deleted - its address is a primary
+ * key referenced by three ON DELETE RESTRICT foreign keys, so removing the row would mean
+ * destroying the message history that references it - and retiring is what "delete" means here:
+ * gone from the directory, closed to delivery, skipped by batch reopen, with every row and every
+ * mailbox file untouched. NULL means in service, which is where every existing lane lands.
+ */
+function addLaneRetiredAtColumn(database: Database.Database): void {
+  database.transaction(() => {
+    database.exec("ALTER TABLE lane ADD COLUMN retired_at INTEGER;");
+    database.pragma("user_version = 5");
+  })();
 }
 
 /**

@@ -31,6 +31,8 @@ export interface LaneRecord {
   readonly updatedAt: number;
   /** The model this role is to run on, or null when the lane declares nothing and the client decides. */
   readonly model: string | null;
+  /** When this lane left service, or null while it is in service. Retiring never deletes a row. */
+  readonly retiredAt: number | null;
 }
 
 export interface BindingRecord {

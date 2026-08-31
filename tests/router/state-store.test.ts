@@ -148,3 +148,47 @@ describe("declared model", () => {
     } finally { database.close(); }
   });
 });
+
+describe("retirement", () => {
+  it("retires and returns a lane to service without touching anything else about it", () => {
+    const { database, store } = setup();
+    try {
+      store.createLane({ address: "alpha/design", project: "alpha", roleDescription: "design", now: 1, model: "sonnet" });
+      expect(store.requireLane("alpha/design").retiredAt).toBeNull();
+
+      expect(store.retireLane("alpha/design", 50).retiredAt).toBe(50);
+      // Retiring is a state change, not an edit: everything the lane says about itself has to
+      // survive it, or returning it to service would come back a different lane.
+      expect(store.requireLane("alpha/design")).toMatchObject({
+        roleDescription: "design", model: "sonnet", createdAt: 1, retiredAt: 50,
+      });
+
+      expect(store.unretireLane("alpha/design", 60).retiredAt).toBeNull();
+      expect(store.requireLane("alpha/design")).toMatchObject({ roleDescription: "design", model: "sonnet" });
+    } finally { database.close(); }
+  });
+
+  it("lists lanes by service state, and reports an unknown address rather than passing silently", () => {
+    const { database, store } = setup();
+    try {
+      for (const address of ["alpha/one", "alpha/two", "beta/three"]) {
+        store.createLane({ address, project: address.split("/")[0]!, roleDescription: address, now: 1 });
+      }
+      store.retireLane("alpha/two", 50);
+      store.retireLane("beta/three", 51);
+
+      // listLanes stays the in-service view every existing caller already expects; the retired
+      // ones need their own query because nothing else can see them once they leave the directory.
+      expect(store.listLanes("alpha").map((lane) => lane.address)).toEqual(["alpha/one"]);
+      expect(store.listRetiredLanes("alpha").map((lane) => lane.address)).toEqual(["alpha/two"]);
+      expect(store.listRetiredLanes(undefined).map((lane) => lane.address)).toEqual(["alpha/two", "beta/three"]);
+
+      // `lane` and `requireLane` still find a retired lane: the callers that refuse delivery have
+      // to be able to tell "retired" from "never existed" to say which one it is.
+      expect(store.lane("alpha/two")?.retiredAt).toBe(50);
+
+      expect(() => store.retireLane("alpha/ghost", 60)).toThrow(/not found/iu);
+      expect(() => store.unretireLane("alpha/ghost", 60)).toThrow(/not found/iu);
+    } finally { database.close(); }
+  });
+});

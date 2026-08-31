@@ -99,7 +99,7 @@ describe("router schema migration 1 to 2", () => {
     const database = openRouterDatabase(path);
     try {
       // Opening always lands on the current version; the subject here is the value mapping.
-      expect(database.pragma("user_version", { simple: true })).toBe(4);
+      expect(database.pragma("user_version", { simple: true })).toBe(5);
 
       const rows = database.prepare("SELECT id,notification_state FROM message ORDER BY id").all() as Array<{ id: string; notification_state: string }>;
       expect(rows).toEqual([
@@ -197,7 +197,7 @@ describe("router schema migration 2 to 3", () => {
   it("adds a nullable cwd column and keeps the existing binding row untouched", () => {
     const database = openRouterDatabase(writeVersion2Database());
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(4);
+      expect(database.pragma("user_version", { simple: true })).toBe(5);
       const columns = database.pragma("table_info(binding)") as Array<{ name: string; notnull: number }>;
       expect(columns.find((column) => column.name === "cwd")).toMatchObject({ notnull: 0 });
       expect(database.prepare("SELECT id,lane_address,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd FROM binding").get())
@@ -212,7 +212,7 @@ describe("router schema migration 2 to 3", () => {
   it("migrates a version 1 database through every intermediate shape to the current one", () => {
     const database = openRouterDatabase(writeVersion1Database());
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(4);
+      expect(database.pragma("user_version", { simple: true })).toBe(5);
       const columns = database.pragma("table_info(binding)") as Array<{ name: string }>;
       expect(columns.map((column) => column.name)).toContain("cwd");
       // The version 1 mapping must still have happened on the way through.
@@ -244,7 +244,7 @@ describe("router schema migration 3 to 4", () => {
   it("adds a nullable model column and leaves every existing lane exactly as it was", () => {
     const database = openRouterDatabase(writeVersion3Database());
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(4);
+      expect(database.pragma("user_version", { simple: true })).toBe(5);
       const columns = database.pragma("table_info(lane)") as Array<{ name: string; notnull: number }>;
       expect(columns.find((column) => column.name === "model")).toMatchObject({ notnull: 0 });
 
@@ -264,6 +264,52 @@ describe("router schema migration 3 to 4", () => {
     const database = openRouterDatabase(writeVersion3Database());
     try {
       // A rebuild would have to recreate this index; ALTER TABLE ADD COLUMN carries it through.
+      const indexes = database.pragma("index_list(lane)") as Array<{ name: string }>;
+      expect(indexes.map((index) => index.name)).toContain("lane_project_address_idx");
+    } finally { database.close(); }
+  });
+});
+
+const SCHEMA_V4_SQL = `${SCHEMA_V3_SQL}
+ALTER TABLE lane ADD COLUMN model TEXT;`;
+
+function writeVersion4Database(): string {
+  const root = mkdtempSync(join(tmpdir(), "lane-router-migration-"));
+  roots.push(root);
+  const path = join(root, "router.sqlite");
+  const database = new Database(path);
+  database.exec(SCHEMA_V4_SQL);
+  database.pragma("user_version = 4");
+  database.prepare("INSERT INTO lane(address,project,role_description,created_at,updated_at,model) VALUES(?,?,?,?,?,?)")
+    .run("alpha/design", "alpha", "design", 1, 1, "claude-opus-5");
+  database.prepare("INSERT INTO lane(address,project,role_description,created_at,updated_at,model) VALUES(?,?,?,?,?,?)")
+    .run("alpha/plain", "alpha", "plain", 1, 1, null);
+  database.close();
+  return path;
+}
+
+describe("router schema migration 4 to 5", () => {
+  it("adds a nullable retired_at column and leaves every existing lane exactly as it was", () => {
+    const database = openRouterDatabase(writeVersion4Database());
+    try {
+      expect(database.pragma("user_version", { simple: true })).toBe(5);
+      const columns = database.pragma("table_info(lane)") as Array<{ name: string; notnull: number }>;
+      expect(columns.find((column) => column.name === "retired_at")).toMatchObject({ notnull: 0 });
+
+      // Every column, not a row count: an existing lane must read exactly as before with
+      // retired_at NULL, which is what keeps all 25 of them in service rather than retiring
+      // them wholesale on upgrade. The model column from version 4 has to survive too.
+      expect(database.prepare("SELECT address,project,role_description,created_at,updated_at,model,retired_at FROM lane ORDER BY address").all())
+        .toEqual([
+          { address: "alpha/design", project: "alpha", role_description: "design", created_at: 1, updated_at: 1, model: "claude-opus-5", retired_at: null },
+          { address: "alpha/plain", project: "alpha", role_description: "plain", created_at: 1, updated_at: 1, model: null, retired_at: null },
+        ]);
+    } finally { database.close(); }
+  });
+
+  it("keeps the table rather than rebuilding it, so nothing else can be lost on the way", () => {
+    const database = openRouterDatabase(writeVersion4Database());
+    try {
       const indexes = database.pragma("index_list(lane)") as Array<{ name: string }>;
       expect(indexes.map((index) => index.name)).toContain("lane_project_address_idx");
     } finally { database.close(); }
