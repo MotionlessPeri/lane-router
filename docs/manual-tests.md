@@ -235,6 +235,34 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 **最后验证：** 2026-08-27 使用真实 Codex CLI 0.148.0 与隔离 Router 完成。prompt 进程 argv 含 `--model gpt-5.6-terra --remote <隔离 endpoint>`，TUI 显示该模型并产出 `ISOLATED_ROUTER_OK`，rollout 对同一 thread 记录 `model: gpt-5.6-terra`；随后把该 thread 作为离线 binding，经批量脚本恢复，实际 resume argv 同时包含相同 `--model`、隔离 endpoint 与原 thread id。`model: null` 的完整旧 argv 由自动测试逐项固定。未知模型 `no-such-model-9` 由 stock Codex 报告 metadata 缺失并采用 fallback metadata，证明 Router 没有抢先校验；这也说明“无效模型必然立即退出”不是 Codex CLI 契约。隔离进程树全部停止，临时 root 经绝对路径核对后删除。部署时生产库在备份后清理了误连验证 fixture，最终恢复既有 `10 lanes / 33 bindings / 4032 messages`。
 
+### lane 退役
+
+**前提：** 已构建 `dist/`，且 **Router 已受控重启到含 schema v5 的版本**（`lane-router-lane list-retired` 能跑通即说明生效——旧 Router 进程持旧代码，库升到 v5 也不会自己认得 `retired_at`）。
+
+自动测试覆盖迁移、四个读面、两条前置检查、三个 CLI 动词、端点的 409 语义与工具说明里的指针，并做过 13 个变异检验。下面两条依赖真实 backend 判定与真实 MCP 会话，fake 代替不了。
+
+#### TC-RETIRE-1：在线拒绝、离线放行
+
+⚠️ **必须对同一条 lane 先开后关各试一次。** 只试关着的那次，「按 `restorePresence` 判」和「根本没判」在观测上一模一样——那不是通过，是没测到。
+
+1. 挑一条**窗口开着**的 lane，跑 `lane-router-lane retire <project>/<lane>`。
+2. 关掉那个窗口，等几秒，再跑同一条命令。
+3. `lane-router-lane list-retired <project>`。
+4. `lane-router-lane unretire <project>/<lane>`，再 `lane_directory` 看它回来没有。
+
+**预期：** 第 1 步被拒，错误里指明它是哪个 backend 的哪个 conversation；第 2 步成功；第 3 步列出它与退役时间；第 4 步之后它重新出现在 `lane_directory` 里，`role_description` 与 `model` 与退役前一致。
+
+**Codex lane 要单独走一遍**：共享 App Server 会让已关闭的 Codex lane 显示 `reach=unconfirmed`。若第 2 步对 Codex lane 被拒，说明在线判定退回了 `reach`——那正是本设计明确避开的失效。
+
+#### TC-RETIRE-2：退役后真实 agent 发不进去，且未读消息拦得住退役
+
+1. 从一条在线 lane 用 `lane_send` 发给已退役的地址。
+2. `unretire` 它，再发一条**不 ack**，然后 `retire`。
+
+**预期：** 第 1 步收到指名「已退役」的错误，且该 lane 的 `pending` 目录文件数不变；第 2 步被拒，错误里报出未读条数与发信方。
+
+**最后验证：** 尚未真机执行。自动测试覆盖到「历史不受影响」是数了 message 行数、binding 行数与 mailbox 文件数三者（文件与数据库**两侧都数**），但**真实窗口的在线判定只能人眼确认**。
+
 ### 新窗口不继承父进程的禁色设置
 
 **目标：** rotate / new / open 开出来的窗口里，TUI 是彩色的。
