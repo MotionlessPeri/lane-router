@@ -34,10 +34,16 @@ if (!process.env.CODEX_EXE) {
   if (existsSync(bundled)) process.env.CODEX_EXE = bundled;
 }
 
+// The count has to mean "lanes this will open", so archived ones are excluded: they are skipped
+// further down, and a number that promises more than the run delivers is worse than no number.
+// This is the one read in the tool that goes to the database instead of through the Router, which
+// is why the store's own filter does not cover it.
 function listProjects() {
   const database = new DatabaseSync(join(dataRoot, "router.sqlite").replaceAll("\\", "/"), { readOnly: true });
   try {
-    return database.prepare("SELECT project, COUNT(*) AS lanes FROM lane GROUP BY project ORDER BY lanes DESC, project").all();
+    return database.prepare(
+      "SELECT project, COUNT(*) AS lanes FROM lane WHERE archived_at IS NULL GROUP BY project ORDER BY lanes DESC, project",
+    ).all();
   } finally { database.close(); }
 }
 
