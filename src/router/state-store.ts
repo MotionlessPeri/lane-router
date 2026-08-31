@@ -128,6 +128,41 @@ export class RouterStateStore {
     return (rows as LaneRow[]).map(mapLane);
   }
 
+  /**
+   * Every lane this Router knows, across all projects and whether or not it is still in service.
+   * `listLanes` deliberately answers neither question — it takes a project and hides the retired —
+   * and both of those are what makes "where did that lane go" unanswerable in one look today.
+   */
+  listAllLanes(): LaneRecord[] {
+    return (this.database.prepare(`
+      SELECT address,project,role_description,created_at,updated_at,model,retired_at
+      FROM lane ORDER BY address
+    `).all() as LaneRow[]).map(mapLane);
+  }
+
+  /**
+   * The newest messages first, at most `limit` of them. Deliberately not `allMessages()`: that one
+   * loads every row ever written, which is what a long-lived Router accumulates most of.
+   */
+  recentMessages(limit: number): MessageRecord[] {
+    return (this.database.prepare(`${MESSAGE_SELECT}
+      ORDER BY created_at DESC,id DESC LIMIT ?
+    `).all(limit) as MessageRow[]).map(mapMessage);
+  }
+
+  countMessages(): number {
+    return (this.database.prepare("SELECT COUNT(*) AS total FROM message").get() as { total: number }).total;
+  }
+
+  /** How much each lane is behind, in one query rather than one query per lane. */
+  pendingBacklog(): Array<{ laneAddress: string; count: number; oldestCreatedAt: number }> {
+    return (this.database.prepare(`
+      SELECT target_lane,COUNT(*) AS total,MIN(created_at) AS oldest
+      FROM message WHERE state='pending' GROUP BY target_lane
+    `).all() as Array<{ target_lane: string; total: number; oldest: number }>)
+      .map((row) => ({ laneAddress: row.target_lane, count: row.total, oldestCreatedAt: row.oldest }));
+  }
+
   updateLaneRole(address: string, roleDescription: string, now: number): LaneRecord {
     if (!roleDescription.trim()) throw new Error("Role description is required");
     if (this.database.prepare(`

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lane Router 看板</title>
+<style>
+  :root { color-scheme: light dark; --line: #8883; --dim: #8886; --warn: #b45309; }
+  body { margin: 0; padding: 1rem 1.25rem 3rem; font: 13px/1.55 ui-monospace, "Cascadia Mono", Consolas, monospace; }
+  h1 { font-size: 15px; margin: 0; }
+  h2 { font-size: 13px; margin: 1.75rem 0 .5rem; padding-bottom: .25rem; border-bottom: 1px solid var(--line); }
+  header { display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; }
+  .dim { color: var(--dim); }
+  .warn { color: var(--warn); }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; vertical-align: top; padding: .25rem .6rem .25rem 0; border-bottom: 1px solid var(--line); }
+  th { font-weight: 600; color: var(--dim); white-space: nowrap; }
+  td.nowrap, th.nowrap { white-space: nowrap; }
+  .body { white-space: pre-wrap; word-break: break-word; max-width: 60ch; }
+  .role { white-space: pre-wrap; word-break: break-word; max-width: 40ch; color: var(--dim); }
+  details { margin-top: .75rem; }
+  summary { cursor: pointer; color: var(--dim); }
+  .empty { color: var(--dim); padding: .4rem 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Lane Router 看板</h1>
+  <span id="router" class="dim"></span>
+  <span id="status" class="dim"></span>
+</header>
+
+<h2>lane 拓扑</h2>
+<div id="lanes"></div>
+
+<h2>积压队列</h2>
+<div id="backlog"></div>
+
+<h2>消息流</h2>
+<div id="messages"></div>
+
+<script>
+(function () {
+  "use strict";
+  var POLL_MS = 5000;
+
+  /**
+   * Everything this page displays was written by another lane or by a person: role descriptions,
+   * message bodies, working directories, lane addresses. It is data, and this is the one place
+   * where it could stop being data — so nodes are built and filled here, and `innerHTML` and its
+   * relatives appear nowhere in this file.
+   */
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) { node.className = className; }
+    if (text !== undefined && text !== null) { node.textContent = String(text); }
+    return node;
+  }
+
+  function replace(host, node) {
+    while (host.firstChild) { host.removeChild(host.firstChild); }
+    host.appendChild(node);
+  }
+
+  function table(headings, rows) {
+    if (rows.length === 0) { return el("div", "empty", "（空）"); }
+    var element = document.createElement("table");
+    var head = document.createElement("tr");
+    headings.forEach(function (heading) { head.appendChild(el("th", "nowrap", heading)); });
+    element.appendChild(head);
+    rows.forEach(function (cells) {
+      var row = document.createElement("tr");
+      cells.forEach(function (cell) { row.appendChild(cell); });
+      element.appendChild(row);
+    });
+    return element;
+  }
+
+  /** The owed-ack duration is computed here, from capturedAt and createdAt, so the snapshot need
+   *  not carry a third number that could disagree with the two it came from. */
+  function age(capturedAt, since) {
+    if (since === null || since === undefined) { return "—"; }
+    var seconds = Math.max(0, Math.round((capturedAt - since) / 1000));
+    if (seconds < 60) { return seconds + " 秒"; }
+    var minutes = Math.floor(seconds / 60);
+    if (minutes < 60) { return minutes + " 分"; }
+    var hours = Math.floor(minutes / 60);
+    if (hours < 24) { return hours + " 小时 " + (minutes % 60) + " 分"; }
+    return Math.floor(hours / 24) + " 天 " + (hours % 24) + " 小时";
+  }
+
+  function clock(value) {
+    if (value === null || value === undefined) { return "—"; }
+    var date = new Date(value);
+    function pad(n) { return (n < 10 ? "0" : "") + n; }
+    return pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
+  }
+
+  function reachText(lane) {
+    if (!lane.binding) { return "未绑定"; }
+    if (!lane.reach) { return "无 backend"; }
+    return lane.reach.state + (lane.reach.believedBusy ? "（忙）" : "");
+  }
+
+  function laneRow(snapshot, lane) {
+    return [
+      el("td", "nowrap", lane.address),
+      el("td", "role", lane.roleDescription),
+      el("td", "nowrap", lane.binding ? lane.binding.backend : "—"),
+      el("td", "nowrap", lane.binding ? "gen" + lane.binding.generation : "—"),
+      el("td", "nowrap", lane.model || "—"),
+      el("td", "nowrap", reachText(lane)),
+      el("td", "nowrap", lane.reach ? age(snapshot.capturedAt, lane.reach.lastLifecycleAt) : "—"),
+      el("td", null, (lane.binding && lane.binding.cwd) || "—")
+    ];
+  }
+
+  var LANE_HEADINGS = ["lane", "角色", "backend", "generation", "model", "可达", "上次活动", "cwd"];
+
+  function renderLanes(snapshot) {
+    var live = snapshot.lanes.filter(function (lane) { return !lane.retired; });
+    var retired = snapshot.lanes.filter(function (lane) { return lane.retired; });
+    var host = document.createElement("div");
+    host.appendChild(table(LANE_HEADINGS, live.map(function (lane) { return laneRow(snapshot, lane); })));
+    if (retired.length > 0) {
+      // Folded, not dropped: retired lanes should not take up the view, but "where did that lane
+      // go" is a question people actually ask, and it has no other answer here.
+      var details = document.createElement("details");
+      details.appendChild(el("summary", null, "已退役 " + retired.length + " 条"));
+      details.appendChild(table(LANE_HEADINGS, retired.map(function (lane) { return laneRow(snapshot, lane); })));
+      host.appendChild(details);
+    }
+    replace(document.getElementById("lanes"), host);
+  }
+
+  function renderBacklog(snapshot) {
+    // Sorted by the oldest waiting message, not by count: ten fresh messages are not the problem
+    // that one message nobody has touched for two days is.
+    var waiting = snapshot.lanes.filter(function (lane) { return lane.pending.count > 0; })
+      .sort(function (a, b) { return a.pending.oldestCreatedAt - b.pending.oldestCreatedAt; });
+    replace(document.getElementById("backlog"), table(
+      ["lane", "未处理", "最老一封已等", "可达"],
+      waiting.map(function (lane) {
+        var oldest = el("td", "nowrap", age(snapshot.capturedAt, lane.pending.oldestCreatedAt));
+        if (snapshot.capturedAt - lane.pending.oldestCreatedAt > 3600000) { oldest.className = "nowrap warn"; }
+        return [
+          el("td", "nowrap", lane.address),
+          el("td", "nowrap", lane.pending.count),
+          oldest,
+          el("td", "nowrap", reachText(lane))
+        ];
+      })
+    ));
+  }
+
+  function renderMessages(snapshot) {
+    var host = document.createElement("div");
+    host.appendChild(table(
+      ["时间", "发件方 → 收件方", "kind", "投递", "欠 ack", "正文"],
+      snapshot.messages.map(function (message) {
+        var owed = message.state === "pending"
+          ? el("td", "nowrap", age(snapshot.capturedAt, message.createdAt))
+          : el("td", "nowrap dim", "已 ack " + clock(message.resolvedAt));
+        if (message.state === "pending" && snapshot.capturedAt - message.createdAt > 3600000) {
+          owed.className = "nowrap warn";
+        }
+        return [
+          el("td", "nowrap", clock(message.createdAt)),
+          el("td", "nowrap", message.sender + " → " + message.target),
+          el("td", "nowrap", message.kind),
+          el("td", "nowrap", message.notificationState),
+          owed,
+          el("td", "body", message.body === null ? "（正文读不到）" : message.body)
+        ];
+      })
+    ));
+    if (snapshot.truncated && snapshot.truncated.messages) {
+      host.appendChild(el("div", "empty", "只显示最近 " + snapshot.truncated.limit + " 封，更早的不在这里。"));
+    }
+    replace(document.getElementById("messages"), host);
+  }
+
+  function render(snapshot) {
+    document.getElementById("router").textContent =
+      "pid " + snapshot.router.pid + " · 端口 " + snapshot.router.port + " · schema v" + snapshot.router.schemaVersion;
+    document.getElementById("status").textContent = "快照 " + clock(snapshot.capturedAt);
+    document.getElementById("status").className = "dim";
+    renderLanes(snapshot);
+    renderBacklog(snapshot);
+    renderMessages(snapshot);
+  }
+
+  function load() {
+    return fetch("/dashboard/state", { cache: "no-store" }).then(function (response) {
+      if (!response.ok) { throw new Error("状态接口返回 " + response.status); }
+      return response.json();
+    }).then(render).catch(function (error) {
+      // Said out loud: a board that quietly keeps showing its last snapshot is a board that lies
+      // about how current it is, and staleness is the one thing it exists to rule out.
+      var status = document.getElementById("status");
+      status.textContent = "取不到快照：" + (error && error.message ? error.message : "未知错误");
+      status.className = "warn";
+    });
+  }
+
+  load();
+  setInterval(load, POLL_MS);
+})();
+</script>
+</body>
+</html>

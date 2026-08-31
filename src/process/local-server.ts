@@ -1,10 +1,13 @@
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import type { ClaudeChannelPort, ClaudeChannelOutcome } from "../backends/claude-backend.js";
 import { CodexTuiBridge, type CodexTuiBridgeHost } from "../adapters/codex/tui-bridge.js";
 import type { Notification } from "../router/backend.js";
+import type { DashboardRouter } from "../router/dashboard.js";
 import type { CallerContext, BindingRecord, ReachSnapshot, ResolvedIdentity } from "../router/types.js";
 import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
 import type { ToolService } from "../tools/tool-service.js";
@@ -238,6 +241,13 @@ export class LocalRouterServer {
     readonly retireLane?: (address: string) => Promise<unknown>;
     readonly unretireLane?: (address: string) => unknown;
     readonly listRetiredLanes?: (project: string | undefined) => unknown;
+    /**
+     * One snapshot for the observation board, given the facts only this server holds. Optional for
+     * the same reason as the surfaces above — the board is a face a Router may be built without —
+     * and read-only for a reason of its own: this HTTP face has no authentication, so anything on
+     * it that acted could be pressed by any local process that can reach loopback.
+     */
+    readonly dashboardState?: (router: DashboardRouter) => unknown;
   }) {
     this.host = options.host ?? "127.0.0.1";
     if (this.host !== "127.0.0.1" && this.host !== "::1") throw new Error("Router internal server must bind to loopback");
@@ -283,6 +293,15 @@ export class LocalRouterServer {
         if (url.pathname === "/lanes/retired" && this.options.listRetiredLanes) {
           const project = url.searchParams.get("project") ?? undefined;
           return json(response, 200, { result: this.options.listRetiredLanes(project) });
+        }
+        if (url.pathname === "/dashboard" && this.options.dashboardState) {
+          const page = readDashboardPage();
+          response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          return void response.end(page);
+        }
+        if (url.pathname === "/dashboard/state" && this.options.dashboardState) {
+          const { pid, port, instanceId } = this.discovery();
+          return json(response, 200, this.options.dashboardState({ pid, port, instanceId }));
         }
         if (url.pathname === "/lanes/resume-info" && this.options.resumeInfo) {
           const address = url.searchParams.get("address");
@@ -367,6 +386,15 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
     chunks.push(buffer);
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+/**
+ * The page sits beside this module rather than inside it as a string, so it stays editable as
+ * HTML. That makes it something the build has to carry: read relative to this module, it resolves
+ * to the source tree under test and to `dist/` once built, and the build fails if it did not land.
+ */
+function readDashboardPage(): string {
+  return readFileSync(fileURLToPath(new URL("./dashboard.html", import.meta.url)), "utf8");
 }
 
 function json(response: ServerResponse, status: number, value: unknown): void {

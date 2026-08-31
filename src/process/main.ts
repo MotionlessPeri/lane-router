@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCodexRuntime } from "../adapters/codex/codex-runtime.js";
 import { ClaudeBackend } from "../backends/claude-backend.js";
 import { BackendRegistry } from "../router/backend.js";
+import { dashboardSnapshot } from "../router/dashboard.js";
 import { openRouterDatabase } from "../router/database.js";
 import { MailboxStore } from "../router/mailbox-store.js";
 import { NotificationPump } from "../router/notification-pump.js";
@@ -60,6 +61,7 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
       retireLane: (address) => core.retireLane(address),
       unretireLane: (address) => core.unretireLane(address),
       listRetiredLanes: (project) => core.listRetiredLanes(project),
+      dashboardState: (router) => dashboardSnapshot({ state, mailbox, backends, now: Date.now }, router),
     });
     mailbox.reconcile(state);
     const discovery = await server.start();
