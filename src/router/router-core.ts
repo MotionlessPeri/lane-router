@@ -218,6 +218,52 @@ export class RouterCore {
   }
 
   /**
+   * Take a lane out of service. Two refusals, each guarding a different silent loss, and both
+   * reported with the numbers behind them so the caller is not left guessing which one applied.
+   *
+   * The presence check reads the backend's `restorePresence`, never `reach`: a shared Codex App
+   * Server keeps a thread loaded after its TUI closes, so `reach` calls a closed lane
+   * `unconfirmed` and would refuse to retire the very lanes this exists for.
+   */
+  async retireLane(address: string): Promise<LaneRecord> {
+    const parsed = parseLaneAddress(address);
+    const state = this.dependencies.state;
+    const lane = state.lane(parsed.address);
+    if (!lane) throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${parsed.address}`);
+    if (lane.retiredAt !== null) return lane;
+
+    const binding = state.activeBindingForLane(parsed.address);
+    if (binding) {
+      const presence = this.dependencies.backends.find(binding.backend)?.restorePresence(binding) ?? "unavailable";
+      if (presence === "online") {
+        throw new RouterError("LANE_ONLINE", `Lane ${parsed.address} is still open as ${binding.backend} conversation ${binding.conversationId}; close it before retiring`);
+      }
+    }
+
+    const pending = state.pendingMessages(parsed.address);
+    if (pending.length > 0) {
+      const senders = [...new Set(pending.map((message) => message.senderLane))].join(", ");
+      throw new RouterError("LANE_HAS_PENDING", `Lane ${parsed.address} still has ${pending.length} unread message(s) from ${senders}; process or ack them before retiring`);
+    }
+
+    // Released as part of retiring, or the lane would be retired and still owned - a state the
+    // directory now hides, so nobody would ever see it.
+    if (binding) state.deactivateBinding(binding.id, binding.generation, this.dependencies.now());
+    return state.retireLane(parsed.address, this.dependencies.now());
+  }
+
+  unretireLane(address: string): LaneRecord {
+    const parsed = parseLaneAddress(address);
+    const lane = this.dependencies.state.lane(parsed.address);
+    if (!lane) throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${parsed.address}`);
+    return lane.retiredAt === null ? lane : this.dependencies.state.unretireLane(parsed.address, this.dependencies.now());
+  }
+
+  listRetiredLanes(project: string | undefined): LaneRecord[] {
+    return this.dependencies.state.listRetiredLanes(project);
+  }
+
+  /**
    * One call, one copy per recipient — each a whole message with its own id, file and ack. A
    * shared row would have to teach `ack` what a partly processed message is; separate copies
    * leave it untouched, and lanes read the same body at their own pace.
@@ -230,7 +276,13 @@ export class RouterCore {
     const recipients: string[] = [];
     for (const raw of [input.target, ...(input.cc ?? [])]) {
       const address = parseLaneAddress(raw).address;
-      if (!state.lane(address)) throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${address}`);
+      const recipient = state.lane(address);
+      if (!recipient) throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${address}`);
+      // Before anything is written, like the existence check beside it: a copy accepted into the
+      // mailbox of a lane nobody will reopen is exactly the silent loss retiring guards against.
+      if (recipient.retiredAt !== null) {
+        throw new RouterError("LANE_RETIRED", `Lane is retired: ${address}; return it to service first with: lane-router-lane unretire ${address}`);
+      }
       if (!recipients.includes(address)) recipients.push(address);
     }
     if (input.kind === "correction" && !input.replyTo) throw new RouterError("REPLY_TO_REQUIRED", "A correction must identify the message it corrects");

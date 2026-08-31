@@ -90,6 +90,19 @@ function pendingFileCount(root: string): number {
   return total;
 }
 
+/** Every resolved message file, so "history untouched" can be counted on the file side too. */
+function resolvedFileCount(root: string): number {
+  let total = 0;
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) walk(join(directory, entry.name));
+      else if (directory.replaceAll("\\", "/").endsWith("/resolved")) total += 1;
+    }
+  };
+  walk(root);
+  return total;
+}
+
 /** Rejects with the signal's reason, so a fake wait can be given up on the way a real one is. */
 function abortion(signal?: AbortSignal): Promise<never> {
   return new Promise((_resolve, reject) => {
@@ -440,6 +453,83 @@ describe("retirement, read surfaces", () => {
       // The address stays occupied by its own history: reusing it would make every message that
       // names it ambiguous about which lane it meant.
       expect(x.state.requireLane("alpha/gone")).toMatchObject({ roleDescription: "gone", retiredAt: 500 });
+    } finally { x.database.close(); }
+  });
+});
+
+describe("retirement, write surface and preconditions", () => {
+  it("refuses delivery to a retired lane and says which lane it is", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("source"), { address: "alpha/source", roleDescription: "source" });
+      await x.core.attachCurrent(caller("target", "attach:target"), { address: "alpha/target", roleDescription: "target" });
+      const before = x.state.allMessages().length;
+      x.state.retireLane("alpha/target", 500);
+
+      await expect(x.core.send(caller("source", "send:1"), { target: "alpha/target", body: "hi", kind: "normal" }))
+        .rejects.toMatchObject({ code: "LANE_RETIRED" });
+      // Nothing written: a message accepted into a mailbox nobody will ever read again is the
+      // silent loss retirement exists to prevent.
+      expect(x.state.allMessages()).toHaveLength(before);
+      expect(pendingFileCount(x.root)).toBe(0);
+    } finally { x.database.close(); }
+  });
+
+  it("refuses to retire a lane whose conversation is still open", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("live"), { address: "alpha/live", roleDescription: "live" });
+      x.backend.restoreState = "online";
+
+      await expect(x.core.retireLane("alpha/live")).rejects.toMatchObject({ code: "LANE_ONLINE" });
+      expect(x.state.requireLane("alpha/live").retiredAt).toBeNull();
+      // The binding must survive a refused retirement untouched, or a failed attempt would have
+      // orphaned the very conversation it declined to disturb.
+      expect(x.state.activeBindingForLane("alpha/live")).not.toBeUndefined();
+    } finally { x.database.close(); }
+  });
+
+  it("refuses to retire a lane that still has unread messages, and counts them", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("source"), { address: "alpha/source", roleDescription: "source" });
+      await x.core.attachCurrent(caller("target", "attach:target"), { address: "alpha/target", roleDescription: "target" });
+      await x.core.send(caller("source", "send:1"), { target: "alpha/target", body: "one", kind: "normal" });
+      await x.core.send(caller("source", "send:2"), { target: "alpha/target", body: "two", kind: "normal" });
+      // Offline, so this can only be refused for the pending messages - the two preconditions are
+      // separately load-bearing and one implementation must not be able to satisfy both tests.
+      x.backend.restoreState = "offline";
+
+      await expect(x.core.retireLane("alpha/target")).rejects.toMatchObject({ code: "LANE_HAS_PENDING" });
+      await expect(x.core.retireLane("alpha/target")).rejects.toThrow(/2/u);
+      expect(x.state.requireLane("alpha/target").retiredAt).toBeNull();
+    } finally { x.database.close(); }
+  });
+
+  it("retires an offline lane, releases its binding, and leaves all history in place", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("source"), { address: "alpha/source", roleDescription: "source" });
+      await x.core.attachCurrent(caller("target", "attach:target"), { address: "alpha/target", roleDescription: "target" });
+      const [sent] = await x.core.send(caller("source", "send:1"), { target: "alpha/target", body: "one", kind: "normal" });
+      await x.core.ack(caller("target", "ack:1"), { messageIds: [sent!.id] });
+      x.backend.restoreState = "offline";
+
+      const messages = x.state.allMessages().length;
+      const bindingRows = () => (x.database.prepare("SELECT COUNT(*) n FROM binding").get() as { n: number }).n;
+      const bindings = bindingRows();
+      const files = resolvedFileCount(x.root) + pendingFileCount(x.root);
+
+      await expect(x.core.retireLane("alpha/target")).resolves.toMatchObject({ address: "alpha/target" });
+
+      expect(x.state.requireLane("alpha/target").retiredAt).not.toBeNull();
+      // Released, so the lane is not left retired-and-owned - a state the directory now hides.
+      expect(x.state.activeBindingForLane("alpha/target")).toBeUndefined();
+      // Counted on both sides: rows alone would miss a file deleted without its row, and files
+      // alone would miss the reverse.
+      expect(x.state.allMessages()).toHaveLength(messages);
+      expect(bindingRows()).toBe(bindings);
+      expect(resolvedFileCount(x.root) + pendingFileCount(x.root)).toBe(files);
     } finally { x.database.close(); }
   });
 });
