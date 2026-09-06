@@ -278,6 +278,21 @@
       model.select.value = selected?.model ?? "";
       provider.select.value = selected?.modelProvider ?? "";
     });
+    model.select.addEventListener("change", () => {
+      if (model.select.value === "") {
+        profile.select.value = "";
+        provider.select.value = "";
+        return;
+      }
+      const matches = profiles.filter((entry) => entry.model === model.select.value);
+      if (matches.length === 1) {
+        profile.select.value = matches[0].name;
+        provider.select.value = matches[0].modelProvider ?? snapshot.launcher.defaultModelProvider;
+        return;
+      }
+      profile.select.value = "";
+      provider.select.value = snapshot.launcher.defaultModelProvider;
+    });
     overrides.appendChild(model.field);
     overrides.appendChild(model.select);
     overrides.appendChild(profile.field);

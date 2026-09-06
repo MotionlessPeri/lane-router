@@ -70,6 +70,7 @@ export interface DashboardLauncherProfile {
 }
 
 export interface DashboardLauncherChoices {
+  readonly defaultModelProvider: string;
   readonly models: readonly DashboardLauncherModel[];
   readonly profiles: readonly DashboardLauncherProfile[];
   readonly modelProviders: readonly string[];

@@ -135,6 +135,7 @@ describe("dashboardSnapshot", () => {
     try {
       addLane(x, "alpha/offline", { bound: true });
       const launcher = {
+        defaultModelProvider: "openai",
         models: [
           { id: "glm-5.3", displayName: "GLM 5.3", hidden: false },
           { id: "gpt-6-astra", displayName: "GPT 6 Astra", hidden: true },

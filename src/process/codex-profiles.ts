@@ -14,6 +14,11 @@ export interface CodexProfileChoice {
   readonly modelProvider?: string;
 }
 
+/** The built-in Codex provider is OpenAI unless the base config selects another provider. */
+export function defaultCodexModelProvider(codexHome: string = process.env.CODEX_HOME ?? join(homedir(), ".codex")): string {
+  return readSettingsIfPresent(join(codexHome, "config.toml")).modelProvider ?? "openai";
+}
+
 /**
  * Resolve the model provider selected by a Codex V2 profile (`~/.codex/<name>.config.toml`).
  * Only the top-level `model_provider` key counts; provider tables may repeat key names, so every
@@ -61,7 +66,7 @@ export function listCodexProfiles(codexHome: string = process.env.CODEX_HOME ?? 
 
 /** Provider ids come from config tables as well as top-level selections; both are valid launches. */
 export function listCodexModelProviders(codexHome: string = process.env.CODEX_HOME ?? join(homedir(), ".codex")): string[] {
-  const providers = new Set<string>();
+  const providers = new Set<string>([defaultCodexModelProvider(codexHome)]);
   for (const fileName of ["config.toml", ...profileFileNames(codexHome)]) {
     const content = readSettingsIfPresent(join(codexHome, fileName));
     if (content.modelProvider !== undefined) providers.add(content.modelProvider);

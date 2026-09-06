@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
 
-import { listCodexModelProviders, listCodexProfiles, profileModelProvider } from "../../src/process/codex-profiles.js";
+import { defaultCodexModelProvider, listCodexModelProviders, listCodexProfiles, profileModelProvider } from "../../src/process/codex-profiles.js";
 
 function profileHome(files: Record<string, string>): string {
   const home = mkdtempSync(join(tmpdir(), "lane-router-profiles-"));
@@ -71,5 +71,18 @@ test("profile provider overrides the base with single quotes and an inline comme
     expect(profileModelProvider("glm", codexHome)).toBe("ZAI");
   } finally {
     rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("the dashboard default provider follows base config and otherwise uses Codex's built-in provider", () => {
+  const inherited = profileHome({ "config.toml": "model_provider = 'ZAI'\n" });
+  const builtIn = profileHome({ "config.toml": "model = 'gpt-6-astra'\n" });
+  try {
+    expect(defaultCodexModelProvider(inherited)).toBe("ZAI");
+    expect(defaultCodexModelProvider(builtIn)).toBe("openai");
+    expect(listCodexModelProviders(builtIn)).toContain("openai");
+  } finally {
+    rmSync(inherited, { recursive: true, force: true });
+    rmSync(builtIn, { recursive: true, force: true });
   }
 });

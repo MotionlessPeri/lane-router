@@ -45,8 +45,9 @@
    - 只填 `profile`：按现有 Codex profile 配置解析 provider。
    - 只填 `modelProvider`：显式指定 provider。
    - 两项都填：显式 provider 优先，用来表达模型与 provider 必须成对出现的场景。
-5. 如果选择了 Claude lane，同时填写 `profile` 或 `modelProvider`，页面在提交前报错；请求端也会独立拒绝，避免绕过页面造成半个批次被打开。
-6. 点击“打开选中 lane”后，页面逐项目展示结果：已请求打开、跳过、失败。按钮文案用“已请求打开”，不用“已打开”；`launch_requested` 仍是弱声明，窗口是否真的起来要看状态与用户观察。
+5. 从 profile 选择模型时，页面同时填写对应 provider。从模型菜单直接切换时，如果模型只对应一个 profile，页面采用该 profile；否则清空 profile 并显式填写基础 Codex provider。不能只改模型字符串而让 `thread/resume` 沿用上一次的 provider。
+6. 如果选择了 Claude lane，同时填写 `profile` 或 `modelProvider`，页面在提交前报错；请求端也会独立拒绝，避免绕过页面造成半个批次被打开。
+7. 点击“打开选中 lane”后，页面逐项目展示结果：已请求打开、跳过、失败。按钮文案用“已请求打开”，不用“已打开”；`launch_requested` 仍是弱声明，窗口是否真的起来要看状态与用户观察。
 
 选择多个项目时，terminal 分组沿用现有规则：同一个项目的 lane 进同一个 Windows Terminal 窗口，不同项目各一个窗口。
 
@@ -164,6 +165,7 @@ sequenceDiagram
 6. transient Codex startup attach 后，新 binding 沿用旧 startup；非 transient 行为保持现状；
 7. dashboard 继续自包含，不引用外部资源；
 8. 现有 `LANE_TOOL_NAMES` 不变。
+9. 先选 `glm` profile，再从模型菜单改选一个不属于该 profile 的 GPT 模型时，请求显式携带基础 provider，不再保留 `ZAI`。
 
 真机验收使用隔离 `LANE_ROUTER_DATA_ROOT` 和一次性 Codex 测试 lane：
 
@@ -172,5 +174,6 @@ sequenceDiagram
 3. 等 attach 完成后检查 `lane.model` 与 binding startup 仍为旧值；
 4. 关闭该 lane，再不看板覆盖地恢复一次，确认回到旧模型与旧 provider；
 5. 选择两个项目的一次性打开请求，确认各自项目窗口与逐 lane 结果汇总正确。
+6. 关闭测试 lane，再选 `glm` profile 后从模型菜单切到 `gpt-6-astra`；确认请求与恢复后的 thread 都是 `modelProvider=openai`，而不是 `ZAI`。
 
 不在本设计内：修改模型目录、永久切换模型、自动关闭在线 lane、远程访问、账号体系、恢复失败自动重试。

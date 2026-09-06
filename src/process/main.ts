@@ -16,7 +16,7 @@ import { RouterStateStore } from "../router/state-store.js";
 import { ClaudeSessionLocator } from "./claude-session-locator.js";
 import { ConversationRestorer } from "./conversation-restorer.js";
 import { DashboardLaneOpener } from "./dashboard-lane-opener.js";
-import { listCodexModelProviders, listCodexProfiles } from "./codex-profiles.js";
+import { defaultCodexModelProvider, listCodexModelProviders, listCodexProfiles } from "./codex-profiles.js";
 import { ToolService } from "../tools/tool-service.js";
 import { ClaudeChannelHub, LocalRouterServer } from "./local-server.js";
 import { RuntimeLock } from "./runtime-lock.js";
@@ -114,7 +114,12 @@ async function codexLauncherChoices(client: { request(method: string, params: un
     if (next !== null && typeof next !== "string") throw new Error("Codex App Server model/list returned an invalid cursor");
     cursor = next ?? undefined;
   } while (cursor !== undefined && models.length < 10_000);
-  return { models, profiles: listCodexProfiles(), modelProviders: listCodexModelProviders() };
+  return {
+    defaultModelProvider: defaultCodexModelProvider(),
+    models,
+    profiles: listCodexProfiles(),
+    modelProviders: listCodexModelProviders(),
+  };
 }
 
 function responseProperty(value: unknown, property: string): unknown {

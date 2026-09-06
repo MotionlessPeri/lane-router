@@ -36,6 +36,7 @@ const launcherSnapshot = {
   ...snapshot,
   actionToken: "action-token-1",
   launcher: {
+    defaultModelProvider: "openai",
     models: [
       { id: "glm-5.3", displayName: "GLM 5.3", hidden: false },
       { id: "gpt-6-astra", displayName: "GPT 6 Astra", hidden: true },
@@ -177,6 +178,31 @@ test("the launcher offers constrained startup menus and fills a profile's startu
 
   expect((model as HTMLSelectElement).value).toBe("glm-5.3");
   expect((provider as HTMLSelectElement).value).toBe("ZAI");
+});
+
+test("switching from a GLM profile to a GPT model also returns to the default provider", async () => {
+  const { document, window, calls } = await renderLauncher();
+  const model = document.querySelector("#override-model") as HTMLSelectElement;
+  const profile = document.querySelector("#override-profile") as HTMLSelectElement;
+  const provider = document.querySelector("#override-provider") as HTMLSelectElement;
+
+  profile.value = "glm";
+  profile.dispatchEvent(new window.Event("change"));
+  expect(provider.value).toBe("ZAI");
+
+  model.value = "gpt-6-astra";
+  model.dispatchEvent(new window.Event("change"));
+
+  expect(model.value).toBe("gpt-6-astra");
+  expect(profile.value).toBe("");
+  expect(provider.value).toBe("openai");
+
+  (document.querySelector("button#open-selected") as HTMLButtonElement).click();
+  await vi.waitFor(() => expect(calls).toHaveLength(2));
+  expect(JSON.parse(String(calls[1]!.init?.body)).override).toEqual({
+    model: "gpt-6-astra",
+    modelProvider: "openai",
+  });
 });
 
 test("a launcher refresh keeps operator choices instead of resetting offline defaults", async () => {

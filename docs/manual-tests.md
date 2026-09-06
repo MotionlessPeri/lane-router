@@ -395,8 +395,9 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 3. 观察两个项目各得到一个 Windows Terminal 窗口；Codex 命令行包含 `--profile glm --model glm-5.3`，并连接 `ZAI` provider endpoint。
 4. 等两条 lane attach 后查询数据库：`lane.model` 仍为旧值，新 binding startup 仍为旧 `profile` / `modelProvider`。
 5. 关闭这两条 lane，等待启动保留期结束后不看板覆盖地恢复一次；确认命令行与 provider 回到旧值。
+6. 再关闭其中一条 lane。先选择 Codex profile `glm`，再从 model 菜单切到 `gpt-6-astra`；确认 profile 被清空、modelProvider 变为基础 provider `openai`。打开后用 `thread/read` 确认 `model=gpt-6-astra` 且 `modelProvider=openai`。
 
-**预期：** 五步全部成立。菜单只列出 App Server `model/list(includeHidden=true)` 返回的 model、`~/.codex/*.config.toml` 中可解析 provider 的 profile，以及配置中存在的 modelProvider；不能手输 `glm` 到 modelProvider。第 4 步若出现 `glm` / `ZAI`，说明一次性 provider 被持久化，功能未通过；第 5 步若仍走 GLM，说明下次恢复没有回到持久声明。
+**预期：** 六步全部成立。菜单只列出 App Server `model/list(includeHidden=true)` 返回的 model、`~/.codex/*.config.toml` 中可解析 provider 的 profile，以及配置中存在的 modelProvider；不能手输 `glm` 到 modelProvider。第 4 步若出现 `glm` / `ZAI`，说明一次性 provider 被持久化，功能未通过；第 5 步若仍走 GLM，说明下次恢复没有回到持久声明；第 6 步若仍是 `ZAI`，说明模型切换只改了模型字符串，没有切换 provider。
 
 **关键看点：** 必须同时验“本次生效”和“下次不生效”。只看第 3 步会把持久化泄漏误报为通过。
 
