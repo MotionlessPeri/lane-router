@@ -23,6 +23,7 @@ export class CodexRuntime {
   private readonly ownedThreads = new Set<string>();
   private readonly visibleClients = new Map<string, number>();
   private readonly threadCwds = new Map<string, string>();
+  private readonly threadStartups = new Map<string, Readonly<{ profile?: string; modelProvider?: string; transient?: boolean }>>();
   private unsubscribeRequest?: () => void;
   private unsubscribeReconnect?: () => void;
   private running = false;
@@ -42,6 +43,7 @@ export class CodexRuntime {
     this.dispatcher = new CodexDynamicToolDispatcher({
       ownsThread: (threadId) => this.ownsThread(threadId),
       cwdForThread: (threadId) => this.threadCwds.get(threadId) ?? startupCwd(this.options.state.activeBindingForConversation("codex", threadId)),
+      startupForThread: (threadId) => this.threadStartups.get(threadId),
       call: options.callTool,
     });
   }
@@ -74,9 +76,10 @@ export class CodexRuntime {
     return { ...params, dynamicTools: this.dynamicTools, developerInstructions: LANE_ROUTER_INSTRUCTIONS };
   }
 
-  claimThread(threadId: string, cwd?: string): void {
+  claimThread(threadId: string, cwd?: string, startup?: Readonly<{ profile?: string; modelProvider?: string; transient?: boolean }>): void {
     this.ownedThreads.add(threadId);
     if (cwd !== undefined) this.threadCwds.set(threadId, cwd);
+    if (startup !== undefined) this.threadStartups.set(threadId, startup);
   }
 
   openThreadClient(threadId: string): void {

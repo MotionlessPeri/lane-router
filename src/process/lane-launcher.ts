@@ -15,7 +15,7 @@ import {
 
 const USAGE = [
   "Usage:",
-  "  lane-router-lane new <project>/<lane> --role \"<role description>\" [--model <model>] [--backend claude] [--cwd <dir>] [--terminal <wt|powershell|cmd>]",
+  "  lane-router-lane new <project>/<lane> --role \"<role description>\" [--model <model>] [--backend <claude|codex>] [--profile <codex-profile>] [--cwd <dir>] [--terminal <wt|powershell|cmd>]",
   "  lane-router-lane open <project>/<lane> [--cwd <dir>] [--terminal <wt|powershell|cmd>]",
   "  lane-router-lane archive <project>/<lane>",
   "  lane-router-lane list-archived [<project>]",
@@ -36,7 +36,8 @@ export interface LaneLaunchDependencies {
 
 /**
  * One entry point for the two lane-window verbs. The caller never says which agent a lane runs
- * on: `open` reads the backend from the lane's binding, while `new` creates Claude lanes. Policy
+ * on: `open` reads the backend from the lane's binding, while `new` requires an explicit supported
+ * backend or keeps the historical Claude default. Policy
  * lives here — the Router endpoint this consumes only reports facts.
  *
  * Flow:
@@ -83,9 +84,10 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     // Both halves matter and they are not the same thing: the request starts this window on the
     // model, the prompt is what makes the lane declare it so every later generation inherits it.
     const request = {
-      mode: "prompt", backend: "claude", cwd: invocation.cwd ?? dependencies.cwd ?? process.cwd(),
+      mode: "prompt", backend: invocation.backend, cwd: invocation.cwd ?? dependencies.cwd ?? process.cwd(),
       prompt, statusPath: newStatusPath(dataRoot),
       ...(invocation.model === undefined ? {} : { model: invocation.model }),
+      ...(invocation.profile === undefined ? {} : { profile: invocation.profile }),
     } satisfies TerminalChildRequest;
     await openTerminal(dependencies, invocation.terminal, request, invocation.address!.address, invocation.address!.project);
     return;
@@ -122,6 +124,8 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
   const request = {
     mode: "resume", backend: info.backend, cwd, conversationId: info.conversationId, statusPath: newStatusPath(dataRoot),
     ...(info.model === null ? {} : { model: info.model }),
+    ...(info.backend !== "codex" || info.profile === undefined ? {} : { profile: info.profile }),
+    ...(info.backend !== "codex" || info.modelProvider === undefined ? {} : { modelProvider: info.modelProvider }),
   } satisfies TerminalChildRequest;
   await openTerminal(dependencies, invocation.terminal, request, `${invocation.address!.address} gen${info.generation}`, invocation.address!.project);
 }
@@ -132,7 +136,9 @@ interface ParsedInvocation {
   readonly address: LaneAddress | undefined;
   readonly project: string | undefined;
   readonly role: string;
+  readonly backend: "claude" | "codex";
   readonly model: string | undefined;
+  readonly profile: string | undefined;
   readonly cwd: string | undefined;
   readonly terminal: TerminalChoice | undefined;
 }
@@ -152,13 +158,13 @@ function parseInvocation(args: readonly string[]): ParsedInvocation {
       verb: verb as ParsedInvocation["verb"],
       address: verb === "list-archived" || rawAddress === undefined ? undefined : parseLaneAddress(rawAddress),
       project: verb === "list-archived" ? rawAddress : undefined,
-      role: "", model: undefined, cwd: undefined, terminal: undefined,
+      role: "", backend: "claude", model: undefined, profile: undefined, cwd: undefined, terminal: undefined,
     };
   }
   if ((verb !== "new" && verb !== "open") || !rawAddress) throw new Error(USAGE);
   // `open` takes no --model on purpose: it reopens what the lane already declares, and a flag
   // here would read as changing that declaration while only affecting this one window.
-  const allowed = verb === "new" ? ["--role", "--model", "--backend", "--cwd", "--terminal"] : ["--cwd", "--terminal"];
+  const allowed = verb === "new" ? ["--role", "--model", "--backend", "--profile", "--cwd", "--terminal"] : ["--cwd", "--terminal"];
   const flags = new Map<string, string>();
   for (let index = 0; index < rest.length; index += 2) {
     const key = rest[index];
@@ -170,12 +176,12 @@ function parseInvocation(args: readonly string[]): ParsedInvocation {
   const terminalFlag = flags.get("--terminal");
   const terminal = terminalFlag === undefined ? undefined : parseTerminalChoice(terminalFlag);
   const backend = flags.get("--backend") ?? "claude";
-  if (verb === "new" && backend !== "claude") {
-    throw new Error(`The ${backend} backend is not supported yet; start it manually with lane-router-codex`);
-  }
+  if (backend !== "claude" && backend !== "codex") throw new Error(`--backend must be claude or codex, not ${JSON.stringify(backend)}`);
+  const profile = flags.get("--profile");
+  if (profile !== undefined && backend !== "codex") throw new Error("--profile is only valid with --backend codex");
   const role = flags.get("--role") ?? "";
   if (verb === "new" && !role.trim()) throw new Error("--role is required to create a lane");
-  return { verb, address, project: undefined, role, model: flags.get("--model"), cwd: flags.get("--cwd"), terminal };
+  return { verb, address, project: undefined, role, backend, model: flags.get("--model"), profile, cwd: flags.get("--cwd"), terminal };
 }
 
 function creationPrompt(address: string, role: string, model: string | undefined): string {

@@ -334,6 +334,19 @@ test("rotates onto the model the lane declares, taken from the lookup it already
   expect(plain[0]!.model).toBeUndefined();
 });
 
+test("rotates a Codex lane with its saved profile and provider facts", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  const handoff = newHandoff(dataRoot, "5");
+  const spawned: TerminalChildRequest[] = [];
+  await launchRotation(["codex", "alpha/design", "--handoff-file", handoff], {
+    dataRoot,
+    laneFacts: async () => ({ title: "alpha/design gen5", model: undefined, profile: "glm", modelProvider: "ZAI" }),
+    spawnTerminal: async (request) => { spawned.push(request); writeFileSync(request.statusPath, "ok", "utf8"); },
+  });
+  expect(spawned[0]).toMatchObject({ profile: "glm", modelProvider: "ZAI" });
+});
+
 /** A handoff file with a fresh UUID name, which the launcher requires. */
 function newHandoff(dataRoot: string, digit: string): string {
   const handoffRoot = join(dataRoot, "rotation-handoffs");

@@ -39,7 +39,8 @@ test("rejects malformed invocations without spawning or querying", async () => {
   await expect(launchLane(["new", "bad address", "--role", "r"], deps)).rejects.toThrow(/invalid lane address/iu);
   await expect(launchLane(["new", "alpha/worker"], deps)).rejects.toThrow(/--role/u);
   await expect(launchLane(["new", "alpha/worker", "--role", "   "], deps)).rejects.toThrow(/--role/u);
-  await expect(launchLane(["new", "alpha/worker", "--role", "r", "--backend", "codex"], deps)).rejects.toThrow(/not supported yet/iu);
+  await expect(launchLane(["new", "alpha/worker", "--role", "r", "--backend", "other"], deps)).rejects.toThrow(/backend/iu);
+  await expect(launchLane(["new", "alpha/worker", "--role", "r", "--profile", "glm"], deps)).rejects.toThrow(/profile.*codex/iu);
   await expect(launchLane(["open", "alpha/worker", "--terminal", "konsole"], deps)).rejects.toThrow(/--terminal/u);
   await expect(launchLane(["open", "alpha/worker", "--role", "r"], deps)).rejects.toThrow(/Usage/u);
   expect(deps.spawnTerminal).not.toHaveBeenCalled();
@@ -199,6 +200,48 @@ test("reopens a lane on the model that lane declares", async () => {
   const undeclared = fakes({ queryResumeInfo: vi.fn(async () => bound(null)) });
   await launchLane(["open", "alpha/worker"], undeclared);
   expect((undeclared.spawnTerminal.mock.calls[0]![0] as TerminalChildRequest).model).toBeUndefined();
+});
+
+test("new explicitly preserves the Claude backend contract", async () => {
+  const implicit = fakes();
+  const explicit = fakes();
+  await launchLane(["new", "alpha/worker", "--role", "Owns the worker seam.", "--model", "opus"], implicit);
+  await launchLane(["new", "alpha/worker", "--role", "Owns the worker seam.", "--model", "opus", "--backend", "claude"], explicit);
+
+  const implicitRequest = implicit.spawnTerminal.mock.calls[0]![0] as TerminalChildRequest;
+  const explicitRequest = explicit.spawnTerminal.mock.calls[0]![0] as TerminalChildRequest;
+  expect(explicitRequest).toEqual(expect.objectContaining({
+    ...implicitRequest,
+    statusPath: expect.any(String),
+  }));
+});
+
+test("new starts Codex through the shared terminal plumbing with its profile and declaration", async () => {
+  const deps = fakes();
+  await launchLane([
+    "new", "alpha/glm", "--role", "Owns the GLM provider seam.", "--backend", "codex",
+    "--profile", "glm", "--model", "glm-5.3",
+  ], deps);
+
+  const [request] = deps.spawnTerminal.mock.calls[0]! as [TerminalChildRequest, NodeJS.ProcessEnv];
+  expect(request).toMatchObject({
+    mode: "prompt", backend: "codex", cwd: "D:\\caller", profile: "glm", model: "glm-5.3",
+  });
+  if (request.mode !== "prompt") throw new Error("expected a prompt request");
+  expect(request.prompt).toContain("approved creation of the new lane alpha/glm");
+  expect(request.prompt).toContain("exactly this role_description:\n\nOwns the GLM provider seam.");
+  expect(request.prompt).toContain("lane_attach_current with address `alpha/glm` and model `glm-5.3`");
+  expect(request.prompt).not.toContain("modelProvider");
+});
+
+test("reopens a Codex lane with its saved profile and provider", async () => {
+  const deps = fakes({ queryResumeInfo: vi.fn(async () => ({
+    state: "bound" as const, backend: "codex" as const, conversationId: "thread-1", cwd: "D:\\project",
+    generation: 3, reach: reach("no_channel"), restorePresence: "offline" as const, model: null,
+    profile: "glm", modelProvider: "ZAI",
+  })) });
+  await launchLane(["open", "alpha/worker"], deps);
+  expect(deps.spawnTerminal.mock.calls[0]![0]).toMatchObject({ profile: "glm", modelProvider: "ZAI" });
 });
 
 test("refuses --model where there is no lane to declare it on", async () => {

@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCodexRuntime } from "../adapters/codex/codex-runtime.js";
 import { ClaudeBackend } from "../backends/claude-backend.js";
 import { BackendRegistry } from "../router/backend.js";
-import { dashboardSnapshot } from "../router/dashboard.js";
+import { dashboardSnapshot, type DashboardLauncherChoices } from "../router/dashboard.js";
 import { openRouterDatabase } from "../router/database.js";
 import { MailboxStore } from "../router/mailbox-store.js";
 import { NotificationPump } from "../router/notification-pump.js";
@@ -15,6 +15,8 @@ import { RouterCore } from "../router/router-core.js";
 import { RouterStateStore } from "../router/state-store.js";
 import { ClaudeSessionLocator } from "./claude-session-locator.js";
 import { ConversationRestorer } from "./conversation-restorer.js";
+import { DashboardLaneOpener } from "./dashboard-lane-opener.js";
+import { listCodexModelProviders, listCodexProfiles } from "./codex-profiles.js";
 import { ToolService } from "../tools/tool-service.js";
 import { ClaudeChannelHub, LocalRouterServer } from "./local-server.js";
 import { RuntimeLock } from "./runtime-lock.js";
@@ -44,6 +46,7 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
   let closed = false;
   try {
     await codex.start();
+    const launcherChoices = await codexLauncherChoices(codex.client);
     const backends = new BackendRegistry([claudeBackend, codex.backend]);
     const pump = new NotificationPump(state, mailbox, backends);
     const restore = new ConversationRestorer({
@@ -53,6 +56,15 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
       dataRoot,
     });
     const core = new RouterCore({ state, mailbox, backends, pump, restore, newId: () => randomUUID(), now: Date.now });
+    const dashboardOpener = new DashboardLaneOpener({
+      state,
+      restore,
+      overrideChoices: {
+        models: launcherChoices.models.map((model) => model.id),
+        profiles: launcherChoices.profiles.map((profile) => profile.name),
+        modelProviders: launcherChoices.modelProviders,
+      },
+    });
     tools = new ToolService(core);
     server = new LocalRouterServer({
       tools, codex, claude: claudeHub, instanceId: randomUUID(),
@@ -60,7 +72,8 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
       resumeInfo: (address) => core.resumeInfo(address),
       archiveLane: (address) => core.archiveLane(address),
       listArchivedLanes: (project) => core.listArchivedLanes(project),
-      dashboardState: (router) => dashboardSnapshot({ state, mailbox, backends, now: Date.now }, router),
+      dashboardState: (router) => dashboardSnapshot({ state, mailbox, backends, now: Date.now, launcherChoices }, router),
+      dashboardOpen: (input) => dashboardOpener.open(input),
     });
     mailbox.reconcile(state);
     const discovery = await server.start();
@@ -80,6 +93,33 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     database.close();
     lock.release();
   } };
+}
+
+async function codexLauncherChoices(client: { request(method: string, params: unknown): Promise<unknown> }): Promise<DashboardLauncherChoices> {
+  const models: DashboardLauncherChoices["models"][number][] = [];
+  let cursor: string | undefined;
+  do {
+    const response = await client.request("model/list", { includeHidden: true, ...(cursor === undefined ? {} : { cursor }) });
+    const data = responseProperty(response, "data");
+    if (!Array.isArray(data)) throw new Error("Codex App Server model/list returned no model array");
+    for (const entry of data) {
+      if (typeof entry !== "object" || entry === null) throw new Error("Codex App Server model/list returned an invalid model");
+      const model = entry as Record<string, unknown>;
+      if (typeof model.id !== "string" || typeof model.displayName !== "string" || typeof model.hidden !== "boolean") {
+        throw new Error("Codex App Server model/list returned an invalid model");
+      }
+      models.push({ id: model.id, displayName: model.displayName, hidden: model.hidden });
+    }
+    const next = responseProperty(response, "nextCursor");
+    if (next !== null && typeof next !== "string") throw new Error("Codex App Server model/list returned an invalid cursor");
+    cursor = next ?? undefined;
+  } while (cursor !== undefined && models.length < 10_000);
+  return { models, profiles: listCodexProfiles(), modelProviders: listCodexModelProviders() };
+}
+
+function responseProperty(value: unknown, property: string): unknown {
+  if (typeof value !== "object" || value === null) throw new Error("Codex App Server model/list returned no object");
+  return (value as Record<string, unknown>)[property];
 }
 
 function writeDiscovery(path: string, value: unknown): void {

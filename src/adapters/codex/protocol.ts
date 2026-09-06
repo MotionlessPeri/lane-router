@@ -13,7 +13,7 @@ export interface DynamicToolCallParams {
   readonly arguments: unknown;
 }
 
-export type ThreadStatusType = "idle" | "active" | "notLoaded";
+export type ThreadStatusType = "idle" | "active" | "notLoaded" | "systemError";
 export type TurnStatus = "completed" | "interrupted" | "failed" | "inProgress";
 export interface CodexTurn { readonly id: string; readonly status: TurnStatus; readonly items: readonly unknown[] }
 export interface CodexThread { readonly id: string; readonly status: Readonly<{ type: ThreadStatusType }>; readonly turns: readonly CodexTurn[] }
@@ -87,7 +87,7 @@ function decodeTurn(input: unknown, label: string): CodexTurn {
   return { id: value.id, status: value.status, items: value.items };
 }
 
-function isThreadStatus(value: unknown): value is ThreadStatusType { return value === "idle" || value === "active" || value === "notLoaded"; }
+function isThreadStatus(value: unknown): value is ThreadStatusType { return value === "idle" || value === "active" || value === "notLoaded" || value === "systemError"; }
 function isTurnStatus(value: unknown): value is TurnStatus { return value === "completed" || value === "interrupted" || value === "failed" || value === "inProgress"; }
 
 function decodeDynamicToolCall(input: unknown): DynamicToolCallParams {

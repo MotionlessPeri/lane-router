@@ -51,6 +51,8 @@ export async function launchRotation(args: readonly string[], dependencies: Rota
   const request = {
     mode: "prompt", backend, cwd: dependencies.cwd ?? process.cwd(), prompt, statusPath,
     ...(facts.model === undefined ? {} : { model: facts.model }),
+    ...(backend !== "codex" || facts.profile === undefined ? {} : { profile: facts.profile }),
+    ...(backend !== "codex" || facts.modelProvider === undefined ? {} : { modelProvider: facts.modelProvider }),
   } satisfies TerminalChildRequest;
   const title = facts.title;
   const environment = childEnvironment(request, process.env, title, resolved.shell, parsedAddress.project);
@@ -82,6 +84,8 @@ export interface LaneFacts {
   readonly title: string;
   /** The model the lane declares, undefined when it declares none. */
   readonly model: string | undefined;
+  readonly profile?: string;
+  readonly modelProvider?: string;
 }
 
 /**
@@ -101,12 +105,14 @@ export async function laneFacts(address: string, dataRoot: string): Promise<Lane
         context: { backend: "claude", conversationId: "lane-router-rotate", requestKey: `rotate:${randomUUID()}` },
       }),
     });
-    const body = await response.json() as { result?: Array<{ address: string; model: string | null; binding: { generation: number } | null }> };
+    const body = await response.json() as { result?: Array<{ address: string; model: string | null; binding: { generation: number; profile?: string; modelProvider?: string } | null }> };
     const entry = body.result?.find((current) => current.address === address);
     const generation = entry?.binding?.generation;
     return {
       title: generation === undefined ? address : `${address} gen${generation + 1}`,
       model: entry?.model ?? undefined,
+      ...(entry?.binding?.profile === undefined ? {} : { profile: entry.binding.profile }),
+      ...(entry?.binding?.modelProvider === undefined ? {} : { modelProvider: entry.binding.modelProvider }),
     };
   } catch { return { title: address, model: undefined }; }
 }

@@ -22,9 +22,10 @@ export function childCommand(
     // Both codex modes go through the launcher, which owns Router discovery and TUI wiring.
     // codex has no session display-name flag, so the window keeps only the title escape below.
     const model = request.model ? ["--model", request.model] : [];
+    const profile = request.profile ? ["--profile", request.profile] : [];
     return request.mode === "prompt"
-      ? { executable: process.execPath, args: [join(here, "codex-launcher.js"), ...model, "--prompt", request.prompt] }
-      : { executable: process.execPath, args: [join(here, "codex-launcher.js"), ...model, "resume", request.conversationId] };
+      ? { executable: process.execPath, args: [join(here, "codex-launcher.js"), ...profile, ...model, "--prompt", request.prompt] }
+      : { executable: process.execPath, args: [join(here, "codex-launcher.js"), ...profile, ...model, "resume", request.conversationId] };
   }
   // Claude renders its session display name into the terminal title, overwriting whatever the
   // window was opened with — so the lane address travels as that very display name. --name also

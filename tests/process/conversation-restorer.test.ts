@@ -112,3 +112,29 @@ test("leaves the restore request without a model when the lane declares none", a
     expect(x.launch.mock.calls.at(-1)![0]).not.toHaveProperty("model");
   } finally { x.database.close(); }
 });
+
+test("replays a Codex binding's saved profile and provider metadata", async () => {
+  const x = setup("codex", { profile: "glm", modelProvider: "ZAI" });
+  try {
+    await expect(x.restorer.restore(x.binding)).resolves.toEqual({ status: "launch_requested" });
+    expect(x.launch.mock.calls[0]![0]).toMatchObject({ profile: "glm", modelProvider: "ZAI" });
+  } finally { x.database.close(); }
+});
+
+test("applies model and provider overrides to one launch without changing stored declarations", async () => {
+  const x = setup("codex", { profile: "gpt", modelProvider: "openai" });
+  try {
+    x.state.updateLaneModel("alpha/design", "gpt-5.6-sol", 3);
+    await expect(x.restorer.restore(x.binding, {
+      model: "glm-5.3", profile: "glm", modelProvider: "ZAI",
+    })).resolves.toEqual({ status: "launch_requested" });
+
+    expect(x.launch.mock.calls[0]![0]).toMatchObject({
+      model: "glm-5.3", profile: "glm", modelProvider: "ZAI", transientStartup: true,
+    });
+    expect(x.state.requireLane("alpha/design").model).toBe("gpt-5.6-sol");
+    expect(x.state.activeBindingForLane("alpha/design")).toMatchObject({
+      startup: { profile: "gpt", modelProvider: "openai" },
+    });
+  } finally { x.database.close(); }
+});

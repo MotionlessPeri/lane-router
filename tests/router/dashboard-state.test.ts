@@ -23,7 +23,8 @@ const reach: ReachSnapshot = {
 
 /** Only the parts a snapshot reads. `reach` is the whole point: it exists nowhere but in here. */
 class FakeBackend implements PlatformBackend {
-  readonly name = "claude" as const;
+  readonly name: "claude" | "codex";
+  constructor(name: "claude" | "codex" = "claude") { this.name = name; }
   async notifyNormal(): Promise<"sent"> { return "sent"; }
   async notifyCorrection(): Promise<"sent"> { return "sent"; }
   async waitUntilReplaceable(): Promise<void> {}
@@ -41,9 +42,9 @@ function setup() {
   const database = openRouterDatabase(":memory:");
   const state = new RouterStateStore(database);
   const mailbox = new MailboxStore(root);
-  const backends = new BackendRegistry([new FakeBackend()]);
+  const backends = new BackendRegistry([new FakeBackend(), new FakeBackend("codex")]);
   const snapshot = (limit?: number) => dashboardSnapshot({ state, mailbox, backends, now: () => 9_999 }, ROUTER, limit);
-  return { root, database, state, mailbox, snapshot };
+  return { root, database, state, mailbox, backends, snapshot };
 }
 
 type Setup = ReturnType<typeof setup>;
@@ -106,6 +107,50 @@ describe("dashboardSnapshot", () => {
       expect(idle!.binding).toBeNull();
       expect(idle!.reach).toBeNull();
       expect(idle!.pending).toEqual({ count: 0, oldestCreatedAt: null });
+    } finally { x.database.close(); }
+  });
+
+  it("publishes the facts the launcher needs to select and prefill a lane", () => {
+    const x = setup();
+    try {
+      x.state.createLane({ address: "alpha/glm", project: "alpha", roleDescription: "GLM", now: 1 });
+      x.state.createBinding({
+        id: "binding-glm", laneAddress: "alpha/glm", backend: "codex", conversationId: "thread-glm",
+        generation: 6, startup: { profile: "glm", modelProvider: "ZAI" }, now: 2,
+      });
+
+      expect(x.snapshot().lanes[0]).toMatchObject({
+        restorePresence: "offline",
+        binding: {
+          backend: "codex",
+          profile: "glm",
+          modelProvider: "ZAI",
+        },
+      });
+    } finally { x.database.close(); }
+  });
+
+  it("publishes the constrained choices behind the launcher menus", () => {
+    const x = setup();
+    try {
+      addLane(x, "alpha/offline", { bound: true });
+      const launcher = {
+        models: [
+          { id: "glm-5.3", displayName: "GLM 5.3", hidden: false },
+          { id: "gpt-6-astra", displayName: "GPT 6 Astra", hidden: true },
+        ],
+        profiles: [
+          { name: "glm", model: "glm-5.3", modelProvider: "ZAI" },
+          { name: "gpt", model: "gpt-5.6-sol", modelProvider: "openai" },
+        ],
+        modelProviders: ["openai", "ZAI"],
+      };
+
+      const state = dashboardSnapshot(
+        { state: x.state, mailbox: x.mailbox, backends: x.backends, now: () => 9_999, launcherChoices: launcher },
+        ROUTER,
+      );
+      expect(state.launcher).toEqual(launcher);
     } finally { x.database.close(); }
   });
 
@@ -172,7 +217,7 @@ describe("dashboardSnapshot", () => {
       expect(state.capturedAt).toBe(9_999);
       expect(state.router).toEqual({ ...ROUTER, schemaVersion: ROUTER_SCHEMA_VERSION });
       expect(Object.keys(state.lanes[0]!).sort())
-        .toEqual(["address", "archived", "binding", "model", "pending", "project", "reach", "roleDescription"]);
+        .toEqual(["address", "archived", "binding", "model", "pending", "project", "reach", "restorePresence", "roleDescription"]);
       expect(Object.keys(state.lanes[0]!.binding!).sort())
         .toEqual(["attachedAt", "backend", "conversationId", "cwd", "generation"]);
       // No owed-ack duration: it is capturedAt − createdAt, and a second copy of a number is a

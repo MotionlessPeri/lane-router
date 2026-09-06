@@ -343,6 +343,12 @@ test("capability gate rejects thread/start without dynamicTools", async () => {
   await expect(gate.verify(fakeCommand({ FAKE_CODEX_SCHEMA: "missing-dynamic-tools" }))).rejects.toBeInstanceOf(CodexCapabilityError);
 });
 
+test.each(["bad-start-provider", "bad-resume-provider"])("capability gate rejects %s", async (schemaMode) => {
+  const cacheDir = await mkdtemp(join(tmpdir(), "lane-router-capability-provider-")); dirs.push(cacheDir);
+  const gate = new CodexCapabilityGate({ cacheDir });
+  await expect(gate.verify(fakeCommand({ FAKE_CODEX_SCHEMA: schemaMode }))).rejects.toBeInstanceOf(CodexCapabilityError);
+});
+
 test.each(["bad-thread-status", "bad-turn-items", "bad-dynamic-output"])("capability gate rejects structurally invalid consumed response shape: %s", async (schemaMode) => {
   const cacheDir = await mkdtemp(join(tmpdir(), "lane-router-capability-response-")); dirs.push(cacheDir);
   const gate = new CodexCapabilityGate({ cacheDir });

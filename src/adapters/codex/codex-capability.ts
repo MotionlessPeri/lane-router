@@ -115,6 +115,9 @@ async function validateSchema(root: string): Promise<string> {
   }
   for (const relative of ["v2/TurnStartParams.json", "v2/TurnSteerParams.json"]) { const schema = requiredSchema(schemas, relative); assertType(propertySchema(schema, "input", schema), schema, "array", `${relative}.input`); }
   const startSchema = requiredSchema(schemas, "v2/ThreadStartParams.json");
+  assertType(propertySchema(startSchema, "modelProvider", startSchema), startSchema, "string", "v2/ThreadStartParams.json.modelProvider");
+  const resumeSchema = requiredSchema(schemas, "v2/ThreadResumeParams.json");
+  assertType(propertySchema(resumeSchema, "modelProvider", resumeSchema), resumeSchema, "string", "v2/ThreadResumeParams.json.modelProvider");
   if (!containsObjectVariant(propertySchema(startSchema, "dynamicTools", startSchema), startSchema, ["type", "name", "description", "inputSchema"], "type", "function")) throw new CodexCapabilityError("ThreadStartParams dynamicTools lacks the function tool discriminator/shape");
   for (const relative of ["v2/ThreadStartResponse.json", "v2/ThreadResumeResponse.json", "v2/ThreadReadResponse.json"]) {
     const response = requiredSchema(schemas, relative); assertObjectFields(response, ["thread"], relative);

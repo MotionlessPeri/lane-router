@@ -1,4 +1,4 @@
-import type { BackendRegistry } from "./backend.js";
+import type { BackendRegistry, RestorePresence } from "./backend.js";
 import type { MailboxStore } from "./mailbox-store.js";
 import { ROUTER_SCHEMA_VERSION } from "./schema.js";
 import type { RouterStateStore } from "./state-store.js";
@@ -24,6 +24,8 @@ export interface DashboardBinding {
   readonly generation: number;
   readonly cwd: string | null;
   readonly attachedAt: number;
+  readonly profile?: string;
+  readonly modelProvider?: string;
 }
 
 export interface DashboardLane {
@@ -35,6 +37,8 @@ export interface DashboardLane {
   readonly binding: DashboardBinding | null;
   /** Null when the lane is unbound, or when this Router does not run that backend at all. */
   readonly reach: ReachSnapshot | null;
+  /** Null for the same reasons as reach: without a binding and backend there is no presence claim. */
+  readonly restorePresence: RestorePresence | null;
   readonly pending: { readonly count: number; readonly oldestCreatedAt: number | null };
 }
 
@@ -53,12 +57,31 @@ export interface DashboardMessage {
   readonly body: string | null;
 }
 
+export interface DashboardLauncherModel {
+  readonly id: string;
+  readonly displayName: string;
+  readonly hidden: boolean;
+}
+
+export interface DashboardLauncherProfile {
+  readonly name: string;
+  readonly model?: string;
+  readonly modelProvider?: string;
+}
+
+export interface DashboardLauncherChoices {
+  readonly models: readonly DashboardLauncherModel[];
+  readonly profiles: readonly DashboardLauncherProfile[];
+  readonly modelProviders: readonly string[];
+}
+
 export interface DashboardSnapshot {
   readonly capturedAt: number;
   readonly router: DashboardRouter & { readonly schemaVersion: number };
   readonly lanes: readonly DashboardLane[];
   readonly messages: readonly DashboardMessage[];
   readonly truncated: { readonly messages: boolean; readonly limit: number };
+  readonly launcher?: DashboardLauncherChoices;
 }
 
 interface DashboardDependencies {
@@ -66,6 +89,7 @@ interface DashboardDependencies {
   readonly mailbox: MailboxStore;
   readonly backends: BackendRegistry;
   readonly now: () => number;
+  readonly launcherChoices?: DashboardLauncherChoices;
 }
 
 /**
@@ -88,6 +112,7 @@ export function dashboardSnapshot(
     router: { ...router, schemaVersion: ROUTER_SCHEMA_VERSION },
     lanes: state.listAllLanes().map((lane) => {
       const binding = state.activeBindingForLane(lane.address);
+      const backend = binding === undefined ? undefined : backends.find(binding.backend);
       const waiting = backlog.get(lane.address);
       return {
         address: lane.address,
@@ -101,10 +126,13 @@ export function dashboardSnapshot(
           generation: binding.generation,
           cwd: binding.cwd,
           attachedAt: binding.activeAt,
+          ...(typeof binding.startup.profile === "string" ? { profile: binding.startup.profile } : {}),
+          ...(typeof binding.startup.modelProvider === "string" ? { modelProvider: binding.startup.modelProvider } : {}),
         },
         // find, not require, for the reason lane_directory uses it: a read must not throw over a
         // backend this Router does not run, and no backend means no reachability claim at all.
-        reach: binding === undefined ? null : backends.find(binding.backend)?.reach(binding) ?? null,
+        reach: binding === undefined || backend === undefined ? null : backend.reach(binding),
+        restorePresence: binding === undefined || backend === undefined ? null : backend.restorePresence(binding),
         pending: { count: waiting?.count ?? 0, oldestCreatedAt: waiting?.oldestCreatedAt ?? null },
       };
     }),
@@ -123,6 +151,7 @@ export function dashboardSnapshot(
     })),
     // Said out loud, because a list that was cut and does not say so gets read as the whole of it.
     truncated: { messages: state.countMessages() > limit, limit },
+    ...(dependencies.launcherChoices === undefined ? {} : { launcher: dependencies.launcherChoices }),
   };
 }
 

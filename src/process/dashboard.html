@@ -21,6 +21,13 @@
   details { margin-top: .75rem; }
   summary { cursor: pointer; color: var(--dim); }
   .empty { color: var(--dim); padding: .4rem 0; }
+  .project { margin: .65rem 0; }
+  .project h3 { font-size: 13px; margin: 0 0 .25rem; }
+  .lane-choice, .override-grid { display: block; margin: .2rem 0; }
+  .override-grid { display: grid; grid-template-columns: 9rem minmax(12rem, 24rem); gap: .35rem .6rem; align-items: center; }
+  .override-grid label { color: var(--dim); }
+  .override-grid input, .override-grid select { font: inherit; padding: .15rem .3rem; }
+  #launcher-status { margin-top: .5rem; white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -33,6 +40,9 @@
 <h2>lane 拓扑</h2>
 <div id="lanes"></div>
 
+<h2>恢复 lane</h2>
+<div id="launcher"></div>
+
 <h2>积压队列</h2>
 <div id="backlog"></div>
 
@@ -43,6 +53,7 @@
 (function () {
   "use strict";
   var POLL_MS = 5000;
+  var currentSnapshot = null;
 
   /**
    * Everything this page displays was written by another lane or by a person: role descriptions,
@@ -133,6 +144,167 @@
     replace(document.getElementById("lanes"), host);
   }
 
+  function launcherState() {
+    const choices = new Map();
+    document.querySelectorAll("input[data-lane-checkbox]").forEach((checkbox) => {
+      choices.set((checkbox).value, (checkbox).checked);
+    });
+    const overrides = new Map();
+    document.querySelectorAll("[data-override]").forEach((control) => {
+      overrides.set(control.getAttribute("data-override"), control.value);
+    });
+    const status = document.getElementById("launcher-status");
+    const active = document.activeElement;
+    return {
+      choices,
+      overrides,
+      statusText: status ? status.textContent : "",
+      statusClassName: status ? status.className : "",
+      activeOverride: active && active.matches("[data-override]")
+        ? active.getAttribute("data-override")
+        : null,
+    };
+  }
+
+  function launcherLane(lane, previous) {
+    const choice = el("label", "lane-choice");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.setAttribute("data-lane-checkbox", lane.address);
+    checkbox.value = lane.address;
+    checkbox.checked = previous.choices.has(lane.address)
+      ? previous.choices.get(lane.address) && lane.binding !== null
+      : lane.binding !== null && lane.restorePresence === "offline";
+    checkbox.disabled = lane.binding === null;
+    choice.appendChild(checkbox);
+    const startup = lane.binding && lane.binding.backend === "codex"
+      ? " · " + (lane.binding.profile || "—") + " / " + (lane.binding.modelProvider || "—")
+      : "";
+    choice.appendChild(document.createTextNode(
+      " " + lane.address + " · " + (lane.binding ? lane.binding.backend : "未绑定")
+      + startup + " · " + (lane.restorePresence || "无 backend") + " · " + (lane.model || "未声明模型")
+    ));
+    return choice;
+  }
+
+  function syncProjectCheckbox(group, projectCheckbox) {
+    const checkboxes = [...group.querySelectorAll("input[data-lane-checkbox]")];
+    const selectable = checkboxes.filter((checkbox) => !checkbox.disabled);
+    projectCheckbox.checked = selectable.length > 0 && selectable.every((checkbox) => checkbox.checked);
+    projectCheckbox.indeterminate = !projectCheckbox.checked && selectable.some((checkbox) => checkbox.checked);
+  }
+
+  function selectOption(select, value, text) {
+    const option = el("option", null, text);
+    option.value = value;
+    select.appendChild(option);
+  }
+
+  function launcherSelect(id, label, overrideName, options, previous) {
+    const field = el("label", null, label);
+    field.setAttribute("for", id);
+    const select = document.createElement("select");
+    select.id = id;
+    select.name = id;
+    select.setAttribute("data-override", overrideName);
+    selectOption(select, "", "默认（不覆盖）");
+    options.forEach((option) => selectOption(select, option.value, option.label));
+    const preserved = previous.overrides.get(overrideName) || "";
+    if ([...select.options].some((option) => option.value === preserved)) select.value = preserved;
+    return { field, select };
+  }
+
+  function renderLauncher(snapshot) {
+    const previous = launcherState();
+    const host = document.createElement("div");
+    if (snapshot.actionToken === undefined) {
+      host.appendChild(el("div", "empty", "当前 Router 未启用网页恢复。"));
+      const disabledButton = document.createElement("button");
+      disabledButton.id = "open-selected";
+      disabledButton.type = "button";
+      disabledButton.disabled = true;
+      disabledButton.textContent = "打开选中 lane";
+      host.appendChild(disabledButton);
+      return replace(document.getElementById("launcher"), host);
+    }
+
+    const projects = new Map();
+    snapshot.lanes.filter((lane) => !lane.archived).forEach((lane) => {
+      if (!projects.has(lane.project)) projects.set(lane.project, []);
+      projects.get(lane.project).push(lane);
+    });
+    projects.forEach((lanes, project) => {
+      const group = el("section", "project");
+      group.setAttribute("data-project", project);
+      const projectChoice = el("label", null);
+      const projectCheckbox = document.createElement("input");
+      projectCheckbox.type = "checkbox";
+      projectCheckbox.setAttribute("data-project-checkbox", project);
+      projectCheckbox.addEventListener("change", () => {
+        group.querySelectorAll("input[data-lane-checkbox]").forEach((checkbox) => {
+          (checkbox).checked = projectCheckbox.checked && !checkbox.disabled;
+        });
+        syncProjectCheckbox(group, projectCheckbox);
+      });
+      projectChoice.appendChild(projectCheckbox);
+      projectChoice.appendChild(document.createTextNode(" " + project));
+      const heading = el("h3", null);
+      heading.appendChild(projectChoice);
+      group.appendChild(heading);
+      lanes.forEach((lane) => group.appendChild(launcherLane(lane, previous)));
+      group.querySelectorAll("input[data-lane-checkbox]").forEach((checkbox) => {
+        checkbox.addEventListener("change", () => syncProjectCheckbox(group, projectCheckbox));
+      });
+      syncProjectCheckbox(group, projectCheckbox);
+      host.appendChild(group);
+    });
+
+    const overrides = el("div", "override-grid");
+    const model = launcherSelect("override-model", "model", "model", (snapshot.launcher?.models ?? []).map((entry) => ({
+      value: entry.id,
+      label: entry.displayName + (entry.hidden ? "（hidden）" : ""),
+    })), previous);
+    const profiles = snapshot.launcher?.profiles ?? [];
+    const profile = launcherSelect("override-profile", "Codex profile", "profile", profiles.map((entry) => ({
+      value: entry.name,
+      label: entry.name + (entry.modelProvider === undefined ? "" : ` · ${entry.modelProvider}`),
+    })), previous);
+    const provider = launcherSelect("override-provider", "modelProvider", "modelProvider", (snapshot.launcher?.modelProviders ?? []).map((value) => ({
+      value,
+      label: value,
+    })), previous);
+    profile.select.addEventListener("change", () => {
+      const selected = profiles.find((entry) => entry.name === profile.select.value);
+      model.select.value = selected?.model ?? "";
+      provider.select.value = selected?.modelProvider ?? "";
+    });
+    overrides.appendChild(model.field);
+    overrides.appendChild(model.select);
+    overrides.appendChild(profile.field);
+    overrides.appendChild(profile.select);
+    overrides.appendChild(provider.field);
+    overrides.appendChild(provider.select);
+    host.appendChild(overrides);
+
+    const button = document.createElement("button");
+    button.id = "open-selected";
+    button.type = "button";
+    button.textContent = "打开选中 lane";
+    button.addEventListener("click", openSelected);
+    host.appendChild(button);
+    const status = el("div", null, null);
+    status.id = "launcher-status";
+    status.textContent = previous.statusText;
+    status.className = previous.statusClassName;
+    host.appendChild(status);
+    replace(document.getElementById("launcher"), host);
+    if (previous.activeOverride !== null) {
+      document.querySelectorAll("[data-override]").forEach((control) => {
+        if (control.getAttribute("data-override") === previous.activeOverride) control.focus();
+      });
+    }
+  }
+
   function renderBacklog(snapshot) {
     // Sorted by the oldest waiting message, not by count: ten fresh messages are not the problem
     // that one message nobody has touched for two days is.
@@ -181,11 +353,13 @@
   }
 
   function render(snapshot) {
+    currentSnapshot = snapshot;
     document.getElementById("router").textContent =
       "pid " + snapshot.router.pid + " · 端口 " + snapshot.router.port + " · schema v" + snapshot.router.schemaVersion;
     document.getElementById("status").textContent = "快照 " + clock(snapshot.capturedAt);
     document.getElementById("status").className = "dim";
     renderLanes(snapshot);
+    renderLauncher(snapshot);
     renderBacklog(snapshot);
     renderMessages(snapshot);
   }
@@ -199,6 +373,34 @@
       // about how current it is, and staleness is the one thing it exists to rule out.
       var status = document.getElementById("status");
       status.textContent = "取不到快照：" + (error && error.message ? error.message : "未知错误");
+      status.className = "warn";
+    });
+  }
+
+  function openSelected() {
+    if (!currentSnapshot || currentSnapshot.actionToken === undefined) return;
+    const addresses = [...document.querySelectorAll("input[data-lane-checkbox]")].
+      filter((checkbox) => checkbox.checked).
+      map((checkbox) => checkbox.value);
+    const override = {};
+    document.querySelectorAll("[data-override]").forEach((control) => {
+      if (control.value.trim() !== "") override[control.getAttribute("data-override")] = control.value.trim();
+    });
+    const status = document.getElementById("launcher-status");
+    status.textContent = "正在请求打开 " + addresses.length + " 条 lane ...";
+    fetch("/dashboard/lanes/open", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-lane-router-action": "open" },
+      body: JSON.stringify({ addresses, override, actionToken: currentSnapshot.actionToken }),
+    }).then((response) => {
+      if (!response.ok) throw new Error("打开接口返回 " + response.status);
+      return response.json();
+    }).then((result) => {
+      status.textContent = result.results.map((entry) =>
+        entry.address + "：" + entry.status + (entry.message ? "（" + entry.message + "）" : "")
+      ).join("\\n") || "没有返回结果。";
+    }).catch((error) => {
+      status.textContent = "打开失败：" + (error && error.message ? error.message : "未知错误");
       status.className = "warn";
     });
   }

@@ -24,9 +24,12 @@ if (args[0] === "app-server" && args[1] === "generate-json-schema") {
   await emit(`${out}/v1/InitializeParams.json`, { type: "object", required: ["clientInfo"], properties: { clientInfo: { type: "object" } } });
   await emit(`${out}/v1/InitializeResponse.json`, { type: "object", required: ["codexHome", "platformFamily", "platformOs", "userAgent"], properties: Object.fromEntries(["codexHome", "platformFamily", "platformOs", "userAgent"].map((name) => [name, { type: "string" }])) });
   const dynamicTools = process.env.FAKE_CODEX_SCHEMA !== "missing-dynamic-tools" ? { dynamicTools: { type: ["array", "null"], items: { oneOf: [{ type: "object", required: ["type", "name", "description", "inputSchema"], properties: { type: { enum: ["function"] }, name: { type: "string" }, description: { type: "string" }, inputSchema: {} } }] } } } : {};
-  await emit(`${out}/v2/ThreadStartParams.json`, { type: "object", properties: dynamicTools });
-  for (const [name, required] of Object.entries({ ThreadResumeParams: ["threadId"], ThreadReadParams: ["threadId"], TurnStartParams: ["input", "threadId"], TurnSteerParams: ["expectedTurnId", "input", "threadId"] }))
-    await emit(`${out}/v2/${name}.json`, { type: "object", required, properties: Object.fromEntries(required.map((field) => [field, field === "input" ? { type: "array" } : { type: "string" }])) });
+  await emit(`${out}/v2/ThreadStartParams.json`, { type: "object", properties: { ...dynamicTools, ...(schemaMode === "bad-start-provider" ? {} : { modelProvider: { type: ["string", "null"] } }) } });
+  for (const [name, required] of Object.entries({ ThreadResumeParams: ["threadId"], ThreadReadParams: ["threadId"], TurnStartParams: ["input", "threadId"], TurnSteerParams: ["expectedTurnId", "input", "threadId"] })) {
+    const properties = Object.fromEntries(required.map((field) => [field, field === "input" ? { type: "array" } : { type: "string" }]));
+    if (name === "ThreadResumeParams" && schemaMode !== "bad-resume-provider") properties.modelProvider = { type: ["string", "null"] };
+    await emit(`${out}/v2/${name}.json`, { type: "object", required, properties });
+  }
   const threadStatus = schemaMode === "bad-thread-status"
     ? { type: "object", properties: { renamed: { enum: ["idle", "active", "notLoaded"] } } }
     : { type: "object", required: ["type"], properties: { type: { enum: ["idle", "active", "notLoaded"] } } };

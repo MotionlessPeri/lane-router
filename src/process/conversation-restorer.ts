@@ -14,6 +14,12 @@ export type RestoreResult =
   | { readonly status: "launch_requested" | "skipped_online" | "skipped_launching" }
   | { readonly status: "failed"; readonly reason: "session_not_found" | "invalid_startup_cwd" | "backend_unavailable" | "terminal_launch_failed"; readonly message: string };
 
+export interface RestoreOverride {
+  readonly model?: string;
+  readonly profile?: string;
+  readonly modelProvider?: string;
+}
+
 interface RestorerDependencies {
   readonly state: RouterStateStore;
   readonly backends: { require(name: "codex" | "claude"): Pick<PlatformBackend, "restorePresence"> };
@@ -30,7 +36,7 @@ export class ConversationRestorer {
   private readonly reservations = new Map<string, number>();
   constructor(private readonly dependencies: RestorerDependencies) {}
 
-  async restore(binding: BindingRecord): Promise<RestoreResult> {
+  async restore(binding: BindingRecord, override: RestoreOverride = {}): Promise<RestoreResult> {
     const now = (this.dependencies.now ?? Date.now)();
     const reservedUntil = this.reservations.get(binding.id) ?? 0;
     if (reservedUntil > now) return { status: "skipped_launching" };
@@ -48,10 +54,18 @@ export class ConversationRestorer {
       // The lane's declaration, not the binding's: a model belongs to the role, so reopening
       // through the Router honours the same declaration the CLI paths do.
       const declared = this.dependencies.state.requireLane(binding.laneAddress).model;
+      const model = override.model ?? declared;
+      const profile = override.profile ?? (typeof binding.startup.profile === "string" ? binding.startup.profile : undefined);
+      const modelProvider = override.modelProvider
+        ?? (typeof binding.startup.modelProvider === "string" ? binding.startup.modelProvider : undefined);
+      const transientStartup = override.profile !== undefined || override.modelProvider !== undefined;
       const request = {
         mode: "resume", backend: binding.backend, conversationId: binding.conversationId, cwd,
         statusPath: newStatusPath(this.dependencies.dataRoot),
-        ...(declared === null ? {} : { model: declared }),
+        ...(model === null || model === undefined ? {} : { model }),
+        ...(binding.backend !== "codex" || profile === undefined ? {} : { profile }),
+        ...(binding.backend !== "codex" || modelProvider === undefined ? {} : { modelProvider }),
+        ...(binding.backend !== "codex" || !transientStartup ? {} : { transientStartup: true }),
       } satisfies TerminalChildRequest;
       await (this.dependencies.launch ?? launchRestoreTerminal)(
         request,

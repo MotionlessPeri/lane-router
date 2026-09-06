@@ -97,7 +97,7 @@ export class CodexBackend implements PlatformBackend {
         threadId: binding.conversationId,
         includeTurns: allowSteer,
       }));
-      if (response.thread.status.type === "notLoaded") return "no_channel";
+      if (response.thread.status.type === "notLoaded" || response.thread.status.type === "systemError") return "no_channel";
       if (response.thread.status.type === "active") {
         if (!allowSteer) return "deferred";
         const turnId = activeTurnId(response);

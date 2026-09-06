@@ -28,6 +28,8 @@ export class RouterError extends Error {
 export interface DirectoryBinding {
   readonly generation: number;
   readonly attachedAt: number;
+  readonly profile?: string;
+  readonly modelProvider?: string;
 }
 
 /**
@@ -66,6 +68,8 @@ export type ResumeInfo =
       readonly reach: ReachSnapshot | null;
       readonly restorePresence: RestorePresence;
       readonly model: string | null;
+      readonly profile?: string;
+      readonly modelProvider?: string;
     };
 
 interface RouterCoreDependencies {
@@ -96,7 +100,11 @@ export class RouterCore {
         roleDescription: lane.roleDescription,
         model: lane.model,
         backend: binding.backend,
-        binding: { generation: binding.generation, attachedAt: binding.activeAt },
+        binding: {
+          generation: binding.generation, attachedAt: binding.activeAt,
+          ...(typeof binding.startup.profile === "string" ? { profile: binding.startup.profile } : {}),
+          ...(typeof binding.startup.modelProvider === "string" ? { modelProvider: binding.startup.modelProvider } : {}),
+        },
         reach: backend?.reach(binding) ?? null,
       };
     });
@@ -128,6 +136,8 @@ export class RouterCore {
       reach: backend?.reach(binding) ?? null,
       restorePresence: backend?.restorePresence(binding) ?? "unavailable",
       model: this.dependencies.state.requireLane(parsed.address).model,
+      ...(typeof binding.startup.profile === "string" ? { profile: binding.startup.profile } : {}),
+      ...(typeof binding.startup.modelProvider === "string" ? { modelProvider: binding.startup.modelProvider } : {}),
     };
   }
 
@@ -190,6 +200,13 @@ export class RouterCore {
       }
     }
     const generation = (observed?.generation ?? 0) + 1;
+    // A dashboard one-launch override is real for the TUI that reports it, but it is not a fact
+    // about the lane's next launch. Keep the startup the previous binding carried instead.
+    const startup = context.backend !== "codex"
+      ? {}
+      : context.startup?.transient === true
+        ? observed?.startup ?? {}
+        : { ...(context.startup ?? {}) };
     let binding;
     try {
       binding = state.replaceBinding({
@@ -199,7 +216,7 @@ export class RouterCore {
         backend: context.backend,
         conversationId: identity.value,
         generation,
-        startup: {},
+        startup,
         roleDescription: input.roleDescription,
         model: input.model,
         now: this.dependencies.now(),

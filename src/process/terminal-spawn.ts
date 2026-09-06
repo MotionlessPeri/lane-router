@@ -19,6 +19,10 @@ export type TerminalChildRequest =
       readonly statusPath: string;
       /** The lane's declared model, absent when it declares none. Claude backend only. */
       readonly model?: string;
+      readonly profile?: string;
+      readonly modelProvider?: string;
+      /** Marks profile/provider values as one-launch selections, not startup metadata to persist. */
+      readonly transientStartup?: boolean;
     }
   | {
       readonly mode: "resume";
@@ -28,6 +32,10 @@ export type TerminalChildRequest =
       readonly statusPath: string;
       /** The lane's declared model, absent when it declares none. Claude backend only. */
       readonly model?: string;
+      readonly profile?: string;
+      readonly modelProvider?: string;
+      /** Marks profile/provider values as one-launch selections, not startup metadata to persist. */
+      readonly transientStartup?: boolean;
     };
 
 export type TerminalChoice = "wt" | "powershell" | "cmd";
@@ -161,6 +169,12 @@ export function childEnvironment(
     LANE_ROUTER_CHILD: resolve(dirname(fileURLToPath(import.meta.url)), "terminal-child.js"),
     LANE_ROUTER_CHILD_CWD: request.cwd,
     LANE_ROUTER_CHILD_TITLE: title,
+    ...(request.backend === "codex" && request.modelProvider !== undefined
+      ? { LANE_ROUTER_CODEX_MODEL_PROVIDER: request.modelProvider }
+      : {}),
+    ...(request.backend === "codex" && request.transientStartup === true
+      ? { LANE_ROUTER_CODEX_TRANSIENT_STARTUP: "1" }
+      : {}),
     // Never empty: wt would read the token after -w as the window name. Callers pass the lane's
     // project so a project's lanes share one window; anything unnamed shares the fallback.
     LANE_ROUTER_CHILD_WINDOW: window || "lane-router",

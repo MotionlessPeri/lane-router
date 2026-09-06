@@ -75,6 +75,129 @@ test("the Codex TUI bridge injects Router tools into TUI-created threads", async
   }
 });
 
+test("a model provider endpoint injects the provider into thread start and resume", async () => {
+  const upstreamServer = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise<void>((resolve) => upstreamServer.once("listening", resolve));
+  const address = upstreamServer.address();
+  if (typeof address === "string" || address === null) throw new Error("missing upstream address");
+  const upstreams: WebSocket[] = [];
+  upstreamServer.on("connection", (socket) => upstreams.push(socket));
+  const claimed: Array<{ threadId: string; startup?: Record<string, string> }> = [];
+  const closed: string[] = [];
+  const codex = {
+    endpoint: `ws://127.0.0.1:${address.port}`,
+    decorateThreadStart: (params: Record<string, unknown>) => ({ ...params, dynamicTools: [], developerInstructions: "router instructions" }),
+    claimThread: (threadId: string, _cwd?: string, startup?: Record<string, string>) => { claimed.push({ threadId, startup }); },
+    openThreadClient: () => undefined,
+    closeThreadClient: (threadId: string) => { closed.push(threadId); },
+    ownsThread: (threadId: string) => threadId === "thread-owned",
+    dispatchTool: vi.fn(async () => ({ success: true })),
+    observeNotification: vi.fn(),
+  };
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex, instanceId: "instance-1" });
+  const discovery = await server.start();
+  const clients: WebSocket[] = [];
+  const postProvider = async (modelProvider: string, profile?: string) => fetch(`${discovery.url}/codex/provider-endpoint`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ modelProvider, profile }),
+  });
+  try {
+    const response = await postProvider("ZAI", "glm");
+    expect(response.status).toBe(200);
+    const body = await response.json() as { endpoint?: unknown };
+    expect(body.endpoint).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/u);
+    expect(body.endpoint).not.toBe(discovery.codexEndpoint);
+    await expect((await postProvider("ZAI", "glm")).json()).resolves.toEqual({ endpoint: body.endpoint });
+    const concurrent = await Promise.all(Array.from({ length: 20 }, () => server.codexEndpointForProvider("concurrent-provider")));
+    expect(new Set(concurrent)).toEqual(new Set([concurrent[0]]));
+    expect((await postProvider("../escape")).status).toBe(400);
+    expect((await postProvider("ZAI")).status).toBe(200);
+
+    const providerClient = new WebSocket(body.endpoint as string);
+    clients.push(providerClient);
+    await new Promise<void>((resolve, reject) => { providerClient.once("open", resolve); providerClient.once("error", reject); });
+    await vi.waitFor(() => expect(upstreams).toHaveLength(1));
+
+    providerClient.send(JSON.stringify({ id: 1, method: "thread/start", params: { cwd: "C:/project" } }));
+    expect(await nextJson(upstreams[0]!)).toMatchObject({
+      id: 1, method: "thread/start",
+      params: { cwd: "C:/project", modelProvider: "ZAI", developerInstructions: "router instructions" },
+    });
+    upstreams[0]!.send(JSON.stringify({ id: 1, result: { thread: { id: "thread-owned", status: { type: "idle" }, turns: [] } } }));
+    await nextJson(providerClient);
+    expect(claimed[0]).toEqual({ threadId: "thread-owned", startup: { profile: "glm", modelProvider: "ZAI" } });
+
+    providerClient.send(JSON.stringify({ id: 2, method: "thread/start", params: { cwd: "C:/other", modelProvider: "openai" } }));
+    expect(await nextJson(upstreams[0]!)).toMatchObject({ id: 2, params: { modelProvider: "ZAI" } });
+    upstreams[0]!.send(JSON.stringify({ id: 2, result: { thread: { id: "thread-other", status: { type: "idle" }, turns: [] } } }));
+    await nextJson(providerClient);
+
+    providerClient.send(JSON.stringify({ id: 3, method: "thread/resume", params: { threadId: "thread-owned", modelProvider: "openai" } }));
+    expect(await nextJson(upstreams[0]!)).toMatchObject({ id: 3, method: "thread/resume", params: { threadId: "thread-owned", modelProvider: "ZAI" } });
+
+    const defaultClient = new WebSocket(discovery.codexEndpoint);
+    clients.push(defaultClient);
+    await new Promise<void>((resolve, reject) => { defaultClient.once("open", resolve); defaultClient.once("error", reject); });
+    await vi.waitFor(() => expect(upstreams).toHaveLength(2));
+    defaultClient.send(JSON.stringify({ id: 4, method: "thread/start", params: { cwd: "C:/project" } }));
+    const defaultStart = await nextJson(upstreams[1]!) as { params?: { modelProvider?: unknown } };
+    expect(defaultStart).toMatchObject({ id: 4, params: { developerInstructions: "router instructions" } });
+    expect(defaultStart.params?.modelProvider).toBeUndefined();
+  } finally {
+    for (const client of clients) client.close();
+    for (const upstream of upstreams) upstream.close();
+    await server.close();
+    await new Promise<void>((resolve) => upstreamServer.close(() => resolve()));
+  }
+});
+
+test("a transient provider endpoint reports its startup as non-persistent", async () => {
+  const upstreamServer = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise<void>((resolve) => upstreamServer.once("listening", resolve));
+  const address = upstreamServer.address();
+  if (typeof address === "string" || address === null) throw new Error("missing upstream address");
+  const upstreams: WebSocket[] = [];
+  upstreamServer.on("connection", (socket) => upstreams.push(socket));
+  const claimed: Array<{ threadId: string; startup?: Record<string, unknown> }> = [];
+  const codex = {
+    endpoint: `ws://127.0.0.1:${address.port}`,
+    decorateThreadStart: (params: Record<string, unknown>) => params,
+    claimThread: (threadId: string, _cwd?: string, startup?: Record<string, unknown>) => { claimed.push({ threadId, startup }); },
+    openThreadClient: () => undefined,
+    closeThreadClient: () => undefined,
+    ownsThread: (threadId: string) => threadId === "thread-transient",
+    dispatchTool: vi.fn(async () => ({ success: true })),
+    observeNotification: vi.fn(),
+  };
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex, instanceId: "instance-1" });
+  const discovery = await server.start();
+  let client: WebSocket | undefined;
+  try {
+    const response = await fetch(`${discovery.url}/codex/provider-endpoint`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ modelProvider: "ZAI", profile: "glm", persistStartup: false }),
+    });
+    expect(response.status).toBe(200);
+    const { endpoint } = await response.json() as { endpoint: string };
+    client = new WebSocket(endpoint);
+    await new Promise<void>((resolve, reject) => { client!.once("open", resolve); client!.once("error", reject); });
+    await vi.waitFor(() => expect(upstreams).toHaveLength(1));
+
+    client.send(JSON.stringify({ id: 1, method: "thread/start", params: { cwd: "C:/project" } }));
+    expect(await nextJson(upstreams[0]!)).toMatchObject({ params: { modelProvider: "ZAI" } });
+    upstreams[0]!.send(JSON.stringify({ id: 1, result: { thread: { id: "thread-transient", status: { type: "idle" }, turns: [] } } }));
+    await nextJson(client);
+    expect(claimed[0]).toEqual({
+      threadId: "thread-transient",
+      startup: { profile: "glm", modelProvider: "ZAI", transient: true },
+    });
+  } finally {
+    client?.close();
+    await server.close();
+    for (const upstream of upstreams) upstream.close();
+    await new Promise<void>((resolve) => upstreamServer.close(() => resolve()));
+  }
+});
+
 test("serves health and lane calls on loopback", async () => {
   const tools = { call: vi.fn(async (name: string) => ({ name })) };
   const codex = {

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -11,6 +12,7 @@ import type { DashboardRouter } from "../router/dashboard.js";
 import type { CallerContext, BindingRecord, ReachSnapshot, ResolvedIdentity } from "../router/types.js";
 import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
 import type { ToolService } from "../tools/tool-service.js";
+import type { DashboardOpenOverride } from "./dashboard-lane-opener.js";
 
 export interface RouterDiscovery {
   readonly pid: number;
@@ -218,6 +220,8 @@ export class LocalRouterServer {
   private readonly http = createServer((request, response) => void this.handle(request, response));
   private readonly websocket = new WebSocketServer({ noServer: true });
   private readonly codexBridge: CodexTuiBridge;
+  private readonly providerBridges = new Map<string, { bridge: CodexTuiBridge; endpoint: Promise<string> }>();
+  private readonly dashboardActionToken = randomUUID();
   private codexEndpoint = "";
   readonly claude: ClaudeChannelHub;
 
@@ -247,6 +251,8 @@ export class LocalRouterServer {
      * it that acted could be pressed by any local process that can reach loopback.
      */
     readonly dashboardState?: (router: DashboardRouter) => unknown;
+    /** Opens a validated dashboard selection; absent means this Router serves a read-only board. */
+    readonly dashboardOpen?: (input: { readonly addresses: readonly string[]; readonly override: DashboardOpenOverride }) => Promise<unknown>;
   }) {
     this.host = options.host ?? "127.0.0.1";
     if (this.host !== "127.0.0.1" && this.host !== "::1") throw new Error("Router internal server must bind to loopback");
@@ -280,6 +286,9 @@ export class LocalRouterServer {
   async close(): Promise<void> {
     this.claude.close();
     await this.codexBridge.close();
+    const providerBridges = [...this.providerBridges.values()].map(({ bridge }) => bridge);
+    this.providerBridges.clear();
+    await Promise.all(providerBridges.map((bridge) => bridge.close()));
     await new Promise<void>((resolve) => this.websocket.close(() => resolve()));
     await new Promise<void>((resolve, reject) => this.http.close((error) => error ? reject(error) : resolve()));
   }
@@ -300,7 +309,10 @@ export class LocalRouterServer {
         }
         if (url.pathname === "/dashboard/state" && this.options.dashboardState) {
           const { pid, port, instanceId } = this.discovery();
-          return json(response, 200, this.options.dashboardState({ pid, port, instanceId }));
+          const snapshot = this.options.dashboardState({ pid, port, instanceId });
+          return json(response, 200, this.options.dashboardOpen === undefined
+            ? snapshot
+            : { ...(snapshot as object), actionToken: this.dashboardActionToken });
         }
         if (url.pathname === "/lanes/resume-info" && this.options.resumeInfo) {
           const address = url.searchParams.get("address");
@@ -320,6 +332,35 @@ export class LocalRouterServer {
         // and the body carries the sentence naming which precondition and by how much.
         catch (error) { return json(response, 409, { error: error instanceof Error ? error.message : "archiving refused" }); }
       }
+      if (request.method === "POST" && request.url === "/dashboard/lanes/open") {
+        const opener = this.options.dashboardOpen;
+        if (!opener) return json(response, 404, { error: "not found" });
+        if (request.headers.origin !== this.discovery().url) return json(response, 403, { error: "origin is not the Router dashboard" });
+        if (request.headers["x-lane-router-action"] !== "open") return json(response, 403, { error: "action header is invalid" });
+        const contentType = request.headers["content-type"];
+        if (typeof contentType !== "string" || !contentType.toLowerCase().startsWith("application/json")) {
+          return json(response, 400, { error: "content-type must be application/json" });
+        }
+        const body = await readJson(request) as { addresses?: unknown; override?: unknown; actionToken?: unknown };
+        if (body.actionToken !== this.dashboardActionToken) return json(response, 403, { error: "action token is invalid" });
+        if (!Array.isArray(body.addresses) || body.addresses.length === 0 || body.addresses.some((address) => typeof address !== "string")) {
+          return json(response, 400, { error: "addresses must be a non-empty string array" });
+        }
+        if (body.override !== undefined && (typeof body.override !== "object" || body.override === null || Array.isArray(body.override))) {
+          return json(response, 400, { error: "override must be an object" });
+        }
+        const override = (body.override ?? {}) as DashboardOpenOverride;
+        for (const field of ["model", "profile", "modelProvider"] as const) {
+          if (override[field] !== undefined && typeof override[field] !== "string") {
+            return json(response, 400, { error: `${field} override must be a string` });
+          }
+        }
+        try {
+          return json(response, 200, await opener({ addresses: body.addresses as string[], override }));
+        } catch (error) {
+          return json(response, 400, { error: error instanceof Error ? error.message : "dashboard open request failed" });
+        }
+      }
       if (request.method === "POST" && request.url === "/claude/lifecycle") {
         const body = await readJson(request) as { conversationId?: unknown; event?: unknown; joinKey?: unknown; cwd?: unknown };
         const valid = typeof body.conversationId === "string" && (body.event === "Stop" || body.event === "UserPromptSubmit");
@@ -332,6 +373,17 @@ export class LocalRouterServer {
         const accepted = valid
           ? this.claude.reportLifecycle(body.conversationId as string, body.event as "Stop" | "UserPromptSubmit", typeof body.joinKey === "string" ? body.joinKey : undefined) : false;
         return json(response, accepted ? 200 : 400, { accepted });
+      }
+      if (request.method === "POST" && request.url === "/codex/provider-endpoint") {
+        const body = await readJson(request) as { modelProvider?: unknown; profile?: unknown; persistStartup?: unknown };
+        if (typeof body.modelProvider !== "string") return json(response, 400, { error: "modelProvider is required" });
+        if (body.profile !== undefined && typeof body.profile !== "string") return json(response, 400, { error: "profile must be a string" });
+        if (body.persistStartup !== undefined && typeof body.persistStartup !== "boolean") return json(response, 400, { error: "persistStartup must be a boolean" });
+        try {
+          return json(response, 200, { endpoint: await this.codexEndpointForProvider(body.modelProvider, body.profile, body.persistStartup ?? true) });
+        } catch (error) {
+          return json(response, 400, { error: error instanceof Error ? error.message : "provider endpoint unavailable" });
+        }
       }
       if (request.method !== "POST" || request.url !== "/rpc") return json(response, 404, { error: "not found" });
       const body = await readJson(request) as { method?: unknown; params?: unknown; context?: unknown };
@@ -348,6 +400,22 @@ export class LocalRouterServer {
   private discovery(): RouterDiscovery {
     const address = this.http.address() as AddressInfo;
     return { pid: process.pid, port: address.port, url: `http://${this.host}:${address.port}`, codexEndpoint: this.codexEndpoint, instanceId: this.options.instanceId };
+  }
+
+  /** One bridge endpoint per model provider; its threads carry that provider instead of the base one. */
+  async codexEndpointForProvider(modelProvider: string, profile?: string, persistStartup = true): Promise<string> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(modelProvider)) throw new Error(`Invalid model provider id: ${modelProvider}`);
+    const key = `${modelProvider}\0${profile ?? ""}\0${persistStartup ? "persistent" : "transient"}`;
+    const existing = this.providerBridges.get(key);
+    if (existing) return existing.endpoint;
+    const bridge = new CodexTuiBridge(this.options.codex, modelProvider, profile, persistStartup);
+    const entry = { bridge, endpoint: bridge.start(this.host) };
+    this.providerBridges.set(key, entry);
+    try { return await entry.endpoint; }
+    catch (error) {
+      if (this.providerBridges.get(key) === entry) this.providerBridges.delete(key);
+      throw error;
+    }
   }
 }
 

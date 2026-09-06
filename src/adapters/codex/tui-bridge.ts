@@ -6,7 +6,7 @@ import { decodeServerMessage, type DynamicToolCallParams, type JsonRpcId } from 
 export interface CodexTuiBridgeHost {
   readonly endpoint: string;
   decorateThreadStart(params: Record<string, unknown>): Record<string, unknown>;
-  claimThread(threadId: string, cwd?: string): void;
+  claimThread(threadId: string, cwd?: string, startup?: Readonly<{ profile?: string; modelProvider?: string; transient?: boolean }>): void;
   openThreadClient(threadId: string): void;
   closeThreadClient(threadId: string): void;
   ownsThread(threadId: string): boolean;
@@ -19,7 +19,12 @@ export class CodexTuiBridge {
   private server?: WebSocketServer;
   private listenEndpoint?: string;
 
-  constructor(private readonly host: CodexTuiBridgeHost) {}
+  constructor(
+    private readonly host: CodexTuiBridgeHost,
+    private readonly modelProvider?: string,
+    private readonly profile?: string,
+    private readonly persistStartup = true,
+  ) {}
 
   async start(listenHost = "127.0.0.1"): Promise<string> {
     if (this.listenEndpoint) return this.listenEndpoint;
@@ -86,7 +91,8 @@ export class CodexTuiBridge {
     if (!message) return raw;
     if (message.method === "thread/start" && isId(message.id) && isRecord(message.params)) {
       pendingClaims.set(message.id, typeof message.params.cwd === "string" ? message.params.cwd : undefined);
-      return JSON.stringify({ ...message, params: this.host.decorateThreadStart(message.params) });
+      const params = withModelProvider(this.host.decorateThreadStart(message.params), this.modelProvider);
+      return JSON.stringify({ ...message, params });
     }
     if (message.method === "thread/resume" && isId(message.id) && isRecord(message.params)) {
       const threadId = message.params.threadId;
@@ -95,6 +101,9 @@ export class CodexTuiBridge {
         return undefined;
       }
       pendingClaims.set(message.id, undefined);
+      return this.modelProvider === undefined
+        ? raw
+        : JSON.stringify({ ...message, params: withModelProvider(message.params, this.modelProvider) });
     }
     return raw;
   }
@@ -106,7 +115,10 @@ export class CodexTuiBridge {
       pendingClaims.delete(message.id);
       const threadId = nestedThreadId(message.result);
       if (threadId) {
-        this.host.claimThread(threadId, cwd);
+        this.host.claimThread(threadId, cwd, this.modelProvider === undefined ? undefined : {
+          modelProvider: this.modelProvider, ...(this.profile === undefined ? {} : { profile: this.profile }),
+          ...(this.persistStartup ? {} : { transient: true }),
+        });
         if (!claimedThreads.has(threadId)) {
           claimedThreads.add(threadId);
           this.host.openThreadClient(threadId);
@@ -129,6 +141,11 @@ export class CodexTuiBridge {
     }
     if (downstream.readyState === WebSocket.OPEN) downstream.send(raw);
   }
+}
+
+function withModelProvider(params: Record<string, unknown>, modelProvider: string | undefined): Record<string, unknown> {
+  if (modelProvider === undefined) return params;
+  return { ...params, modelProvider };
 }
 
 function parseRecord(raw: string): Record<string, unknown> | undefined {

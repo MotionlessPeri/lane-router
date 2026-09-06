@@ -288,6 +288,32 @@ describe("RouterCore directory and attach", () => {
     } finally { x.database.close(); }
   });
 
+  it("persists trusted Codex profile metadata in the binding startup record", async () => {
+    const x = setup();
+    try {
+      const result = await x.core.attachCurrent({ ...caller("thread-profile"), startup: { profile: "glm", modelProvider: "ZAI" } }, {
+        address: "alpha/design", roleDescription: "Design.",
+      });
+      expect(result.binding.startup).toEqual({ profile: "glm", modelProvider: "ZAI" });
+    } finally { x.database.close(); }
+  });
+
+  it("keeps the previous startup record when Codex reports a transient override", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent({ ...caller("thread-old"), startup: { profile: "gpt", modelProvider: "openai" } }, {
+        address: "alpha/design", roleDescription: "Design.",
+      });
+      const result = await x.core.attachCurrent({
+        ...caller("thread-new", "request:new"),
+        startup: { profile: "glm", modelProvider: "ZAI", transient: true },
+      }, { address: "alpha/design" });
+
+      expect(result.generation).toBe(2);
+      expect(result.binding.startup).toEqual({ profile: "gpt", modelProvider: "openai" });
+    } finally { x.database.close(); }
+  });
+
   it("uses the observed binding generation as a replacement CAS", async () => {
     const x = setup();
     try {

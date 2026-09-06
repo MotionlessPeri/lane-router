@@ -21,6 +21,7 @@ const snapshot = {
     address: "alpha/one", project: "alpha", roleDescription: `role ${HOSTILE_IMAGE}`, model: null, archived: false,
     binding: { backend: "claude", conversationId: "conversation-1", generation: 1, cwd: `C:/${HOSTILE_SCRIPT}`, attachedAt: 1_788_179_000_000 },
     reach: { state: "live", connectedAt: null, lastLifecycleAt: 1_788_179_500_000, lastNotifiedAt: null, believedBusy: false },
+    restorePresence: "online",
     pending: { count: 1, oldestCreatedAt: 1_788_179_000_000 },
   }],
   messages: [{
@@ -29,6 +30,32 @@ const snapshot = {
     notificationState: "sent", body: `${HOSTILE_SCRIPT} and ${HOSTILE_IMAGE}`,
   }],
   truncated: { messages: false, limit: 200 },
+};
+
+const launcherSnapshot = {
+  ...snapshot,
+  actionToken: "action-token-1",
+  launcher: {
+    models: [
+      { id: "glm-5.3", displayName: "GLM 5.3", hidden: false },
+      { id: "gpt-6-astra", displayName: "GPT 6 Astra", hidden: true },
+    ],
+    profiles: [
+      { name: "glm", model: "glm-5.3", modelProvider: "ZAI" },
+      { name: "gpt", model: "gpt-5.6-sol", modelProvider: "openai" },
+    ],
+    modelProviders: ["openai", "ZAI"],
+  },
+  lanes: [
+    {
+      ...snapshot.lanes[0]!, address: "alpha/offline", project: "alpha", binding: {
+        ...snapshot.lanes[0]!.binding!, backend: "codex", profile: "gpt", modelProvider: "openai",
+      }, restorePresence: "offline",
+    },
+    {
+      ...snapshot.lanes[0]!, address: "beta/online", project: "beta", restorePresence: "online",
+    },
+  ],
 };
 
 /**
@@ -54,6 +81,46 @@ async function render(): Promise<Window["document"]> {
   return window.document;
 }
 
+async function renderLauncher() {
+  const window = new Window({ url: "http://127.0.0.1:52494/dashboard" });
+  window.document.write(pageSource);
+  const script = window.document.querySelector("script")?.textContent;
+  expect(script).toBeTruthy();
+  const calls: Array<{ url?: string | URL; init?: RequestInit }> = [];
+  const fetchStub = vi.fn(async (url: string | URL, init?: RequestInit) => {
+    calls.push({ url, init });
+    return { ok: true, json: async () => (calls.length === 1 ? launcherSnapshot : { results: [{ address: "alpha/offline", status: "launch_requested" }] }) };
+  });
+  new Function("document", "fetch", "setInterval", script!)(window.document, fetchStub as never, () => 0);
+  await vi.waitFor(() => expect(window.document.body.textContent).toContain("alpha/offline"));
+  return { document: window.document, window, calls };
+}
+
+async function renderLauncherWithRefresh() {
+  const window = new Window({ url: "http://127.0.0.1:52494/dashboard" });
+  window.document.write(pageSource);
+  const script = window.document.querySelector("script")?.textContent;
+  expect(script).toBeTruthy();
+  const firstSnapshot = launcherSnapshot;
+  const secondSnapshot = {
+    ...launcherSnapshot,
+    router: { ...launcherSnapshot.router!, pid: 2 },
+  };
+  const fetchStub = vi.fn(async () => ({ ok: true, json: async () => firstSnapshot }));
+  const run = () =>
+    new Function("document", "fetch", "setInterval", script!)(window.document, fetchStub as never, () => 0);
+  run();
+  await vi.waitFor(() => expect(window.document.body.textContent).toContain("alpha/offline"));
+  return {
+    document: window.document,
+    refresh: async () => {
+      fetchStub.mockImplementation(async () => ({ ok: true, json: async () => secondSnapshot }));
+      run();
+      await vi.waitFor(() => expect(window.document.body.textContent).toContain("pid 2"));
+    },
+  };
+}
+
 test("hostile text in a snapshot is shown, not run", async () => {
   const document = await render();
 
@@ -66,4 +133,82 @@ test("hostile text in a snapshot is shown, not run", async () => {
   // does not, which is why counting elements is the assertion rather than watching for alerts.
   expect(document.querySelectorAll("img")).toHaveLength(0);
   expect(document.querySelectorAll("script")).toHaveLength(1);
+});
+
+test("the launcher selects restorable lanes and submits one protected request", async () => {
+  const { document, calls } = await renderLauncher();
+  const checkboxes = [...document.querySelectorAll("input[data-lane-checkbox]")];
+  expect(checkboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([true, false]);
+  expect(document.querySelector("button#open-selected")?.hasAttribute("disabled")).toBe(false);
+
+  (document.querySelector("#override-model") as HTMLInputElement).value = "glm-5.3";
+  (document.querySelector("#override-profile") as HTMLInputElement).value = "glm";
+  (document.querySelector("#override-provider") as HTMLInputElement).value = "ZAI";
+  (document.querySelector("button#open-selected") as HTMLButtonElement).click();
+
+  await vi.waitFor(() => expect(document.body.textContent).toContain("launch_requested"));
+  expect(calls).toHaveLength(2);
+  expect(calls[1]!.url).toBe("/dashboard/lanes/open");
+  expect(calls[1]!.init?.method).toBe("POST");
+  expect(new Headers(calls[1]!.init?.headers).get("x-lane-router-action")).toBe("open");
+  expect(JSON.parse(String(calls[1]!.init?.body))).toEqual({
+    addresses: ["alpha/offline"],
+    override: { model: "glm-5.3", profile: "glm", modelProvider: "ZAI" },
+    actionToken: "action-token-1",
+  });
+});
+
+test("the launcher offers constrained startup menus and fills a profile's startup facts", async () => {
+  const { document, window } = await renderLauncher();
+  const model = document.querySelector("#override-model");
+  const profile = document.querySelector("#override-profile");
+  const provider = document.querySelector("#override-provider");
+
+  expect(model?.tagName).toBe("SELECT");
+  expect(profile?.tagName).toBe("SELECT");
+  expect(provider?.tagName).toBe("SELECT");
+  expect([...(profile?.querySelectorAll("option") ?? [])].map((option) => option.getAttribute("value")))
+    .toEqual(["", "glm", "gpt"]);
+  expect([...(provider?.querySelectorAll("option") ?? [])].map((option) => option.getAttribute("value")))
+    .toEqual(["", "openai", "ZAI"]);
+
+  (profile as HTMLSelectElement).value = "glm";
+  (profile as HTMLSelectElement).dispatchEvent(new window.Event("change"));
+
+  expect((model as HTMLSelectElement).value).toBe("glm-5.3");
+  expect((provider as HTMLSelectElement).value).toBe("ZAI");
+});
+
+test("a launcher refresh keeps operator choices instead of resetting offline defaults", async () => {
+  const { document, refresh } = await renderLauncherWithRefresh();
+  (document.querySelector("input[data-lane-checkbox][value='alpha/offline']") as HTMLInputElement).checked = false;
+  (document.querySelector("input[data-lane-checkbox][value='beta/online']") as HTMLInputElement).checked = true;
+  (document.querySelector("#override-model") as HTMLInputElement).value = "glm-5.3";
+  (document.querySelector("#override-profile") as HTMLInputElement).value = "glm";
+  (document.querySelector("#override-provider") as HTMLInputElement).value = "ZAI";
+  (document.querySelector("#override-model") as HTMLInputElement).focus();
+
+  await refresh();
+
+  const checkboxes = [...document.querySelectorAll("input[data-lane-checkbox]")];
+  expect(checkboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([false, true]);
+  const projectCheckboxes = [...document.querySelectorAll("input[data-project-checkbox]")];
+  expect(projectCheckboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([false, true]);
+  expect(projectCheckboxes.map((checkbox) => (checkbox as HTMLInputElement).indeterminate)).toEqual([false, false]);
+  expect((document.querySelector("#override-model") as HTMLInputElement).value).toBe("glm-5.3");
+  expect(document.activeElement?.id).toBe("override-model");
+  expect((document.querySelector("#override-profile") as HTMLInputElement).value).toBe("glm");
+  expect((document.querySelector("#override-provider") as HTMLInputElement).value).toBe("ZAI");
+});
+
+test("the launcher stays read-only when the Router does not publish an action token", async () => {
+  const window = new Window({ url: "http://127.0.0.1:52494/dashboard" });
+  window.document.write(pageSource);
+  const script = window.document.querySelector("script")?.textContent;
+  const fetchStub = vi.fn(async () => ({ ok: true, json: async () => snapshot }));
+  new Function("document", "fetch", "setInterval", script!)(window.document, fetchStub as never, () => 0);
+  await vi.waitFor(() => expect(window.document.body.textContent).toContain("alpha/one"));
+  expect(window.document.querySelector("button#open-selected")?.hasAttribute("disabled")).toBe(true);
+  (window.document.querySelector("button#open-selected") as HTMLButtonElement).click();
+  expect(fetchStub).toHaveBeenCalledOnce();
 });

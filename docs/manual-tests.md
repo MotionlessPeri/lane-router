@@ -351,7 +351,7 @@ NO_COLOR=1 lane-router-lane new <project>/<lane> --role "<角色说明>"
 
 ## 观测看板
 
-自动测试覆盖快照形状（全项目 + 归档 lane、binding / reach / 积压三段的有值与无值两侧）、有界（多于与少于 limit 各一次）、正文原样透传与读不到时为 `null`、精确键集（新增派生量会红）、两个端点的 `text/html` 与 JSON、未注入时 404、POST 不受理，以及页面在真实 DOM 里渲染敌意文本，并做过五个变异（结果见设计稿第六节）。下面这条不能自动化：**数据对**与**这一屏看了能判断出问题**是两件事。
+自动测试覆盖快照形状（全项目 + 归档 lane、binding / reach / 积压三段的有值与无值两侧）、有界（多于与少于 limit 各一次）、正文原样透传与读不到时为 `null`、精确键集（新增派生量会红）、两个状态端点的 `text/html` 与 JSON、未注入时 404，以及页面在真实 DOM 里渲染敌意文本，并做过五个变异（结果见设计稿第六节）。下面这条不能自动化：**数据对**与**这一屏看了能判断出问题**是两件事。
 
 **前提：** 已构建 `dist/`（构建会把页面拷进 `dist/process/dashboard.html`，拷不成整个 build 失败）；**Router 已受控重启到本构建**。这里跟通知那条不同：**只需要换 Router**，不需要参与的会话是新的——看板整个住在 Router 进程里，浏览器直接连它。
 
@@ -370,7 +370,7 @@ NO_COLOR=1 lane-router-lane new <project>/<lane> --role "<角色说明>"
 
 ⚠️ **别只开一条 lane 验。** 只有一条时，「每条 lane 各自的积压」和「全局有多少积压」在屏幕上长得一模一样——那不是通过，是没测到。
 
-### TC-DASH-2：这是一次真实的暴露面扩大
+### TC-DASH-2：这是一次真实的读取暴露面
 
 不是缺陷，是设计明写接受的代价（设计稿 §3.5），列在这里是为了让它被看见而不是被忘记：
 
@@ -380,9 +380,27 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 **预期：** 任何一个能连 loopback 的本机进程都能拿到全部 lane 的角色说明与最近 200 封消息正文。今天要读到同样的内容得读 `~/.lane-router/` 下的文件，那是文件系统权限管的；换成 HTTP GET 之后，管它的只剩「进程能不能连 loopback」。
 
-⚠️ **不要因此去加鉴权**——那会同时改变威胁模型和范围。这个面之所以能只读，正是因为不做写操作就不需要鉴权；反过来先加机制再找需求是反的。**同机可信一旦不再成立**（多人共用、或跑了不受信的本地服务），要重做的是设计稿 §3.5 那段分析，写操作与鉴权一起考虑。
+⚠️ **不要因此把它改成远程可访问或加一套账号体系**——那会同时改变威胁模型和范围。网页打开动作另外要求同源 `Origin`、`X-Lane-Router-Action` 头、JSON 内容类型与进程内 action token；这四项挡的是浏览器跨站请求，不是本机进程鉴权。**同机可信一旦不再成立**（多人共用、或跑了不受信的本地服务），读取暴露面与打开动作要一起重做威胁模型。
 
 **最后验证：** 尚未真机执行——需要共享 Router 受控重启到本构建。
+
+### TC-DASH-3：一次打开多项目 lane，并临时覆盖 Codex 模型与 provider
+
+**目标：** 验证网页一次勾选多个项目的离线 lane 后只发一个打开请求；`model` / `profile` / `modelProvider` 覆盖只影响本次启动，不写回 `lane.model` 或 binding startup。
+
+**前提：** 使用独立 `LANE_ROUTER_DATA_ROOT` 启动隔离 Router，准备两个项目各至少一条 offline Codex binding，注册模型与持久 startup 均为旧值（例如 `gpt-5.6-sol` / `gpt` / `openai`）。
+
+1. 打开 `http://127.0.0.1:<port>/dashboard`，确认 offline lane 默认勾选、online lane 未勾选，两个项目分别成组。
+2. 在覆盖菜单选择 Codex profile `glm`，确认 model 自动变为 `glm-5.3`、modelProvider 自动变为 `ZAI`，点击一次“打开选中 lane”。
+3. 观察两个项目各得到一个 Windows Terminal 窗口；Codex 命令行包含 `--profile glm --model glm-5.3`，并连接 `ZAI` provider endpoint。
+4. 等两条 lane attach 后查询数据库：`lane.model` 仍为旧值，新 binding startup 仍为旧 `profile` / `modelProvider`。
+5. 关闭这两条 lane，等待启动保留期结束后不看板覆盖地恢复一次；确认命令行与 provider 回到旧值。
+
+**预期：** 五步全部成立。菜单只列出 App Server `model/list(includeHidden=true)` 返回的 model、`~/.codex/*.config.toml` 中可解析 provider 的 profile，以及配置中存在的 modelProvider；不能手输 `glm` 到 modelProvider。第 4 步若出现 `glm` / `ZAI`，说明一次性 provider 被持久化，功能未通过；第 5 步若仍走 GLM，说明下次恢复没有回到持久声明。
+
+**关键看点：** 必须同时验“本次生效”和“下次不生效”。只看第 3 步会把持久化泄漏误报为通过。
+
+**最后验证：** 尚未真机执行。
 
 ## `lane_send` 的抄送
 

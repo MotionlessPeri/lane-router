@@ -16,7 +16,7 @@ const notification = {
   ],
 };
 
-function setup(status: "idle" | "active" | "notLoaded" = "idle") {
+function setup(status: "idle" | "active" | "notLoaded" | "systemError" = "idle") {
   let current = status;
   let connected = true;
   let visibleClient = false;
@@ -149,5 +149,14 @@ describe("CodexBackend", () => {
     const missing = setup();
     missing.request.mockRejectedValueOnce(new Error("thread not found"));
     await expect(missing.backend.waitUntilReplaceable(binding)).resolves.toBeUndefined();
+  });
+
+  it("treats a system-error thread as replaceable and unreachable", async () => {
+    const replace = setup("systemError");
+    await expect(replace.backend.waitUntilReplaceable(binding)).resolves.toBeUndefined();
+
+    const notify = setup("systemError");
+    await expect(notify.backend.notifyNormal(binding, notification)).resolves.toBe("no_channel");
+    expect(notify.request.mock.calls.map(([method]) => method)).toEqual(["thread/read"]);
   });
 });

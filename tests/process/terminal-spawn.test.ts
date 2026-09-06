@@ -108,8 +108,12 @@ test("passes a declared model to Claude, and changes nothing at all without one"
   // owns the stock CLI syntax, so the terminal child passes the declaration to that launcher.
   expect(childCommand({ ...promptRequest, backend: "codex", model: "gpt-5.4" }, {}, here).args)
     .toEqual([join(here, "codex-launcher.js"), "--model", "gpt-5.4", "--prompt", "hello"]);
+  expect(childCommand({ ...promptRequest, backend: "codex", profile: "glm", modelProvider: "ZAI" }, {}, here).args)
+    .toEqual([join(here, "codex-launcher.js"), "--profile", "glm", "--prompt", "hello"]);
   expect(childCommand({ mode: "resume", backend: "codex", cwd: "D:\p", conversationId: "thread-1", statusPath: "D:\s.txt", model: "gpt-5.6-sol" }, {}, here).args)
     .toEqual([join(here, "codex-launcher.js"), "--model", "gpt-5.6-sol", "resume", "thread-1"]);
+  expect(childCommand({ mode: "resume", backend: "codex", cwd: "D:\p", conversationId: "thread-1", statusPath: "D:\s.txt", profile: "glm", modelProvider: "ZAI" }, {}, here).args)
+    .toEqual([join(here, "codex-launcher.js"), "--profile", "glm", "resume", "thread-1"]);
 
   // A name this build has never heard of travels through untouched: validation belongs to the
   // CLI, which knows the real list, not to a copy of it that would go stale here.
@@ -160,4 +164,13 @@ test("the child environment speaks the shell that will read it", () => {
   expect(cmd.LANE_ROUTER_CHILD_WINDOW).toBe("lane-router");
   expect(cmd.LANE_ROUTER_CHILD_COMMAND).toBe("\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"\"");
   expect(cmd.LANE_ROUTER_CHILD_COMMAND).not.toContain(";");
+});
+
+test("the child environment carries one-launch provider startup separately from its values", () => {
+  const environment = childEnvironment({
+    mode: "resume", backend: "codex", cwd: "D:\\p", conversationId: "thread-1", statusPath: "D:\\s.txt",
+    profile: "glm", modelProvider: "ZAI", transientStartup: true,
+  }, { PATH: "x" }, "title", "powershell", "alpha");
+  expect(environment.LANE_ROUTER_CODEX_MODEL_PROVIDER).toBe("ZAI");
+  expect(environment.LANE_ROUTER_CODEX_TRANSIENT_STARTUP).toBe("1");
 });

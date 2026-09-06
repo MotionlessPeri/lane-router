@@ -96,6 +96,8 @@ export interface CallerContext {
   readonly joinKey?: string;
   readonly cwd?: string;
   readonly requestKey: string;
+  /** Credential-free startup selections observed by the trusted Codex bridge. */
+  readonly startup?: Readonly<{ profile?: string; modelProvider?: string; transient?: boolean }>;
 }
 
 /** Where a resolved conversation identity came from, so a conversation can check its own. */
