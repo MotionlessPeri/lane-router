@@ -414,8 +414,15 @@
     document.querySelectorAll("[data-override]").forEach((control) => {
       if (control.value.trim() !== "") override[control.getAttribute("data-override")] = control.value.trim();
     });
-    const status = document.getElementById("launcher-status");
-    status.textContent = "正在请求打开 " + addresses.length + " 条 lane ...";
+    const selected = new Set(addresses);
+    const includesClaude = currentSnapshot.lanes.some((lane) =>
+      selected.has(lane.address) && lane.binding && lane.binding.backend === "claude"
+    );
+    if (includesClaude && (override.profile !== undefined || override.modelProvider !== undefined)) {
+      setLauncherStatus("Claude lane 不支持 Codex profile 或 modelProvider 覆盖。", true);
+      return;
+    }
+    setLauncherStatus("正在请求打开 " + addresses.length + " 条 lane ...");
     fetch("/dashboard/lanes/open", {
       method: "POST",
       headers: { "content-type": "application/json", "x-lane-router-action": "open" },
@@ -424,13 +431,38 @@
       if (!response.ok) throw new Error("打开接口返回 " + response.status);
       return response.json();
     }).then((result) => {
-      status.textContent = result.results.map((entry) =>
-        entry.address + "：" + entry.status + (entry.message ? "（" + entry.message + "）" : "")
-      ).join("\\n") || "没有返回结果。";
+      setLauncherStatus(formatOpenResults(result.results));
     }).catch((error) => {
-      status.textContent = "打开失败：" + (error && error.message ? error.message : "未知错误");
-      status.className = "warn";
+      setLauncherStatus("打开失败：" + (error && error.message ? error.message : "未知错误"), true);
     });
+  }
+
+  function setLauncherStatus(text, warn) {
+    const status = document.getElementById("launcher-status");
+    if (!status) return;
+    status.textContent = text;
+    status.className = warn ? "warn" : "";
+  }
+
+  function formatOpenResults(results) {
+    if (!results.length) return "没有返回结果。";
+    const projects = new Map(currentSnapshot.lanes.map((lane) => [lane.address, lane.project]));
+    const labels = {
+      launch_requested: "已请求打开",
+      skipped_online: "已在线，跳过",
+      skipped_launching: "正在启动，跳过",
+      failed: "失败",
+    };
+    const groups = new Map();
+    results.forEach((entry) => {
+      const project = projects.get(entry.address) || "其他";
+      if (!groups.has(project)) groups.set(project, []);
+      groups.get(project).push(
+        entry.address + "：" + (labels[entry.status] || entry.status) +
+        (entry.message ? "（" + entry.message + "）" : "")
+      );
+    });
+    return [...groups].map(([project, entries]) => project + "\n" + entries.join("\n")).join("\n\n");
   }
 
   load();

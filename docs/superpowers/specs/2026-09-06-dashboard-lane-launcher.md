@@ -48,6 +48,7 @@
 5. 从 profile 选择模型时，页面同时填写对应 provider。从模型菜单直接切换时，如果模型只对应一个 profile，页面采用该 profile；否则清空 profile，并优先采用同模型族 profile 唯一指向的 provider，模型族无法唯一确定时才回退到基础 Codex provider。不能只改模型字符串而让 `thread/resume` 沿用上一次的 provider。
 6. 如果选择了 Claude lane，同时填写 `profile` 或 `modelProvider`，页面在提交前报错；请求端也会独立拒绝，避免绕过页面造成半个批次被打开。
 7. 点击“打开选中 lane”后，页面逐项目展示结果：已请求打开、跳过、失败。按钮文案用“已请求打开”，不用“已打开”；`launch_requested` 仍是弱声明，窗口是否真的起来要看状态与用户观察。
+8. 打开请求进行期间的定时快照刷新保留当前提示；请求完成后，结果写入刷新后的当前页面，而不是已经被替换的旧节点。
 
 选择多个项目时，terminal 分组沿用现有规则：同一个项目的 lane 进同一个 Windows Terminal 窗口，不同项目各一个窗口。
 
@@ -166,6 +167,7 @@ sequenceDiagram
 7. dashboard 继续自包含，不引用外部资源；
 8. 现有 `LANE_TOOL_NAMES` 不变。
 9. 即使基础 provider 是 `ZAI`，先选 `glm` profile，再从模型菜单改选 GPT 模型时，也会由 GPT profile 的模型族映射得到 `openai`，请求不再保留 `ZAI`。
+10. 打开请求尚未完成时触发一次页面轮询，完成后的分项目中文结果仍显示在当前页面。
 
 真机验收使用隔离 `LANE_ROUTER_DATA_ROOT` 和一次性 Codex 测试 lane：
 

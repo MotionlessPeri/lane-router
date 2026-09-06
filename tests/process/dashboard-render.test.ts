@@ -90,7 +90,12 @@ async function renderLauncher() {
   const calls: Array<{ url?: string | URL; init?: RequestInit }> = [];
   const fetchStub = vi.fn(async (url: string | URL, init?: RequestInit) => {
     calls.push({ url, init });
-    return { ok: true, json: async () => (calls.length === 1 ? launcherSnapshot : { results: [{ address: "alpha/offline", status: "launch_requested" }] }) };
+    if (calls.length === 1) return { ok: true, json: async () => launcherSnapshot };
+    const addresses = JSON.parse(String(init?.body)).addresses as string[];
+    return { ok: true, json: async () => ({ results: [
+      { address: "alpha/offline", status: "launch_requested" },
+      ...(addresses.includes("beta/online") ? [{ address: "beta/online", status: "skipped_online" }] : []),
+    ] }) };
   });
   new Function("document", "fetch", "setInterval", script!)(window.document, fetchStub as never, () => 0);
   await vi.waitFor(() => expect(window.document.body.textContent).toContain("alpha/offline"));
@@ -147,7 +152,7 @@ test("the launcher selects restorable lanes and submits one protected request", 
   (document.querySelector("#override-provider") as HTMLInputElement).value = "ZAI";
   (document.querySelector("button#open-selected") as HTMLButtonElement).click();
 
-  await vi.waitFor(() => expect(document.body.textContent).toContain("launch_requested"));
+  await vi.waitFor(() => expect(document.body.textContent).toContain("已请求打开"));
   expect(calls).toHaveLength(2);
   expect(calls[1]!.url).toBe("/dashboard/lanes/open");
   expect(calls[1]!.init?.method).toBe("POST");
@@ -225,6 +230,57 @@ test("a launcher refresh keeps operator choices instead of resetting offline def
   expect(document.activeElement?.id).toBe("override-model");
   expect((document.querySelector("#override-profile") as HTMLInputElement).value).toBe("glm");
   expect((document.querySelector("#override-provider") as HTMLInputElement).value).toBe("ZAI");
+});
+
+test("an open result remains visible when polling replaces the launcher while the request is pending", async () => {
+  const window = new Window({ url: "http://127.0.0.1:52494/dashboard" });
+  window.document.write(pageSource);
+  const script = window.document.querySelector("script")?.textContent;
+  expect(script).toBeTruthy();
+  let poll: (() => void) | undefined;
+  let resolveOpen: ((value: unknown) => void) | undefined;
+  const fetchStub = vi.fn((url: string | URL, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      return new Promise((resolve) => { resolveOpen = resolve; });
+    }
+    return Promise.resolve({ ok: true, json: async () => launcherSnapshot });
+  });
+  new Function("document", "fetch", "setInterval", script!)(
+    window.document,
+    fetchStub as never,
+    (callback: () => void) => { poll = callback; return 0; },
+  );
+  await vi.waitFor(() => expect(window.document.body.textContent).toContain("alpha/offline"));
+
+  (window.document.querySelector("button#open-selected") as HTMLButtonElement).click();
+  await vi.waitFor(() => expect(fetchStub).toHaveBeenCalledTimes(2));
+  poll?.();
+  await vi.waitFor(() => expect(fetchStub).toHaveBeenCalledTimes(3));
+  resolveOpen?.({ ok: true, json: async () => ({ results: [{ address: "alpha/offline", status: "launch_requested" }] }) });
+
+  await vi.waitFor(() => expect(window.document.querySelector("#launcher-status")?.textContent).toContain("已请求打开"));
+});
+
+test("open results are localized and grouped by project", async () => {
+  const { document, calls } = await renderLauncher();
+  (document.querySelector("input[data-lane-checkbox][value='beta/online']") as HTMLInputElement).checked = true;
+  (document.querySelector("button#open-selected") as HTMLButtonElement).click();
+
+  await vi.waitFor(() => expect(calls).toHaveLength(2));
+  await vi.waitFor(() => expect(document.querySelector("#launcher-status")?.textContent).toContain("已请求打开"));
+  expect(document.querySelector("#launcher-status")?.textContent).toContain("alpha\nalpha/offline：已请求打开");
+  expect(document.querySelector("#launcher-status")?.textContent).toContain("beta\nbeta/online：已在线，跳过");
+});
+
+test("the launcher rejects Codex profile overrides when Claude lanes are selected", async () => {
+  const { document, calls } = await renderLauncher();
+  (document.querySelector("input[data-lane-checkbox][value='beta/online']") as HTMLInputElement).checked = true;
+  (document.querySelector("#override-profile") as HTMLSelectElement).value = "glm";
+
+  (document.querySelector("button#open-selected") as HTMLButtonElement).click();
+
+  expect(calls).toHaveLength(1);
+  expect(document.querySelector("#launcher-status")?.textContent).toContain("Claude lane");
 });
 
 test("the launcher stays read-only when the Router does not publish an action token", async () => {
