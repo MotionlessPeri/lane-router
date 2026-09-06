@@ -19,6 +19,7 @@ interface DashboardLaneOpenerDependencies {
     restore(binding: BindingRecord, override?: DashboardOpenOverride): Promise<RestoreResult>;
   };
   readonly overrideChoices?: DashboardOverrideChoices;
+  readonly resolveProfileProvider?: (profile: string) => string;
 }
 
 /**
@@ -33,7 +34,13 @@ export class DashboardLaneOpener {
 
   async open(input: { readonly addresses: readonly string[]; readonly override?: DashboardOpenOverride }): Promise<{ readonly results: readonly OpenResult[] }> {
     if (input.addresses.length === 0) throw new Error("Select at least one lane to open");
-    const override = validateOverride(input.override, this.dependencies.overrideChoices);
+    let override = validateOverride(input.override, this.dependencies.overrideChoices);
+    if (override.profile !== undefined && override.modelProvider === undefined) {
+      if (this.dependencies.resolveProfileProvider === undefined) {
+        throw new Error("A profile-only override requires a profile provider resolver");
+      }
+      override = { ...override, modelProvider: this.dependencies.resolveProfileProvider(override.profile) };
+    }
     const selected = new Map<string, BindingRecord>();
 
     for (const raw of input.addresses) {

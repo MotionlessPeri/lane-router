@@ -36,7 +36,7 @@ const launcherSnapshot = {
   ...snapshot,
   actionToken: "action-token-1",
   launcher: {
-    defaultModelProvider: "openai",
+    defaultModelProvider: "ZAI",
     models: [
       { id: "glm-5.3", displayName: "GLM 5.3", hidden: false },
       { id: "gpt-6-astra", displayName: "GPT 6 Astra", hidden: true },

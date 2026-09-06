@@ -214,6 +214,24 @@
     return { field, select };
   }
 
+  function startupForModel(profiles, model, defaultModelProvider) {
+    const exact = profiles.filter((entry) => entry.model === model);
+    if (exact.length === 1) {
+      return { profile: exact[0].name, modelProvider: exact[0].modelProvider ?? defaultModelProvider };
+    }
+    // model/list has no provider field, so a unique configured profile family is
+    // the strongest available signal before falling back to the base provider.
+    const family = model.split("-", 1)[0].toLowerCase();
+    const familyProviders = [...new Set(profiles
+      .filter((entry) => entry.model && entry.model.split("-", 1)[0].toLowerCase() === family)
+      .map((entry) => entry.modelProvider)
+      .filter((value) => value !== undefined))];
+    return {
+      profile: "",
+      modelProvider: familyProviders.length === 1 ? familyProviders[0] : defaultModelProvider,
+    };
+  }
+
   function renderLauncher(snapshot) {
     const previous = launcherState();
     const host = document.createElement("div");
@@ -284,14 +302,9 @@
         provider.select.value = "";
         return;
       }
-      const matches = profiles.filter((entry) => entry.model === model.select.value);
-      if (matches.length === 1) {
-        profile.select.value = matches[0].name;
-        provider.select.value = matches[0].modelProvider ?? snapshot.launcher.defaultModelProvider;
-        return;
-      }
-      profile.select.value = "";
-      provider.select.value = snapshot.launcher.defaultModelProvider;
+      const startup = startupForModel(profiles, model.select.value, snapshot.launcher.defaultModelProvider);
+      profile.select.value = startup.profile;
+      provider.select.value = startup.modelProvider;
     });
     overrides.appendChild(model.field);
     overrides.appendChild(model.select);

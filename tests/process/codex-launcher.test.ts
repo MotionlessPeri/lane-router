@@ -175,6 +175,33 @@ test("an environmental provider without a profile requests a transient provider 
   ]);
 });
 
+test("the real provider endpoint request carries the selected profile", async () => {
+  const previousProvider = process.env.LANE_ROUTER_CODEX_MODEL_PROVIDER;
+  const previousTransient = process.env.LANE_ROUTER_CODEX_TRANSIENT_STARTUP;
+  const requests: unknown[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (_url: string | URL, init?: RequestInit) => {
+    requests.push(JSON.parse(String(init?.body)));
+    return { ok: true, json: async () => ({ endpoint: "ws://127.0.0.1:9" }) };
+  }));
+  delete process.env.LANE_ROUTER_CODEX_MODEL_PROVIDER;
+  delete process.env.LANE_ROUTER_CODEX_TRANSIENT_STARTUP;
+  try {
+    await launchCodex(["--profile", "glm", "resume", "thread-old"], {
+      ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+      spawnTui: async () => 0,
+      resolveModelProvider: () => "ZAI",
+    });
+  } finally {
+    if (previousProvider === undefined) delete process.env.LANE_ROUTER_CODEX_MODEL_PROVIDER;
+    else process.env.LANE_ROUTER_CODEX_MODEL_PROVIDER = previousProvider;
+    if (previousTransient === undefined) delete process.env.LANE_ROUTER_CODEX_TRANSIENT_STARTUP;
+    else process.env.LANE_ROUTER_CODEX_TRANSIENT_STARTUP = previousTransient;
+    vi.unstubAllGlobals();
+  }
+
+  expect(requests).toEqual([{ modelProvider: "ZAI", profile: "glm" }]);
+});
+
 test("combines profile and model flags in any order and rejects a profile without a value", async () => {
   const spawnTui = vi.fn(async () => 0);
   const dependencies = {

@@ -80,6 +80,22 @@ test("rejects provider and profile overrides for a selection that includes Claud
   } finally { x.database.close(); }
 });
 
+test("resolves a profile-only override to that profile's provider", async () => {
+  const x = setup();
+  try {
+    addBoundLane(x.state, "alpha/codex", "codex");
+    const opener = new DashboardLaneOpener({
+      state: x.state,
+      restore: { restore: x.restore },
+      resolveProfileProvider: (profile: string) => profile === "glm" ? "ZAI" : "openai",
+    });
+
+    await opener.open({ addresses: ["alpha/codex"], override: { profile: "glm" } });
+
+    expect(x.restore.mock.calls[0]![1]).toEqual({ profile: "glm", modelProvider: "ZAI" });
+  } finally { x.database.close(); }
+});
+
 test("rejects an override value absent from the launcher menus before launching", async () => {
   const x = setup();
   try {

@@ -16,7 +16,7 @@ import { RouterStateStore } from "../router/state-store.js";
 import { ClaudeSessionLocator } from "./claude-session-locator.js";
 import { ConversationRestorer } from "./conversation-restorer.js";
 import { DashboardLaneOpener } from "./dashboard-lane-opener.js";
-import { defaultCodexModelProvider, listCodexModelProviders, listCodexProfiles } from "./codex-profiles.js";
+import { defaultCodexModelProvider, listCodexModelProviders, listCodexProfiles, profileModelProvider } from "./codex-profiles.js";
 import { ToolService } from "../tools/tool-service.js";
 import { ClaudeChannelHub, LocalRouterServer } from "./local-server.js";
 import { RuntimeLock } from "./runtime-lock.js";
@@ -64,6 +64,7 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
         profiles: launcherChoices.profiles.map((profile) => profile.name),
         modelProviders: launcherChoices.modelProviders,
       },
+      resolveProfileProvider: profileModelProvider,
     });
     tools = new ToolService(core);
     server = new LocalRouterServer({

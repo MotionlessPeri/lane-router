@@ -71,7 +71,11 @@ async function postProviderEndpoint(routerUrl: string, modelProvider: string, pr
   const response = await fetch(`${routerUrl}/codex/provider-endpoint`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ modelProvider, ...(persistStartup ? {} : { persistStartup: false }) }),
+    body: JSON.stringify({
+      modelProvider,
+      ...(profile === undefined ? {} : { profile }),
+      ...(persistStartup ? {} : { persistStartup: false }),
+    }),
   });
   const body = await response.json().catch(() => undefined) as { endpoint?: unknown; error?: unknown } | undefined;
   if (response.ok && typeof body?.endpoint === "string") return body.endpoint;

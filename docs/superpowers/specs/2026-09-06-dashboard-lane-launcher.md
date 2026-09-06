@@ -45,7 +45,7 @@
    - 只填 `profile`：按现有 Codex profile 配置解析 provider。
    - 只填 `modelProvider`：显式指定 provider。
    - 两项都填：显式 provider 优先，用来表达模型与 provider 必须成对出现的场景。
-5. 从 profile 选择模型时，页面同时填写对应 provider。从模型菜单直接切换时，如果模型只对应一个 profile，页面采用该 profile；否则清空 profile 并显式填写基础 Codex provider。不能只改模型字符串而让 `thread/resume` 沿用上一次的 provider。
+5. 从 profile 选择模型时，页面同时填写对应 provider。从模型菜单直接切换时，如果模型只对应一个 profile，页面采用该 profile；否则清空 profile，并优先采用同模型族 profile 唯一指向的 provider，模型族无法唯一确定时才回退到基础 Codex provider。不能只改模型字符串而让 `thread/resume` 沿用上一次的 provider。
 6. 如果选择了 Claude lane，同时填写 `profile` 或 `modelProvider`，页面在提交前报错；请求端也会独立拒绝，避免绕过页面造成半个批次被打开。
 7. 点击“打开选中 lane”后，页面逐项目展示结果：已请求打开、跳过、失败。按钮文案用“已请求打开”，不用“已打开”；`launch_requested` 仍是弱声明，窗口是否真的起来要看状态与用户观察。
 
@@ -131,7 +131,7 @@ sequenceDiagram
 
 实现要点：
 
-1. provider endpoint 请求携带 `persistStartup: false`；
+1. provider endpoint 请求携带本次 `profile` 与 `persistStartup: false`；
 2. `CodexTuiBridge` 把 `transient: true` 放进本次 runtime 的 startup 元数据；
 3. `RouterCore.attachCurrent` 看到 transient startup 时，用被替换 binding 的旧 `startup` 写入新 binding；没有旧值时写 `{}`；
 4. transient 标记只存在 Router 内存，不进 SQLite schema；
@@ -165,7 +165,7 @@ sequenceDiagram
 6. transient Codex startup attach 后，新 binding 沿用旧 startup；非 transient 行为保持现状；
 7. dashboard 继续自包含，不引用外部资源；
 8. 现有 `LANE_TOOL_NAMES` 不变。
-9. 先选 `glm` profile，再从模型菜单改选一个不属于该 profile 的 GPT 模型时，请求显式携带基础 provider，不再保留 `ZAI`。
+9. 即使基础 provider 是 `ZAI`，先选 `glm` profile，再从模型菜单改选 GPT 模型时，也会由 GPT profile 的模型族映射得到 `openai`，请求不再保留 `ZAI`。
 
 真机验收使用隔离 `LANE_ROUTER_DATA_ROOT` 和一次性 Codex 测试 lane：
 
