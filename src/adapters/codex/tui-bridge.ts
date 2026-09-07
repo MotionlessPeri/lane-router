@@ -90,6 +90,11 @@ export class CodexTuiBridge {
     const message = parseRecord(raw);
     if (!message) return raw;
     if (message.method === "thread/start" && isId(message.id) && isRecord(message.params)) {
+      if (message.params.ephemeral === true) {
+        return this.modelProvider === undefined
+          ? raw
+          : JSON.stringify({ ...message, params: withModelProvider(message.params, this.modelProvider) });
+      }
       pendingClaims.set(message.id, typeof message.params.cwd === "string" ? message.params.cwd : undefined);
       const params = withModelProvider(this.host.decorateThreadStart(message.params), this.modelProvider);
       return JSON.stringify({ ...message, params });

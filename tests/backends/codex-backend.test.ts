@@ -151,6 +151,13 @@ describe("CodexBackend", () => {
     await expect(missing.backend.waitUntilReplaceable(binding)).resolves.toBeUndefined();
   });
 
+  it("treats an unloaded predecessor thread as replaceable", async () => {
+    const unloaded = setup();
+    unloaded.request.mockRejectedValueOnce(new Error("thread not loaded"));
+
+    await expect(unloaded.backend.waitUntilReplaceable(binding)).resolves.toBeUndefined();
+  });
+
   it("treats a system-error thread as replaceable and unreachable", async () => {
     const replace = setup("systemError");
     await expect(replace.backend.waitUntilReplaceable(binding)).resolves.toBeUndefined();

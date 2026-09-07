@@ -197,5 +197,5 @@ function activeTurnId(response: ThreadResult): string {
 }
 
 function isMissingThread(error: unknown): boolean {
-  return error instanceof Error && /not found|unknown thread/iu.test(error.message);
+  return error instanceof Error && /not found|unknown thread|thread not loaded/iu.test(error.message);
 }

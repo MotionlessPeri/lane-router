@@ -83,12 +83,13 @@ test("a model provider endpoint injects the provider into thread start and resum
   const upstreams: WebSocket[] = [];
   upstreamServer.on("connection", (socket) => upstreams.push(socket));
   const claimed: Array<{ threadId: string; startup?: Record<string, string> }> = [];
+  const opened: string[] = [];
   const closed: string[] = [];
   const codex = {
     endpoint: `ws://127.0.0.1:${address.port}`,
     decorateThreadStart: (params: Record<string, unknown>) => ({ ...params, dynamicTools: [], developerInstructions: "router instructions" }),
     claimThread: (threadId: string, _cwd?: string, startup?: Record<string, string>) => { claimed.push({ threadId, startup }); },
-    openThreadClient: () => undefined,
+    openThreadClient: (threadId: string) => { opened.push(threadId); },
     closeThreadClient: (threadId: string) => { closed.push(threadId); },
     ownsThread: (threadId: string) => threadId === "thread-owned",
     dispatchTool: vi.fn(async () => ({ success: true })),
@@ -125,6 +126,18 @@ test("a model provider endpoint injects the provider into thread start and resum
     upstreams[0]!.send(JSON.stringify({ id: 1, result: { thread: { id: "thread-owned", status: { type: "idle" }, turns: [] } } }));
     await nextJson(providerClient);
     expect(claimed[0]).toEqual({ threadId: "thread-owned", startup: { profile: "glm", modelProvider: "ZAI" } });
+    expect(opened).toEqual(["thread-owned"]);
+
+    providerClient.send(JSON.stringify({ id: 5, method: "thread/start", params: { cwd: "C:/project", ephemeral: true } }));
+    expect(await nextJson(upstreams[0]!)).toEqual({
+      id: 5,
+      method: "thread/start",
+      params: { cwd: "C:/project", ephemeral: true, modelProvider: "ZAI" },
+    });
+    upstreams[0]!.send(JSON.stringify({ id: 5, result: { thread: { id: "thread-recap", status: { type: "idle" }, turns: [] } } }));
+    await nextJson(providerClient);
+    expect(claimed).toHaveLength(1);
+    expect(opened).toEqual(["thread-owned"]);
 
     providerClient.send(JSON.stringify({ id: 2, method: "thread/start", params: { cwd: "C:/other", modelProvider: "openai" } }));
     expect(await nextJson(upstreams[0]!)).toMatchObject({ id: 2, params: { modelProvider: "ZAI" } });
