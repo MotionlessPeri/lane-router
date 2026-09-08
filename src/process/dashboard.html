@@ -172,9 +172,11 @@
     checkbox.type = "checkbox";
     checkbox.setAttribute("data-lane-checkbox", lane.address);
     checkbox.value = lane.address;
-    checkbox.checked = previous.choices.has(lane.address)
-      ? previous.choices.get(lane.address) && lane.binding !== null
-      : lane.binding !== null && lane.restorePresence === "offline";
+    // Nothing is selected until somebody selects it. Opening a lane is a visible act — a window
+    // appears and a conversation resumes — so the page must not arrive with a set already ticked
+    // and one click away from launching it. A poll refresh keeps whatever the reader chose;
+    // it never re-ticks a box on their behalf.
+    checkbox.checked = previous.choices.get(lane.address) === true && lane.binding !== null;
     checkbox.disabled = lane.binding === null;
     choice.appendChild(checkbox);
     const startup = lane.binding && lane.binding.backend === "codex"
@@ -410,6 +412,10 @@
     const addresses = [...document.querySelectorAll("input[data-lane-checkbox]")].
       filter((checkbox) => checkbox.checked).
       map((checkbox) => checkbox.value);
+    // Answered here rather than by the Router, which rejects an empty list with a 400 the reader
+    // would see as "打开接口返回 400" — a transport code standing in for "you have not picked
+    // anything yet". Nothing is selected by default, so this is the first click, not a rare one.
+    if (addresses.length === 0) return setLauncherStatus("先勾选要打开的 lane。", true);
     const override = {};
     document.querySelectorAll("[data-override]").forEach((control) => {
       if (control.value.trim() !== "") override[control.getAttribute("data-override")] = control.value.trim();

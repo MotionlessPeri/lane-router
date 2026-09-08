@@ -141,12 +141,15 @@ test("hostile text in a snapshot is shown, not run", async () => {
   expect(document.querySelectorAll("script")).toHaveLength(1);
 });
 
-test("the launcher selects restorable lanes and submits one protected request", async () => {
+test("the launcher starts with nothing selected and submits one protected request", async () => {
   const { document, calls } = await renderLauncher();
   const checkboxes = [...document.querySelectorAll("input[data-lane-checkbox]")];
-  expect(checkboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([true, false]);
+  // Both sides, not just the restorable one: a default that ticks anything makes opening a lane
+  // one stray click away, and asserting only the online lane would pass under either default.
+  expect(checkboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([false, false]);
   expect(document.querySelector("button#open-selected")?.hasAttribute("disabled")).toBe(false);
 
+  (document.querySelector("input[data-lane-checkbox][value='alpha/offline']") as HTMLInputElement).checked = true;
   (document.querySelector("#override-model") as HTMLInputElement).value = "glm-5.3";
   (document.querySelector("#override-profile") as HTMLInputElement).value = "glm";
   (document.querySelector("#override-provider") as HTMLInputElement).value = "ZAI";
@@ -162,6 +165,18 @@ test("the launcher selects restorable lanes and submits one protected request", 
     override: { model: "glm-5.3", profile: "glm", modelProvider: "ZAI" },
     actionToken: "action-token-1",
   });
+});
+
+test("clicking open with nothing selected says so and sends no request", async () => {
+  const { document, calls } = await renderLauncher();
+  const before = calls.length;
+
+  (document.querySelector("button#open-selected") as HTMLButtonElement).click();
+
+  await vi.waitFor(() => expect(document.querySelector("#launcher-status")?.textContent).toContain("先勾选"));
+  // The point of the guard is that nothing leaves the page: the Router would answer an empty list
+  // with a 400, and the reader would be told a status code instead of what they did.
+  expect(calls).toHaveLength(before);
 });
 
 test("the launcher offers constrained startup menus and fills a profile's startup facts", async () => {
@@ -202,6 +217,7 @@ test("switching from a GLM profile to a GPT model also returns to the default pr
   expect(profile.value).toBe("");
   expect(provider.value).toBe("openai");
 
+  (document.querySelector("input[data-lane-checkbox][value='alpha/offline']") as HTMLInputElement).checked = true;
   (document.querySelector("button#open-selected") as HTMLButtonElement).click();
   await vi.waitFor(() => expect(calls).toHaveLength(2));
   expect(JSON.parse(String(calls[1]!.init?.body)).override).toEqual({
@@ -252,6 +268,7 @@ test("an open result remains visible when polling replaces the launcher while th
   );
   await vi.waitFor(() => expect(window.document.body.textContent).toContain("alpha/offline"));
 
+  (window.document.querySelector("input[data-lane-checkbox][value='alpha/offline']") as HTMLInputElement).checked = true;
   (window.document.querySelector("button#open-selected") as HTMLButtonElement).click();
   await vi.waitFor(() => expect(fetchStub).toHaveBeenCalledTimes(2));
   poll?.();
