@@ -167,6 +167,21 @@ test("the launcher starts with nothing selected and submits one protected reques
   });
 });
 
+test("the section people operate comes first and the long ones start folded", async () => {
+  const document = await render();
+
+  const headings = [...document.querySelectorAll("h2, summary.section")].map((node) => node.textContent);
+  expect(headings[0]).toBe("恢复 lane");
+
+  // Folded, not removed: 29 lanes with their role descriptions and 200 message bodies are what
+  // pushed the launcher below the fold, and they are still worth reaching in two clicks.
+  expect(document.querySelector("#lanes")?.closest("details")?.hasAttribute("open")).toBe(false);
+  expect(document.querySelector("#messages")?.closest("details")?.hasAttribute("open")).toBe(false);
+  // The backlog stays open on purpose — it is the panel that shows a lane nobody is answering,
+  // and it is short enough not to cost anything.
+  expect(document.querySelector("#backlog")?.closest("details")).toBeNull();
+});
+
 test("clicking open with nothing selected says so and sends no request", async () => {
   const { document, calls } = await renderLauncher();
   const before = calls.length;

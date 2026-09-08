@@ -20,6 +20,12 @@
   .role { white-space: pre-wrap; word-break: break-word; max-width: 40ch; color: var(--dim); }
   details { margin-top: .75rem; }
   summary { cursor: pointer; color: var(--dim); }
+  /* A folded section header has to read as a section header, not as a link inside one: same size,
+     weight and rule as the h2 it stands in for, with the disclosure marker as the only difference. */
+  summary.section {
+    font-size: 13px; font-weight: 600; color: inherit;
+    margin: 1.75rem 0 .5rem; padding-bottom: .25rem; border-bottom: 1px solid var(--line);
+  }
   .empty { color: var(--dim); padding: .4rem 0; }
   .project { margin: .65rem 0; }
   .project h3 { font-size: 13px; margin: 0 0 .25rem; }
@@ -37,17 +43,28 @@
   <span id="status" class="dim"></span>
 </header>
 
-<h2>lane 拓扑</h2>
-<div id="lanes"></div>
-
+<!--
+  Ordered by what the reader does, not by what the snapshot contains. The launcher is the one
+  section people operate; the two long ones (29 lanes with their role descriptions, 200 message
+  bodies) used to push it below the fold. Those two fold instead, and the fold state survives the
+  poll because only the inner div is replaced - the details element itself is never re-rendered.
+  The backlog stays open: it is short, and it is the panel that surfaces a lane nobody is answering.
+-->
 <h2>恢复 lane</h2>
 <div id="launcher"></div>
 
 <h2>积压队列</h2>
 <div id="backlog"></div>
 
-<h2>消息流</h2>
-<div id="messages"></div>
+<details>
+  <summary class="section">lane 拓扑</summary>
+  <div id="lanes"></div>
+</details>
+
+<details>
+  <summary class="section">消息流</summary>
+  <div id="messages"></div>
+</details>
 
 <script>
 (function () {
