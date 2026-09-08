@@ -3,7 +3,10 @@ param()
 
 $ErrorActionPreference = "Stop"
 
-$laneRouterRoot = "D:\my_projects\lane-router"
+# Derived from this script's own location rather than written down: the repo sits at a different
+# path on each machine, and a hardcoded one fails on every machine but the author's - reporting a
+# missing build, which reads as "you forgot to compile" rather than "this path is not yours".
+$laneRouterRoot = Split-Path -Parent $PSScriptRoot
 $laneRouterDataRoot = Join-Path $env:USERPROFILE ".lane-router"
 $discoveryPath = Join-Path $laneRouterDataRoot "discovery.json"
 $routerMainPath = Join-Path $laneRouterRoot "dist\process\main.js"
