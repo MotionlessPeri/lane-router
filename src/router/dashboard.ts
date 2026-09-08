@@ -61,6 +61,12 @@ export interface DashboardLauncherModel {
   readonly id: string;
   readonly displayName: string;
   readonly hidden: boolean;
+  /**
+   * Which CLI answers to this name. The menu lists both backends' models together, and a Claude
+   * lane launched on a Codex model fails at the CLI rather than here — so the reader is told which
+   * is which instead of being left to recognise it from the name.
+   */
+  readonly backend?: "claude" | "codex";
 }
 
 export interface DashboardLauncherProfile {

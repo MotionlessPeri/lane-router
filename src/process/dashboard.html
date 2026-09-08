@@ -265,6 +265,37 @@
       return replace(document.getElementById("launcher"), host);
     }
 
+    // Above the projects rather than inside one, because it acts on all of them. Disabled lanes
+    // (no binding, nothing to resume) are never ticked by it: they are not choices, and a control
+    // that appears to select them would report a selection the launcher cannot act on.
+    const selectAllChoice = el("label", "lane-choice");
+    const selectAll = document.createElement("input");
+    selectAll.type = "checkbox";
+    selectAll.setAttribute("data-select-all", "");
+    selectAllChoice.appendChild(selectAll);
+    selectAllChoice.appendChild(document.createTextNode(" 全选 / 取消全选"));
+    host.appendChild(selectAllChoice);
+
+    const selectableLanes = () =>
+      [...host.querySelectorAll("input[data-lane-checkbox]")].filter((checkbox) => !checkbox.disabled);
+
+    function syncSelectAll() {
+      const selectable = selectableLanes();
+      selectAll.disabled = selectable.length === 0;
+      selectAll.checked = selectable.length > 0 && selectable.every((checkbox) => checkbox.checked);
+      // Neither all nor none: the box shows a third state rather than guessing at one of the two,
+      // so ticking it from here is always "select everything" and never a silent deselect.
+      selectAll.indeterminate = !selectAll.checked && selectable.some((checkbox) => checkbox.checked);
+    }
+
+    selectAll.addEventListener("change", () => {
+      selectableLanes().forEach((checkbox) => { checkbox.checked = selectAll.checked; });
+      host.querySelectorAll("section.project").forEach((group) => {
+        syncProjectCheckbox(group, group.querySelector("input[data-project-checkbox]"));
+      });
+      syncSelectAll();
+    });
+
     const projects = new Map();
     snapshot.lanes.filter((lane) => !lane.archived).forEach((lane) => {
       if (!projects.has(lane.project)) projects.set(lane.project, []);
@@ -282,6 +313,7 @@
           (checkbox).checked = projectCheckbox.checked && !checkbox.disabled;
         });
         syncProjectCheckbox(group, projectCheckbox);
+        syncSelectAll();
       });
       projectChoice.appendChild(projectCheckbox);
       projectChoice.appendChild(document.createTextNode(" " + project));
@@ -290,16 +322,22 @@
       group.appendChild(heading);
       lanes.forEach((lane) => group.appendChild(launcherLane(lane, previous)));
       group.querySelectorAll("input[data-lane-checkbox]").forEach((checkbox) => {
-        checkbox.addEventListener("change", () => syncProjectCheckbox(group, projectCheckbox));
+        checkbox.addEventListener("change", () => {
+          syncProjectCheckbox(group, projectCheckbox);
+          syncSelectAll();
+        });
       });
       syncProjectCheckbox(group, projectCheckbox);
       host.appendChild(group);
     });
+    syncSelectAll();
 
     const overrides = el("div", "override-grid");
+    // The backend is part of the label because the list holds both, and picking a Codex model for
+    // a Claude lane fails at the CLI rather than in this page — late, and away from the choice.
     const model = launcherSelect("override-model", "model", "model", (snapshot.launcher?.models ?? []).map((entry) => ({
       value: entry.id,
-      label: entry.displayName + (entry.hidden ? "（hidden）" : ""),
+      label: entry.displayName + (entry.hidden ? "（hidden）" : "") + (entry.backend ? " · " + entry.backend : ""),
     })), previous);
     const profiles = snapshot.launcher?.profiles ?? [];
     const profile = launcherSelect("override-profile", "Codex profile", "profile", profiles.map((entry) => ({

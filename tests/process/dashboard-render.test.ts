@@ -37,9 +37,15 @@ const launcherSnapshot = {
   actionToken: "action-token-1",
   launcher: {
     defaultModelProvider: "ZAI",
+    // Shaped like what the Router now publishes: the Claude aliases first, then whatever Codex
+    // reports, each carrying the backend it belongs to.
     models: [
-      { id: "glm-5.3", displayName: "GLM 5.3", hidden: false },
-      { id: "gpt-6-astra", displayName: "GPT 6 Astra", hidden: true },
+      { id: "opus", displayName: "opus", hidden: false, backend: "claude" },
+      { id: "sonnet", displayName: "sonnet", hidden: false, backend: "claude" },
+      { id: "haiku", displayName: "haiku", hidden: false, backend: "claude" },
+      { id: "fable", displayName: "fable", hidden: false, backend: "claude" },
+      { id: "glm-5.3", displayName: "GLM 5.3", hidden: false, backend: "codex" },
+      { id: "gpt-6-astra", displayName: "GPT 6 Astra", hidden: true, backend: "codex" },
     ],
     profiles: [
       { name: "glm", model: "glm-5.3", modelProvider: "ZAI" },
@@ -55,6 +61,14 @@ const launcherSnapshot = {
     },
     {
       ...snapshot.lanes[0]!, address: "beta/online", project: "beta", restorePresence: "online",
+    },
+    // Unbound, so the launcher disables it: there is no conversation to resume. Present in the
+    // fixture because the disabled branch is what "select all" must not reach past, and a fixture
+    // where every lane is selectable cannot tell a correct select-all from one that ticks anything
+    // it finds.
+    {
+      ...snapshot.lanes[0]!, address: "beta/unbound", project: "beta",
+      binding: null, reach: null, restorePresence: "unavailable",
     },
   ],
 };
@@ -146,7 +160,7 @@ test("the launcher starts with nothing selected and submits one protected reques
   const checkboxes = [...document.querySelectorAll("input[data-lane-checkbox]")];
   // Both sides, not just the restorable one: a default that ticks anything makes opening a lane
   // one stray click away, and asserting only the online lane would pass under either default.
-  expect(checkboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([false, false]);
+  expect(checkboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([false, false, false]);
   expect(document.querySelector("button#open-selected")?.hasAttribute("disabled")).toBe(false);
 
   (document.querySelector("input[data-lane-checkbox][value='alpha/offline']") as HTMLInputElement).checked = true;
@@ -180,6 +194,54 @@ test("the section people operate comes first and the long ones start folded", as
   // The backlog stays open on purpose — it is the panel that shows a lane nobody is answering,
   // and it is short enough not to cost anything.
   expect(document.querySelector("#backlog")?.closest("details")).toBeNull();
+});
+
+test("select-all reaches every restorable lane and stops at the ones it cannot open", async () => {
+  const { document, window } = await renderLauncher();
+  const selectAll = document.querySelector("input[data-select-all]") as HTMLInputElement;
+  const checked = () =>
+    [...document.querySelectorAll("input[data-lane-checkbox]")].map((box) => (box as HTMLInputElement).checked);
+
+  expect(selectAll.checked).toBe(false);
+
+  selectAll.checked = true;
+  selectAll.dispatchEvent(new window.Event("change"));
+  // The unbound lane stays false: it has no conversation to resume, so selecting it would report a
+  // choice the launcher cannot act on.
+  expect(checked()).toEqual([true, true, false]);
+
+  selectAll.checked = false;
+  selectAll.dispatchEvent(new window.Event("change"));
+  expect(checked()).toEqual([false, false, false]);
+});
+
+test("select-all shows a third state while only some lanes are picked", async () => {
+  const { document, window } = await renderLauncher();
+  const selectAll = document.querySelector("input[data-select-all]") as HTMLInputElement;
+  const one = document.querySelector("input[data-lane-checkbox][value='alpha/offline']") as HTMLInputElement;
+
+  one.checked = true;
+  one.dispatchEvent(new window.Event("change"));
+
+  // Neither ticked nor clear: ticking it from here means "select everything", and showing it as
+  // checked would make the next click a silent deselect of a lane the reader had chosen.
+  expect(selectAll.checked).toBe(false);
+  expect(selectAll.indeterminate).toBe(true);
+});
+
+test("the model menu offers Claude aliases and says which CLI each name belongs to", async () => {
+  const { document } = await renderLauncher();
+  const options = [...(document.querySelector("#override-model")?.querySelectorAll("option") ?? [])];
+  const byValue = new Map(options.map((option) => [option.getAttribute("value"), option.textContent]));
+
+  // Aliases, not versioned ids: the Claude CLI has no listing command, and an alias keeps naming
+  // the current model of its family while a version would go stale.
+  for (const alias of ["opus", "sonnet", "haiku", "fable"]) expect(byValue.has(alias)).toBe(true);
+
+  // Both backends share one menu, so each option says which one it is for — picking a Codex model
+  // for a Claude lane fails at the CLI, far from this choice.
+  expect(byValue.get("opus")).toContain("claude");
+  expect(byValue.get("glm-5.3")).toContain("codex");
 });
 
 test("clicking open with nothing selected says so and sends no request", async () => {
@@ -253,7 +315,7 @@ test("a launcher refresh keeps operator choices instead of resetting offline def
   await refresh();
 
   const checkboxes = [...document.querySelectorAll("input[data-lane-checkbox]")];
-  expect(checkboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([false, true]);
+  expect(checkboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([false, true, false]);
   const projectCheckboxes = [...document.querySelectorAll("input[data-project-checkbox]")];
   expect(projectCheckboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([false, true]);
   expect(projectCheckboxes.map((checkbox) => (checkbox as HTMLInputElement).indeterminate)).toEqual([false, false]);

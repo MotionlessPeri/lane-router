@@ -16,6 +16,7 @@ import { RouterStateStore } from "../router/state-store.js";
 import { ClaudeSessionLocator } from "./claude-session-locator.js";
 import { ConversationRestorer } from "./conversation-restorer.js";
 import { DashboardLaneOpener } from "./dashboard-lane-opener.js";
+import { CLAUDE_LAUNCHER_MODELS } from "./claude-models.js";
 import { defaultCodexModelProvider, listCodexModelProviders, listCodexProfiles, profileModelProvider } from "./codex-profiles.js";
 import { ToolService } from "../tools/tool-service.js";
 import { ClaudeChannelHub, LocalRouterServer } from "./local-server.js";
@@ -109,7 +110,7 @@ async function codexLauncherChoices(client: { request(method: string, params: un
       if (typeof model.id !== "string" || typeof model.displayName !== "string" || typeof model.hidden !== "boolean") {
         throw new Error("Codex App Server model/list returned an invalid model");
       }
-      models.push({ id: model.id, displayName: model.displayName, hidden: model.hidden });
+      models.push({ id: model.id, displayName: model.displayName, hidden: model.hidden, backend: "codex" });
     }
     const next = responseProperty(response, "nextCursor");
     if (next !== null && typeof next !== "string") throw new Error("Codex App Server model/list returned an invalid cursor");
@@ -117,7 +118,9 @@ async function codexLauncherChoices(client: { request(method: string, params: un
   } while (cursor !== undefined && models.length < 10_000);
   return {
     defaultModelProvider: defaultCodexModelProvider(),
-    models,
+    // Claude first: its four aliases are the short, stable end of the list, and burying them under
+    // however many models Codex reports would leave them unfindable in the menu.
+    models: [...CLAUDE_LAUNCHER_MODELS, ...models],
     profiles: listCodexProfiles(),
     modelProviders: listCodexModelProviders(),
   };
