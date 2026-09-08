@@ -279,6 +279,10 @@
     const selectableLanes = () =>
       [...host.querySelectorAll("input[data-lane-checkbox]")].filter((checkbox) => !checkbox.disabled);
 
+    // Assigned once the model menu exists, further down; the selection handlers are wired before
+    // that and would otherwise have nothing to call.
+    let applyModelFilter = () => {};
+
     function syncSelectAll() {
       const selectable = selectableLanes();
       selectAll.disabled = selectable.length === 0;
@@ -294,6 +298,7 @@
         syncProjectCheckbox(group, group.querySelector("input[data-project-checkbox]"));
       });
       syncSelectAll();
+      applyModelFilter();
     });
 
     const projects = new Map();
@@ -314,6 +319,7 @@
         });
         syncProjectCheckbox(group, projectCheckbox);
         syncSelectAll();
+        applyModelFilter();
       });
       projectChoice.appendChild(projectCheckbox);
       projectChoice.appendChild(document.createTextNode(" " + project));
@@ -325,6 +331,7 @@
         checkbox.addEventListener("change", () => {
           syncProjectCheckbox(group, projectCheckbox);
           syncSelectAll();
+          applyModelFilter();
         });
       });
       syncProjectCheckbox(group, projectCheckbox);
@@ -339,6 +346,30 @@
       value: entry.id,
       label: entry.displayName + (entry.hidden ? "（hidden）" : "") + (entry.backend ? " · " + entry.backend : ""),
     })), previous);
+    /**
+     * One override goes to every selected lane, so a model has to suit all of them. With lanes
+     * from both CLIs picked at once no model does, and the menu says so by leaving only "default"
+     * enabled rather than offering a name that would fail at whichever CLI it does not belong to.
+     */
+    const modelBackends = new Map((snapshot.launcher?.models ?? []).map((entry) => [entry.id, entry.backend]));
+    applyModelFilter = () => {
+      const picked = new Set([...host.querySelectorAll("input[data-lane-checkbox]")]
+        .filter((checkbox) => checkbox.checked).map((checkbox) => checkbox.value));
+      const backends = new Set(snapshot.lanes
+        .filter((lane) => picked.has(lane.address) && lane.binding)
+        .map((lane) => lane.binding.backend));
+      [...model.select.options].forEach((option) => {
+        const backend = modelBackends.get(option.value);
+        const suitsAll = backends.size === 0 || backend === undefined || (backends.size === 1 && backends.has(backend));
+        option.disabled = option.value !== "" && !suitsAll;
+      });
+      // A model picked before the selection changed can stop suiting it. Clearing it is the point
+      // of the filter: leaving it would submit an override the lane cannot use, and the menu would
+      // be showing a greyed-out option as the current choice.
+      const current = [...model.select.options].find((option) => option.value === model.select.value);
+      if (current && current.disabled) model.select.value = "";
+    };
+
     const profiles = snapshot.launcher?.profiles ?? [];
     const profile = launcherSelect("override-profile", "Codex profile", "profile", profiles.map((entry) => ({
       value: entry.name,
@@ -382,6 +413,9 @@
     status.textContent = previous.statusText;
     status.className = previous.statusClassName;
     host.appendChild(status);
+    // Once on render too, not only on change: a poll rebuilds this section with the selection the
+    // reader already had, and the menu has to arrive matching it rather than a click behind.
+    applyModelFilter();
     replace(document.getElementById("launcher"), host);
     if (previous.activeOverride !== null) {
       document.querySelectorAll("[data-override]").forEach((control) => {

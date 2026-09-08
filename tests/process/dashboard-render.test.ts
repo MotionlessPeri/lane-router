@@ -244,6 +244,51 @@ test("the model menu offers Claude aliases and says which CLI each name belongs 
   expect(byValue.get("glm-5.3")).toContain("codex");
 });
 
+test("the model menu narrows to the CLI of the lanes that are picked", async () => {
+  const { document, window } = await renderLauncher();
+  const model = document.querySelector("#override-model") as HTMLSelectElement;
+  const enabled = () =>
+    [...model.querySelectorAll("option")].filter((option) => !option.disabled).map((option) => option.getAttribute("value"));
+  const tick = (address: string, on: boolean) => {
+    const box = document.querySelector(`input[data-lane-checkbox][value='${address}']`) as HTMLInputElement;
+    box.checked = on;
+    box.dispatchEvent(new window.Event("change"));
+  };
+
+  // Nothing picked yet, so nothing is ruled out.
+  expect(enabled()).toContain("opus");
+  expect(enabled()).toContain("glm-5.3");
+
+  // alpha/offline is a Codex lane, so the Claude aliases drop out and the Codex models stay.
+  tick("alpha/offline", true);
+  expect(enabled()).not.toContain("opus");
+  expect(enabled()).toContain("glm-5.3");
+  expect(enabled()).toContain("");
+
+  // beta/online is a Claude lane. One override goes to both, and no model suits both, so only
+  // "leave it alone" is left.
+  tick("beta/online", true);
+  expect(enabled()).toEqual([""]);
+});
+
+test("a model that stops suiting the selection is cleared, not left showing", async () => {
+  const { document, window } = await renderLauncher();
+  const model = document.querySelector("#override-model") as HTMLSelectElement;
+
+  model.value = "opus";
+  const claude = document.querySelector("input[data-lane-checkbox][value='beta/online']") as HTMLInputElement;
+  claude.checked = true;
+  claude.dispatchEvent(new window.Event("change"));
+  expect(model.value).toBe("opus");
+
+  // Adding a Codex lane leaves opus applying to only half the selection. Leaving it selected would
+  // submit an override that lane cannot use, so it goes back to "default".
+  const codex = document.querySelector("input[data-lane-checkbox][value='alpha/offline']") as HTMLInputElement;
+  codex.checked = true;
+  codex.dispatchEvent(new window.Event("change"));
+  expect(model.value).toBe("");
+});
+
 test("clicking open with nothing selected says so and sends no request", async () => {
   const { document, calls } = await renderLauncher();
   const before = calls.length;
@@ -305,8 +350,11 @@ test("switching from a GLM profile to a GPT model also returns to the default pr
 
 test("a launcher refresh keeps operator choices instead of resetting offline defaults", async () => {
   const { document, refresh } = await renderLauncherWithRefresh();
-  (document.querySelector("input[data-lane-checkbox][value='alpha/offline']") as HTMLInputElement).checked = false;
-  (document.querySelector("input[data-lane-checkbox][value='beta/online']") as HTMLInputElement).checked = true;
+  // A Codex lane with Codex overrides: the point here is that a poll keeps what the operator
+  // chose, so the choice has to be one that stands on its own rather than one the model filter
+  // would clear for a reason of its own.
+  (document.querySelector("input[data-lane-checkbox][value='alpha/offline']") as HTMLInputElement).checked = true;
+  (document.querySelector("input[data-lane-checkbox][value='beta/online']") as HTMLInputElement).checked = false;
   (document.querySelector("#override-model") as HTMLInputElement).value = "glm-5.3";
   (document.querySelector("#override-profile") as HTMLInputElement).value = "glm";
   (document.querySelector("#override-provider") as HTMLInputElement).value = "ZAI";
@@ -315,9 +363,9 @@ test("a launcher refresh keeps operator choices instead of resetting offline def
   await refresh();
 
   const checkboxes = [...document.querySelectorAll("input[data-lane-checkbox]")];
-  expect(checkboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([false, true, false]);
+  expect(checkboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([true, false, false]);
   const projectCheckboxes = [...document.querySelectorAll("input[data-project-checkbox]")];
-  expect(projectCheckboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([false, true]);
+  expect(projectCheckboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([true, false]);
   expect(projectCheckboxes.map((checkbox) => (checkbox as HTMLInputElement).indeterminate)).toEqual([false, false]);
   expect((document.querySelector("#override-model") as HTMLInputElement).value).toBe("glm-5.3");
   expect(document.activeElement?.id).toBe("override-model");
