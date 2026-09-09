@@ -529,3 +529,23 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 2026-08-08：当前 V1 commit 的真实 Claude/Kimi 和 Codex TUI 流程未在本次无人值守执行中运行，因为它们需要外部模型、现有账户配置和交互窗口。自动验证结果记录在实现 worklog；不得把该结果解释为真实模型通过。
 
 2026-08-08：Codex launcher 工作目录 case 已由用户迁移真实 `agent_coding_guidelines/workflow-curation` lane 完成验证；该结果只覆盖新 thread 的 cwd 传播和 lane 接替，不代表其余 Codex TUI 手工流程全部通过。
+
+#### TC-ROTATE-FIRST-TURN：预载 prompt 的首 turn 里 attach 一次成功
+
+**目标：** 验证 hook 报告抢在 MCP channel 之前到达时，Router 仍能在**同一 turn**内把两者配对，新对话首个 `lane_attach_current` 不再被拒「lifecycle channel is not live for the current turn」。设计见 `specs/2026-08-10-automatic-lane-rotation.md` §4.2.1。
+
+**前提：** Router 已重启到含本修法的构建（判据：`ClaudeChannelHub` 有 `unplacedReports`——或直接看下面第 3 步的结果，旧构建必然失败）。参与的窗口都是重启之后新起的。
+
+**步骤：**
+
+1. 用 `lane-router-lane new <project>/<lane> --role "..."` 或一次真实 rotate 开出新窗口——两者都把 prompt 预载为 CLI 参数，这正是触发竞态的条件。
+2. **不要在新窗口里敲任何字。** 让 bootstrap turn 自己跑：读 AGENTS.md → `lane_directory` → `lane_attach_current`。
+3. 看那一次 `lane_attach_current` 的结果。
+
+**预期：** 首 turn 内一次成功；`lane_directory` 里该 lane `reach.state` 为 `live`、`believedBusy` 为 `true`（turn 还在跑）。**旧构建上这一步必然是** `lifecycle channel is not live for the current turn`，且同 turn 重试同样失败——那是本用例的对照。
+
+**关键看点：** 第 2 步那句"不要敲字"不能省。人一敲字就产生新的 `UserPromptSubmit`，配对随之完成，旧构建也会通过——那不是验到了修法，是验到了绕法。
+
+⚠️ **这条修法不覆盖 Router 未运行的情形**：那时 hook 的 POST 根本发不出去，没有报告可暂存。要单独验就先停 Router 再开窗；预期是 MCP server 的 `ensureRouter` 把 Router 拉起、channel 连上、但首 turn 仍然被拒——**这是已知边界，不算回归**。
+
+**最后验证：** 尚未真机执行。自动测试覆盖三态（窗内应用 / 超窗作废且不可重复消费 / 早到的 Stop 以空闲状态应用并放行等待者），并经真实 `ClaudeBackend.validateAttach` 走通首 turn 三条件；变异检验结果见提交说明。

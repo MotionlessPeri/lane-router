@@ -115,6 +115,16 @@ claude --dangerously-load-development-channels server:lane -- <initial-prompt>
 
 任一条件不成立时，attach 返回明确的 Claude identity/lifecycle precondition error，且不得改变 lane、role 或 binding。Codex 使用权威 `threadId`，不走这项检查。实现可以扩展 backend 内部 identity-readiness 契约，但不新增公开工具参数或返回字段。
 
+#### 4.2.1 首 turn 竞态（2026-09-09 补）
+
+上面第二、三条在**预载 prompt** 的会话里会系统性失败：rotate 与 `lane-router-lane new` 都把 bootstrap 当命令行参数交给 CLI，turn 立刻开始，`UserPromptSubmit` hook 立刻 POST；此时 MCP server 还在 `ensureRouter` + 开 channel。Router 只记下 `joinKey → identity`（所以 `joined` 成立），报告本身落不到任何 connection；channel 随后连上，但按 `connect()` 的规则**不用记住的 joinKey 认领身份**（防 pid 复用），于是挂在 MCP 进程 id 下、`lastLifecycleAt=null`。`reach(identity)` 查不到 ⇒ 「lifecycle channel is not live for the current turn」。
+
+⚠️ **同一 turn 内重试无效**：重新配对只发生在下一次 hook 报告，即下一个人类 prompt。无人值守的 lane 因此永远绑不上——收不到通知，也没有第二个 turn。另一条 lane 实测：首 turn 三次被拒，人敲一句后一次成功（2026-09-02）；2026-09-05 再撞两次。
+
+**修法**：Router 把「没落到任何 connection、但带 joinKey」的报告暂存；随后带同一 joinKey 的 channel 在 **30 秒窗口**内连上时，把这份报告应用到它身上（重定键到报告里的 conversation id，写入 `lastLifecycleAt` / `busy`）。窗口是对 `connect()` 那条 pid 复用顾虑的回答：一份报告只会配给紧随其后的 channel，复用 pid 的新会话凑不出这个时序。超窗的报告作废，且只能被消费一次。`reportLifecycle` 当时的返回值仍是 `false`——它确实没被接受，这里没有改写事实。
+
+不在此修法内：Router 未运行时 hook 的 POST 直接失败（`AbortSignal.timeout(2_000)`，静默），此时没有任何报告可暂存；这一段仍靠 MCP server 启动时的 `ensureRouter` 兜底顺序，未验证。
+
 ### 4.3 可见 terminal
 
 V1 明确支持 Windows。进程拓扑固定为：旧 agent 的 shell → `lane-router-rotate` → 独立 PowerShell → 内部 terminal child → Codex/Claude CLI。

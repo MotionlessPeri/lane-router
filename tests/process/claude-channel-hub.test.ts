@@ -1,6 +1,7 @@
 import type { WebSocket } from "ws";
 import { expect, test, vi } from "vitest";
 
+import { ClaudeBackend } from "../../src/backends/claude-backend.js";
 import { ClaudeChannelHub } from "../../src/process/local-server.js";
 import type { BindingRecord } from "../../src/router/types.js";
 
@@ -234,6 +235,60 @@ test("a join key stops meaning anything once its channel is gone", () => {
 
   expect(hub.resolveIdentity({ conversationId: "someone-else", joinKey: "session-key" }))
     .toEqual({ value: "someone-else", source: "caller" });
+});
+
+// A preloaded first prompt (rotation, `lane-router-lane new`) fires the UserPromptSubmit hook while
+// the MCP server is still opening its channel. The report lands on nothing; the channel that
+// follows has no lifecycle; and nothing re-joins them until the next human prompt — which an
+// unattended lane never gets. Measured on another lane: attach refused three times in the first
+// turn, accepted once on the next.
+test("a report that beat its own channel is applied when that channel connects soon after", () => {
+  const time = clock();
+  const hub = new ClaudeChannelHub(() => undefined, time.now);
+
+  // Honest about what happened at the time: nothing carried it, so it was not accepted.
+  expect(hub.reportLifecycle("conversation-id", "UserPromptSubmit", "session-key")).toBe(false);
+  expect(hub.reach("conversation-id").state).toBe("no_channel");
+
+  time.advance(3_000);
+  hub.connect("mcp-server-id", sendableSocket(), "session-key");
+
+  // Everything validateAttach asks of a caller in that first turn, on the real objects.
+  expect(hub.reach("conversation-id")).toMatchObject({ state: "live", believedBusy: true, lastLifecycleAt: 1_000 });
+  expect(hub.reach("mcp-server-id").state).toBe("no_channel");
+  expect(hub.resolveIdentity({ conversationId: "mcp-server-id", joinKey: "session-key" }))
+    .toEqual({ value: "conversation-id", source: "joined" });
+  expect(new ClaudeBackend(hub).validateAttach({ backend: "claude", conversationId: "mcp-server-id", joinKey: "session-key", requestKey: "r" }))
+    .toBeUndefined();
+});
+
+test("a report that beat its channel by more than the window is not applied to it", () => {
+  const time = clock();
+  const hub = new ClaudeChannelHub(() => undefined, time.now);
+  hub.reportLifecycle("conversation-id", "UserPromptSubmit", "session-key");
+
+  // Long enough that the process which opened this channel cannot be the one the hook spoke for:
+  // a pid reused after a session died must not be handed that session's report.
+  time.advance(31_000);
+  hub.connect("mcp-server-id", sendableSocket(), "session-key");
+
+  expect(hub.reach("conversation-id").state).toBe("no_channel");
+  expect(hub.reach("mcp-server-id")).toMatchObject({ state: "unconfirmed", lastLifecycleAt: null });
+  // And a second connect does not get to spend the same stale report either.
+  hub.connect("mcp-server-id-2", sendableSocket(), "session-key");
+  expect(hub.reach("conversation-id").state).toBe("no_channel");
+});
+
+test("an early Stop is applied as idle, and releases anyone waiting on that conversation", async () => {
+  const time = clock();
+  const hub = new ClaudeChannelHub(() => undefined, time.now);
+  hub.reportLifecycle("conversation-id", "Stop", "session-key");
+  time.advance(2_000);
+  hub.connect("mcp-server-id", sendableSocket(), "session-key");
+
+  expect(hub.reach("conversation-id")).toMatchObject({ state: "live", believedBusy: false });
+  // Not busy, so a takeover of this conversation's lane does not wait at all.
+  await expect(hub.waitUntilReplaceable(binding("conversation-id"))).resolves.toBeUndefined();
 });
 
 // The wait used to be unbounded on this side while the caller's transport gave up at two minutes.

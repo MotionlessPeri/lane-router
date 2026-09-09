@@ -46,6 +46,18 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
    */
   private readonly identityByJoinKey = new Map<string, string>();
 
+  /**
+   * joinKey -> a lifecycle report that arrived before any channel carried that key. On a session
+   * whose first prompt is preloaded (rotation, `lane-router-lane new`) the UserPromptSubmit hook
+   * fires the instant the turn starts, while the MCP server is still opening its channel: the
+   * report lands on nothing, and the channel that connects moments later has no lifecycle on it.
+   * Nothing re-joins the two until the next hook report — the next human prompt — so an attach in
+   * that first turn fails however often it retries, and an unattended lane never gets a second
+   * turn. Holding the report here lets `connect` apply it when the channel it was meant for shows
+   * up, within a window short enough that a reused pid cannot inherit a stranger's report.
+   */
+  private readonly unplacedReports = new Map<string, { conversationId: string; event: "Stop" | "UserPromptSubmit"; at: number }>();
+
   constructor(
     private readonly resolveBinding: (conversationId: string) => BindingRecord | undefined = () => undefined,
     private readonly now: () => number = Date.now,
@@ -69,9 +81,32 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
       this.signal(current);
     });
     socket.on("error", () => undefined);
-    const binding = this.resolveBinding(key);
-    if (binding) this.bindings.set(key, binding);
-    this.signal(key);
+    const placed = this.placeEarlierReport(key, joinKey) ?? key;
+    const binding = this.resolveBinding(placed);
+    if (binding) this.bindings.set(placed, binding);
+    this.signal(placed);
+  }
+
+  /**
+   * A report that beat its own channel here is applied to that channel now, and the channel starts
+   * answering to the conversation the report named — the same move `adoptByJoinKey` makes when the
+   * order is the usual one. The window is what keeps this from being the remembered-key shortcut
+   * `connect` refuses above: a report is only ever paired with a channel that follows it closely,
+   * which a session reusing the pid seconds after another died could not arrange.
+   * @returns the key the connection now lives under, or undefined when nothing was applied.
+   */
+  private placeEarlierReport(key: string, joinKey: string | undefined): string | undefined {
+    if (joinKey === undefined) return undefined;
+    const report = this.unplacedReports.get(joinKey);
+    if (!report) return undefined;
+    this.unplacedReports.delete(joinKey);
+    if (this.now() - report.at > UNPLACED_REPORT_WINDOW_MS) return undefined;
+    const connection = this.connections.get(key);
+    if (!connection) return undefined;
+    if (key !== report.conversationId) this.rekey(key, report.conversationId, connection);
+    connection.busy = report.event === "UserPromptSubmit";
+    connection.lastLifecycleAt = report.at;
+    return report.conversationId;
   }
 
   /** The identity this caller's lane should be stored under, and whether a join established it. */
@@ -97,6 +132,7 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     if (joinKey === undefined) return;
     for (const connection of this.connections.values()) if (connection.joinKey === joinKey) return;
     this.identityByJoinKey.delete(joinKey);
+    this.unplacedReports.delete(joinKey);
   }
 
   // Claude Code queues a notification that arrives mid-turn, so the frame goes out either way
@@ -159,7 +195,11 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     // over whatever is filed under the conversation — which, just after a restart, is the dead
     // predecessor whose socket has not finished closing.
     const connection = this.adoptByJoinKey(conversationId, joinKey) ?? this.connections.get(conversationId);
-    if (!connection) return false;
+    if (!connection) {
+      // Not accepted — nothing carried it — but kept, so the channel that arrives next can take it.
+      if (joinKey !== undefined) this.unplacedReports.set(joinKey, { conversationId, event, at: this.now() });
+      return false;
+    }
     connection.busy = event === "UserPromptSubmit";
     connection.lastLifecycleAt = this.now();
     if (event === "Stop") this.signal(conversationId);
@@ -175,16 +215,20 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     if (joinKey === undefined) return undefined;
     for (const [key, connection] of this.connections) {
       if (connection.joinKey !== joinKey) continue;
-      if (key === conversationId) return connection;
-      this.connections.get(conversationId)?.socket.close(1000, "replaced");
-      this.connections.delete(key);
-      this.connections.set(conversationId, connection);
-      const waiters = this.waiters.get(key);
-      if (waiters) { this.waiters.delete(key); this.waiters.set(conversationId, waiters); }
-      this.bindings.delete(key);
+      if (key !== conversationId) this.rekey(key, conversationId, connection);
       return connection;
     }
     return undefined;
+  }
+
+  /** Move a connection to the conversation id it turned out to belong to, waiters and all. */
+  private rekey(from: string, to: string, connection: ChannelConnection): void {
+    this.connections.get(to)?.socket.close(1000, "replaced");
+    this.connections.delete(from);
+    this.connections.set(to, connection);
+    const waiters = this.waiters.get(from);
+    if (waiters) { this.waiters.delete(from); this.waiters.set(to, waiters); }
+    this.bindings.delete(from);
   }
 
   close(): void {
@@ -426,6 +470,14 @@ export class LocalRouterServer {
  * act on instead of a bare `fetch failed`.
  */
 const ATTACH_WAIT_MS = 60_000;
+
+/**
+ * How long a lifecycle report waits for the channel it was meant for. The gap it has to cover is
+ * the MCP server's startup — `ensureRouter` plus one WebSocket connect — which is seconds, not
+ * minutes; the bound exists so a pid recycled after a session died cannot be handed that session's
+ * report, which is the case `connect` refuses to serve from a remembered key alone.
+ */
+const UNPLACED_REPORT_WINDOW_MS = 30_000;
 
 function callerLifetime(request: IncomingMessage): AbortSignal {
   const abandoned = new AbortController();
