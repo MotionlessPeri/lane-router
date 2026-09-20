@@ -3,9 +3,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { openRouterDatabase } from "../../src/router/database.js";
+import { initializeRouterSchema } from "../../src/router/schema.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -99,7 +100,7 @@ describe("router schema migration 1 to 2", () => {
     const database = openRouterDatabase(path);
     try {
       // Opening always lands on the current version; the subject here is the value mapping.
-      expect(database.pragma("user_version", { simple: true })).toBe(6);
+      expect(database.pragma("user_version", { simple: true })).toBe(7);
 
       const rows = database.prepare("SELECT id,notification_state FROM message ORDER BY id").all() as Array<{ id: string; notification_state: string }>;
       expect(rows).toEqual([
@@ -210,7 +211,7 @@ describe("router schema migration 2 to 3", () => {
   it("adds a nullable cwd column and keeps the existing binding row untouched", () => {
     const database = openRouterDatabase(writeVersion2Database());
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(6);
+      expect(database.pragma("user_version", { simple: true })).toBe(7);
       const columns = database.pragma("table_info(binding)") as Array<{ name: string; notnull: number }>;
       expect(columns.find((column) => column.name === "cwd")).toMatchObject({ notnull: 0 });
       // The binding names its lane by id from version 6 on, so the address is read through the join.
@@ -229,7 +230,7 @@ describe("router schema migration 2 to 3", () => {
   it("migrates a version 1 database through every intermediate shape to the current one", () => {
     const database = openRouterDatabase(writeVersion1Database());
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(6);
+      expect(database.pragma("user_version", { simple: true })).toBe(7);
       const columns = database.pragma("table_info(binding)") as Array<{ name: string }>;
       expect(columns.map((column) => column.name)).toContain("cwd");
       // The version 1 mapping must still have happened on the way through.
@@ -261,7 +262,7 @@ describe("router schema migration 3 to 4", () => {
   it("adds a nullable model column and leaves every existing lane exactly as it was", () => {
     const database = openRouterDatabase(writeVersion3Database());
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(6);
+      expect(database.pragma("user_version", { simple: true })).toBe(7);
       const columns = database.pragma("table_info(lane)") as Array<{ name: string; notnull: number }>;
       expect(columns.find((column) => column.name === "model")).toMatchObject({ notnull: 0 });
 
@@ -312,7 +313,7 @@ describe("router schema migration 4 to 5", () => {
   it("adds a nullable out-of-service column and leaves every existing lane exactly as it was", () => {
     const database = openRouterDatabase(writeVersion4Database());
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(6);
+      expect(database.pragma("user_version", { simple: true })).toBe(7);
       const columns = database.pragma("table_info(lane)") as Array<{ name: string; notnull: number }>;
       expect(columns.find((column) => column.name === "archived_at")).toMatchObject({ notnull: 0 });
 
@@ -378,13 +379,32 @@ function writeVersion5Database(options: { populated: boolean }): string {
 }
 
 describe("router schema migration 5 to 6", () => {
+  it("commits the fixed version 6 binding table before a version 7 failure", () => {
+    const path = writeVersion5Database({ populated: true });
+    const database = new Database(path);
+    database.pragma("foreign_keys = ON");
+    const exec = database.exec.bind(database);
+    vi.spyOn(database, "exec").mockImplementation((sql) => {
+      if (sql.includes("'dsh'")) throw new Error("injected version 7 failure");
+      return exec(sql);
+    });
+    try {
+      expect(() => initializeRouterSchema(database)).toThrow(/injected version 7 failure/);
+      expect(database.pragma("user_version", { simple: true })).toBe(6);
+      const bindingSql = (database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='binding'").get() as { sql: string }).sql;
+      expect(bindingSql).toContain("backend IN ('claude','codex')");
+      expect(bindingSql).not.toContain("'dsh'");
+      expect(database.prepare("SELECT generation FROM binding WHERE id='binding-1'").get()).toEqual({ generation: 1 });
+    } finally { database.close(); }
+  });
+
   // Every row in every rebuilt table, because a rebuild is the one migration shape that can lose
   // them silently: nothing downstream reads a count, so a dropped row would first be noticed as a
   // lane whose history had simply gone.
   it("rebuilds all three tables without losing a row", () => {
     const database = openRouterDatabase(writeVersion5Database({ populated: true }));
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(6);
+      expect(database.pragma("user_version", { simple: true })).toBe(7);
       expect(database.prepare("SELECT COUNT(*) AS n FROM lane").get()).toEqual({ n: 3 });
       expect(database.prepare("SELECT COUNT(*) AS n FROM binding").get()).toEqual({ n: 1 });
       expect(database.prepare("SELECT COUNT(*) AS n FROM message").get()).toEqual({ n: 3 });
@@ -449,7 +469,7 @@ describe("router schema migration 5 to 6", () => {
   it("migrates an empty version 5 database too", () => {
     const database = openRouterDatabase(writeVersion5Database({ populated: false }));
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(6);
+      expect(database.pragma("user_version", { simple: true })).toBe(7);
       expect(database.prepare("SELECT COUNT(*) AS n FROM lane").get()).toEqual({ n: 0 });
       expect((database.pragma("table_info(lane)") as Array<{ name: string }>).map((column) => column.name)).toContain("id");
     } finally { database.close(); }
@@ -458,7 +478,7 @@ describe("router schema migration 5 to 6", () => {
   it("walks a version 1 database all the way to the current shape", () => {
     const database = openRouterDatabase(writeVersion1Database());
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(6);
+      expect(database.pragma("user_version", { simple: true })).toBe(7);
       expect(database.prepare("SELECT COUNT(*) AS n FROM message").get()).toEqual({ n: 3 });
       expect(database.prepare("SELECT notification_state FROM message WHERE id='m-notified'").get())
         .toEqual({ notification_state: "sent" });

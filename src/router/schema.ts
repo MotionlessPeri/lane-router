@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type Database from "better-sqlite3";
 
-export const ROUTER_SCHEMA_VERSION = 6;
+export const ROUTER_SCHEMA_VERSION = 7;
 
 /**
  * The version 2 message table, kept verbatim because the version 1 migration has to build exactly
@@ -103,7 +103,47 @@ const MESSAGE_INDEX_V6_SQL = `
 CREATE INDEX message_target_state_idx ON message(target_lane_id,state,created_at,id);
 `;
 
-export const ROUTER_SCHEMA_SQL = `
+const BINDING_TABLE_V6_SQL = `
+CREATE TABLE binding (
+  id TEXT PRIMARY KEY,
+  lane_id TEXT NOT NULL REFERENCES lane(id) ON DELETE RESTRICT,
+  backend TEXT NOT NULL CHECK (backend IN ('claude','codex')),
+  conversation_id TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK (generation > 0),
+  startup_json TEXT NOT NULL,
+  active_at INTEGER NOT NULL,
+  inactive_at INTEGER,
+  cwd TEXT
+);
+CREATE UNIQUE INDEX binding_active_lane_idx
+  ON binding(lane_id) WHERE inactive_at IS NULL;
+CREATE UNIQUE INDEX binding_active_conversation_idx
+  ON binding(backend,conversation_id) WHERE inactive_at IS NULL;
+CREATE UNIQUE INDEX binding_lane_generation_idx
+  ON binding(lane_id,generation);
+`;
+
+const BINDING_TABLE_V7_SQL = `
+CREATE TABLE binding (
+  id TEXT PRIMARY KEY,
+  lane_id TEXT NOT NULL REFERENCES lane(id) ON DELETE RESTRICT,
+  backend TEXT NOT NULL CHECK (backend IN ('claude','codex','dsh')),
+  conversation_id TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK (generation > 0),
+  startup_json TEXT NOT NULL,
+  active_at INTEGER NOT NULL,
+  inactive_at INTEGER,
+  cwd TEXT
+);
+CREATE UNIQUE INDEX binding_active_lane_idx
+  ON binding(lane_id) WHERE inactive_at IS NULL;
+CREATE UNIQUE INDEX binding_active_conversation_idx
+  ON binding(backend,conversation_id) WHERE inactive_at IS NULL;
+CREATE UNIQUE INDEX binding_lane_generation_idx
+  ON binding(lane_id,generation);
+`;
+
+const ROUTER_SCHEMA_PREFIX = `
 CREATE TABLE lane (
   id TEXT PRIMARY KEY,
   address TEXT NOT NULL,
@@ -121,35 +161,28 @@ CREATE TABLE lane (
 -- since version 1.
 CREATE UNIQUE INDEX lane_live_address_idx ON lane(address) WHERE archived_at IS NULL;
 CREATE INDEX lane_project_address_idx ON lane(project,address);
+`;
 
-CREATE TABLE binding (
-  id TEXT PRIMARY KEY,
-  lane_id TEXT NOT NULL REFERENCES lane(id) ON DELETE RESTRICT,
-  backend TEXT NOT NULL CHECK (backend IN ('claude','codex')),
-  conversation_id TEXT NOT NULL,
-  generation INTEGER NOT NULL CHECK (generation > 0),
-  startup_json TEXT NOT NULL,
-  active_at INTEGER NOT NULL,
-  inactive_at INTEGER,
-  cwd TEXT
-);
+const ROUTER_SCHEMA_SUFFIX = `${MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_SQL}`;
 
-CREATE UNIQUE INDEX binding_active_lane_idx
-  ON binding(lane_id) WHERE inactive_at IS NULL;
-CREATE UNIQUE INDEX binding_active_conversation_idx
-  ON binding(backend,conversation_id) WHERE inactive_at IS NULL;
-CREATE UNIQUE INDEX binding_lane_generation_idx
-  ON binding(lane_id,generation);
-${MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_SQL}`;
+/** Exact schema produced by the version 5 to 6 migration before version 7 widens BackendName. */
+export const ROUTER_SCHEMA_V6_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V6_SQL}${ROUTER_SCHEMA_SUFFIX}`;
+
+/** Schema for newly created databases at the current version. */
+export const ROUTER_SCHEMA_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V7_SQL}${ROUTER_SCHEMA_SUFFIX}`;
 
 export function initializeRouterSchema(database: Database.Database): void {
   let version = database.pragma("user_version", { simple: true }) as number;
-  if (version === ROUTER_SCHEMA_VERSION) return;
+  if (version === ROUTER_SCHEMA_VERSION) {
+    assertForeignKeys(database);
+    return;
+  }
   if (version === 0) {
     database.transaction(() => {
       database.exec(ROUTER_SCHEMA_SQL);
       database.pragma(`user_version = ${ROUTER_SCHEMA_VERSION}`);
     })();
+    assertForeignKeys(database);
     return;
   }
   // Migrations chain: each one lifts the database exactly one version, so an old database walks
@@ -159,7 +192,41 @@ export function initializeRouterSchema(database: Database.Database): void {
   if (version === 3) { addLaneModelColumn(database); version = 4; }
   if (version === 4) { addLaneRetiredAtColumn(database); version = 5; }
   if (version === 5) { rebuildWithLaneIdentity(database); version = 6; }
+  if (version === 6) { addDshBackend(database); version = 7; }
   if (version !== ROUTER_SCHEMA_VERSION) throw new Error(`Router database version ${version} is not supported`);
+  assertForeignKeys(database);
+}
+
+function assertForeignKeys(database: Database.Database): void {
+  if ((database.pragma("foreign_key_check") as unknown[]).length > 0) {
+    throw new Error("Router database migration left dangling references; the database was not changed safely");
+  }
+}
+
+/** Version 7 widens the binding backend vocabulary without changing any existing generation. */
+function addDshBackend(database: Database.Database): void {
+  const foreignKeysWereOn = database.pragma("foreign_keys", { simple: true }) === 1;
+  database.pragma("foreign_keys = OFF");
+  try {
+    database.transaction(() => {
+      const before = count(database, "binding");
+      database.exec("ALTER TABLE binding RENAME TO binding_legacy;");
+      for (const index of ["binding_active_lane_idx", "binding_active_conversation_idx", "binding_lane_generation_idx"]) {
+        database.exec(`DROP INDEX IF EXISTS ${index};`);
+      }
+      database.exec(BINDING_TABLE_V7_SQL);
+      database.exec(`
+        INSERT INTO binding(id,lane_id,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd)
+        SELECT id,lane_id,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd FROM binding_legacy;
+      `);
+      if (count(database, "binding") !== before) throw new Error("Router database migration lost binding rows");
+      database.exec("DROP TABLE binding_legacy;");
+      database.pragma("user_version = 7");
+      assertForeignKeys(database);
+    })();
+  } finally {
+    if (foreignKeysWereOn) database.pragma("foreign_keys = ON");
+  }
 }
 
 /**
@@ -194,7 +261,7 @@ function rebuildWithLaneIdentity(database: Database.Database): void {
       for (const index of ["lane_project_address_idx", "binding_active_lane_idx", "binding_active_conversation_idx", "binding_lane_generation_idx", "message_target_state_idx"]) {
         database.exec(`DROP INDEX IF EXISTS ${index};`);
       }
-      database.exec(ROUTER_SCHEMA_SQL);
+      database.exec(ROUTER_SCHEMA_V6_SQL);
 
       // One id per lane, minted here rather than in SQL so the value has the same shape as every
       // other id in this database. `retired_at` carries across untouched: those lanes left service
