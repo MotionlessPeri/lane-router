@@ -121,6 +121,17 @@ export class MailboxStore {
     return lines.slice(lines[end + 1] === "" ? end + 2 : end + 1).join("\n");
   }
 
+  /** Fails before database commit when neither the pending file nor its idempotent destination exists. */
+  assertResolvable(relativePath: string): void {
+    const source = this.absolute(relativePath);
+    const normalized = relativePath.replaceAll("\\", "/");
+    if (!normalized.includes("/pending/")) throw new Error("Message is not in a pending mailbox");
+    const destination = this.absolute(normalized.replace("/pending/", "/resolved/"));
+    if (!existsSync(source) && !existsSync(destination)) {
+      throw new MailboxCorruptionError(`Message file is missing: ${relativePath}`);
+    }
+  }
+
   resolve(relativePath: string): MailboxFile {
     const source = this.absolute(relativePath);
     const normalized = relativePath.replaceAll("\\", "/");

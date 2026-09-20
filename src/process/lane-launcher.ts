@@ -106,6 +106,9 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     // change with its own confirmation loop, and must not happen as a side effect of "open".
     throw new Error(`Lane ${invocation.address!.address} has no active binding to resume; attach a conversation through the rotation flow instead`);
   }
+  if (info.backend === "dsh") {
+    throw new Error(`The dsh backend is Host-managed and cannot be opened by lane-router-lane`);
+  }
   // Reach describes notification transport, not ownership by a visible client. Codex can keep a
   // thread loaded in the shared App Server after its TUI closes, so only the backend's restore
   // decision can prevent a duplicate interactive client without also stranding offline lanes.

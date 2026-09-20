@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import type { ClaudeChannelPort, ClaudeChannelOutcome } from "../backends/claude-backend.js";
+import type { DshChannelHub } from "../backends/dsh-backend.js";
 import { CodexTuiBridge, type CodexTuiBridgeHost } from "../adapters/codex/tui-bridge.js";
 import type { Notification } from "../router/backend.js";
 import type { DashboardRouter } from "../router/dashboard.js";
@@ -276,6 +277,12 @@ export class LocalRouterServer {
     readonly host?: string;
     readonly port?: number;
     readonly claude?: ClaudeChannelHub;
+    /** Authenticated loopback API used only by the trusted DSH Host. */
+    readonly dsh?: {
+      readonly token: string;
+      readonly channel: DshChannelHub;
+      readonly read: (context: CallerContext, messageIds: readonly string[]) => unknown | Promise<unknown>;
+    };
     /** Receives the working directory a lifecycle report carries for a conversation. */
     readonly recordCwd?: (conversationId: string, cwd: string) => void;
     /** Answers what a lane needs to be resumed; serves the lane launcher, not conversation tools. */
@@ -310,6 +317,13 @@ export class LocalRouterServer {
         this.websocket.handleUpgrade(request, socket, head, (client) => this.claude.connect(conversationId, client, joinKey));
         return;
       }
+      if (url.pathname === "/dsh/v1/channel" && this.options.dsh && this.dshAuthorized(request)) {
+        const sessionId = dshSessionId(request);
+        if (sessionId) {
+          this.websocket.handleUpgrade(request, socket, head, (client) => this.options.dsh!.channel.connect(sessionId, client));
+          return;
+        }
+      }
       socket.destroy();
     });
   }
@@ -329,6 +343,7 @@ export class LocalRouterServer {
 
   async close(): Promise<void> {
     this.claude.close();
+    this.options.dsh?.channel.close();
     await this.codexBridge.close();
     const providerBridges = [...this.providerBridges.values()].map(({ bridge }) => bridge);
     this.providerBridges.clear();
@@ -338,7 +353,9 @@ export class LocalRouterServer {
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
     try {
+      if (pathname.startsWith("/dsh/v1/")) return await this.handleDsh(request, response, pathname);
       if (request.method === "GET" && request.url === "/health") return json(response, 200, this.discovery());
       if (request.method === "GET" && request.url !== undefined) {
         const url = new URL(request.url, "http://127.0.0.1");
@@ -438,7 +455,62 @@ export class LocalRouterServer {
         return json(response, 200, { result });
       }
       return json(response, 400, { error: "unknown method" });
-    } catch (error) { return json(response, 400, { error: error instanceof Error ? error.message : "request failed" }); }
+    } catch (error) {
+      if (pathname.startsWith("/dsh/v1/")) return dshError(response, 400, "INVALID_REQUEST", error instanceof Error ? error.message : "request failed");
+      return json(response, 400, { error: error instanceof Error ? error.message : "request failed" });
+    }
+  }
+
+  private async handleDsh(request: IncomingMessage, response: ServerResponse, pathname: string): Promise<void> {
+    if (!this.options.dsh) return dshError(response, 404, "NOT_FOUND", "not found");
+    if (!this.dshAuthorized(request)) return dshError(response, 401, "UNAUTHORIZED", "Bearer token is missing or invalid");
+    if (request.method === "GET" && pathname === "/dsh/v1/health") {
+      return json(response, 200, { protocolVersion: 1, status: "ok" });
+    }
+    const sessionId = dshSessionId(request);
+    if (!sessionId) return dshError(response, 400, "SESSION_ID_REQUIRED", "X-DSH-Session-Id is required");
+    if (request.method !== "POST") return dshError(response, 404, "NOT_FOUND", "not found");
+    const body = await readJson(request);
+    if (!isRecord(body)) return dshError(response, 400, "INVALID_REQUEST", "Request body must be an object");
+    for (const forbidden of ["backend", "generation", "conversationId", "sessionId"]) {
+      if (forbidden in body) return dshError(response, 400, "IDENTITY_FIELD_FORBIDDEN", `${forbidden} is supplied by the Router Host`);
+    }
+    if (pathname === "/dsh/v1/call") {
+      if (typeof body.method !== "string" || !DSH_TOOL_NAMES.includes(body.method as DshToolName)
+        || !isRecord(body.params) || typeof body.requestKey !== "string" || body.requestKey.length === 0) {
+        return dshError(response, 400, "INVALID_REQUEST", "method, params, and requestKey are required");
+      }
+      try {
+        const context: CallerContext = { backend: "dsh", conversationId: sessionId, requestKey: body.requestKey };
+        const result = await this.options.tools.call(body.method as DshToolName, body.params, context, callerLifetime(request), { rejectTakeover: true });
+        if (body.method === "lane_ack" && isRecord(result) && Array.isArray(result.resolved)
+          && result.resolved.every((id) => typeof id === "string")) {
+          this.options.dsh.channel.acknowledge(sessionId, result.resolved as string[]);
+        }
+        return json(response, 200, { protocolVersion: 1, result });
+      } catch (error) {
+        const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : "CALL_FAILED";
+        return dshError(response, 409, code, error instanceof Error ? error.message : "call failed");
+      }
+    }
+    if (pathname === "/dsh/v1/read") {
+      if (!Array.isArray(body.messageIds) || body.messageIds.length === 0 || body.messageIds.some((id) => typeof id !== "string")) {
+        return dshError(response, 400, "INVALID_REQUEST", "messageIds must be a non-empty string array");
+      }
+      try {
+        const context: CallerContext = { backend: "dsh", conversationId: sessionId, requestKey: `read:${randomUUID()}` };
+        const messages = await this.options.dsh.read(context, body.messageIds as string[]);
+        return json(response, 200, { protocolVersion: 1, messages });
+      } catch (error) {
+        const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : "READ_FAILED";
+        return dshError(response, 409, code, error instanceof Error ? error.message : "read failed");
+      }
+    }
+    return dshError(response, 404, "NOT_FOUND", "not found");
+  }
+
+  private dshAuthorized(request: IncomingMessage): boolean {
+    return this.options.dsh !== undefined && request.headers.authorization === `Bearer ${this.options.dsh.token}`;
   }
 
   private discovery(): RouterDiscovery {
@@ -469,6 +541,9 @@ export class LocalRouterServer {
  * deliberately shorter than the transport's own give-up so the caller receives a sentence it can
  * act on instead of a bare `fetch failed`.
  */
+const DSH_TOOL_NAMES = ["lane_directory", "lane_attach_current", "lane_send", "lane_ack"] as const;
+type DshToolName = (typeof DSH_TOOL_NAMES)[number];
+
 const ATTACH_WAIT_MS = 60_000;
 
 /**
@@ -483,6 +558,15 @@ function callerLifetime(request: IncomingMessage): AbortSignal {
   const abandoned = new AbortController();
   request.once("close", () => abandoned.abort(new Error("the caller disconnected")));
   return AbortSignal.any([abandoned.signal, AbortSignal.timeout(ATTACH_WAIT_MS)]);
+}
+
+function dshSessionId(request: IncomingMessage): string | undefined {
+  const value = request.headers["x-dsh-session-id"];
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function callerContext(value: unknown): CallerContext | undefined {
@@ -517,6 +601,10 @@ function readDashboardPage(): string {
 
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value));
+}
+
+function dshError(response: ServerResponse, status: number, code: string, message: string): void {
+  json(response, status, { protocolVersion: 1, error: { code, message } });
 }
 
 function sendWebSocket(socket: WebSocket, value: string): Promise<void> {

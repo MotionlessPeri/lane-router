@@ -1,11 +1,13 @@
-import { randomUUID } from "node:crypto";
-import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createCodexRuntime } from "../adapters/codex/codex-runtime.js";
 import { ClaudeBackend } from "../backends/claude-backend.js";
+import { DshBackend, DshChannelHub } from "../backends/dsh-backend.js";
 import { BackendRegistry } from "../router/backend.js";
 import { dashboardSnapshot, type DashboardLauncherChoices } from "../router/dashboard.js";
 import { openRouterDatabase } from "../router/database.js";
@@ -27,11 +29,15 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
   mkdirSync(dataRoot, { recursive: true });
   const lock = RuntimeLock.acquire(join(dataRoot, "router.lock"));
   if (!lock) throw new Error("Another Router process is already running");
-  const database = openRouterDatabase(join(dataRoot, "router.sqlite"));
+  let database: ReturnType<typeof openRouterDatabase>;
+  try { database = openRouterDatabase(join(dataRoot, "router.sqlite")); }
+  catch (error) { lock.release(); throw error; }
   const state = new RouterStateStore(database);
   const mailbox = new MailboxStore(dataRoot);
   const claudeHub = new ClaudeChannelHub((conversationId) => state.activeBindingForConversation("claude", conversationId));
   const claudeBackend = new ClaudeBackend(claudeHub);
+  const dshHub = new DshChannelHub((sessionId) => state.activeBindingForConversation("dsh", sessionId));
+  const dshBackend = new DshBackend(dshHub);
   let tools: ToolService | undefined;
   const codex = createCodexRuntime({
     state,
@@ -46,9 +52,10 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
   const discoveryPath = join(dataRoot, "discovery.json");
   let closed = false;
   try {
+    const dshToken = loadDshHostToken(dataRoot);
     await codex.start();
     const launcherChoices = await codexLauncherChoices(codex.client);
-    const backends = new BackendRegistry([claudeBackend, codex.backend]);
+    const backends = new BackendRegistry([claudeBackend, codex.backend, dshBackend]);
     const pump = new NotificationPump(state, mailbox, backends);
     const restore = new ConversationRestorer({
       state, backends,
@@ -70,6 +77,7 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     tools = new ToolService(core);
     server = new LocalRouterServer({
       tools, codex, claude: claudeHub, instanceId: randomUUID(),
+      dsh: { token: dshToken, channel: dshHub, read: (context, messageIds) => core.read(context, { messageIds }) },
       recordCwd: (conversationId, cwd) => state.updateBindingCwd("claude", conversationId, cwd),
       resumeInfo: (address) => core.resumeInfo(address),
       archiveLane: (address) => core.archiveLane(address),
@@ -80,7 +88,7 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     mailbox.reconcile(state);
     const discovery = await server.start();
     writeDiscovery(discoveryPath, discovery);
-    for (const backend of [claudeBackend, codex.backend]) backend.onAttentionOpportunity((lane) => { void pump.onAttentionOpportunity(lane); });
+    for (const backend of [claudeBackend, codex.backend, dshBackend]) backend.onAttentionOpportunity((lane) => { void pump.onAttentionOpportunity(lane); });
     await pump.onStartup();
   } catch (error) {
     await codex.stop().catch(() => undefined);
@@ -95,6 +103,81 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     database.close();
     lock.release();
   } };
+}
+
+/** Loads or creates the private bearer credential shared with the trusted local DSH Host. */
+export function loadDshHostToken(dataRoot: string): string {
+  const path = join(dataRoot, "dsh-host.token");
+  if (!existsSync(path)) writeFileSync(path, `${randomBytes(32).toString("base64url")}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  restrictTokenPermissions(path);
+  const token = readFileSync(path, "utf8").trim();
+  if (!token) throw new Error("DSH Host token is empty");
+  return token;
+}
+
+function restrictTokenPermissions(path: string): void {
+  if (process.platform !== "win32") {
+    chmodSync(path, 0o600);
+    return;
+  }
+  const command = windowsTokenAclCommand(path);
+  const result = execFileSync(command.executable, command.args, { encoding: "utf8", windowsHide: true });
+  parseWindowsTokenAclResult(result);
+}
+
+const WINDOWS_TOKEN_ACL_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$path = (Resolve-Path -LiteralPath $args[0]).Path
+$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$grant = "*$($current.Value):(F)"
+& icacls.exe $path /inheritance:r /grant:r $grant | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE" }
+$actual = Get-Acl -LiteralPath $path
+function Get-SidValue([object]$identity) {
+  if ($identity -is [System.Security.Principal.SecurityIdentifier]) { return $identity.Value }
+  return ([System.Security.Principal.NTAccount]::new($identity.ToString())).Translate([System.Security.Principal.SecurityIdentifier]).Value
+}
+$rules = @($actual.Access | ForEach-Object {
+  [pscustomobject]@{
+    sid = Get-SidValue $_.IdentityReference
+    type = $_.AccessControlType.ToString()
+    fullControl = (($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl)
+    inherited = $_.IsInherited
+  }
+})
+[pscustomobject]@{
+  currentSid = $current.Value
+  ownerSid = Get-SidValue $actual.Owner
+  protected = $actual.AreAccessRulesProtected
+  rules = $rules
+} | ConvertTo-Json -Compress -Depth 4
+`.trim();
+
+/** Builds the Windows ACL command with the file path passed as data rather than script text. */
+export function windowsTokenAclCommand(path: string): { executable: string; args: string[] } {
+  return { executable: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-Command", `& { ${WINDOWS_TOKEN_ACL_SCRIPT} }`, path] };
+}
+
+/** Rejects any Windows token ACL that grants access beyond the current owner. */
+export function parseWindowsTokenAclResult(raw: string): void {
+  let value: unknown;
+  try { value = JSON.parse(raw); }
+  catch { throw new Error("Windows DSH token ACL verification returned invalid output"); }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Windows DSH token ACL verification returned invalid output");
+  const result = value as Record<string, unknown>;
+  const rules = result.rules;
+  const ownerOnly = typeof result.currentSid === "string"
+    && result.ownerSid === result.currentSid
+    && result.protected === true
+    && Array.isArray(rules)
+    && rules.length === 1
+    && typeof rules[0] === "object"
+    && rules[0] !== null
+    && (rules[0] as Record<string, unknown>).sid === result.currentSid
+    && (rules[0] as Record<string, unknown>).type === "Allow"
+    && (rules[0] as Record<string, unknown>).fullControl === true
+    && (rules[0] as Record<string, unknown>).inherited === false;
+  if (!ownerOnly) throw new Error("Windows DSH token ACL is not owner-only");
 }
 
 async function codexLauncherChoices(client: { request(method: string, params: unknown): Promise<unknown> }): Promise<DashboardLauncherChoices> {

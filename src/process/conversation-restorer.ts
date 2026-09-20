@@ -37,6 +37,7 @@ export class ConversationRestorer {
   constructor(private readonly dependencies: RestorerDependencies) {}
 
   async restore(binding: BindingRecord, override: RestoreOverride = {}): Promise<RestoreResult> {
+    if (binding.backend === "dsh") return failure("backend_unavailable", "dsh conversations are restored by their Host");
     const now = (this.dependencies.now ?? Date.now)();
     const reservedUntil = this.reservations.get(binding.id) ?? 0;
     if (reservedUntil > now) return { status: "skipped_launching" };

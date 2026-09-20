@@ -42,7 +42,7 @@ export interface DirectoryEntry {
   readonly roleDescription: string;
   /** The model this lane declares, or null when it declares none and the client decides. */
   readonly model: string | null;
-  readonly backend: "claude" | "codex" | null;
+  readonly backend: "claude" | "codex" | "dsh" | null;
   readonly binding: DirectoryBinding | null;
   readonly reach: ReachSnapshot | null;
 }
@@ -61,7 +61,7 @@ export type ResumeInfo =
   | { readonly state: "archived" }
   | {
       readonly state: "bound";
-      readonly backend: "claude" | "codex";
+      readonly backend: "claude" | "codex" | "dsh";
       readonly conversationId: string;
       readonly cwd: string | null;
       readonly generation: number;
@@ -153,7 +153,12 @@ export class RouterCore {
     return await this.dependencies.restore?.resolveCwd?.(binding) ?? null;
   }
 
-  async attachCurrent(context: CallerContext, input: { address: string; roleDescription?: string; model?: string }, signal?: AbortSignal) {
+  async attachCurrent(
+    context: CallerContext,
+    input: { address: string; roleDescription?: string; model?: string },
+    signal?: AbortSignal,
+    options: { rejectTakeover?: boolean } = {},
+  ) {
     const parsed = parseLaneAddress(input.address);
     const state = this.dependencies.state;
     const precondition = this.dependencies.backends.require(context.backend).validateAttach?.(context);
@@ -189,6 +194,9 @@ export class RouterCore {
     }
     const observed = state.activeBindingForLane(parsed.address) ?? null;
     if (observed) {
+      if (options.rejectTakeover) {
+        throw new RouterError("LANE_ALREADY_BOUND", "The lane is actively bound to another conversation");
+      }
       try { await this.dependencies.backends.require(observed.backend).waitUntilReplaceable(observed, signal); }
       catch (error) {
         // Without this the wait was unbounded on one side and bounded on the other: the caller's
@@ -354,16 +362,46 @@ export class RouterCore {
     return ids.map((id) => state.requireMessage(id));
   }
 
-  async ack(context: CallerContext, input: { messageIds: readonly string[] }): Promise<{ resolved: string[] }> {
+  /**
+   * Reads structured pending messages owned by the caller. Every id is checked before any mailbox
+   * file is opened, so a mixed-owned batch returns nothing rather than leaking a partial batch.
+   */
+  read(context: CallerContext, input: { messageIds: readonly string[] }): Array<{
+    id: string; sender: string; target: string; kind: MessageKind; replyTo: string | null; createdAt: number; body: string;
+  }> {
     const binding = this.requireCallerBinding(context);
     if (input.messageIds.length === 0) throw new RouterError("MESSAGE_IDS_REQUIRED", "At least one message ID is required");
     const uniqueIds = [...new Set(input.messageIds)];
-    for (const id of uniqueIds) {
+    const messages = uniqueIds.map((id) => {
       const message = this.dependencies.state.message(id);
       if (!message || message.targetLane !== binding.laneAddress || message.state !== "pending") {
         throw new RouterError("MESSAGE_NOT_OWNED", `Message is not pending for the current lane: ${id}`);
       }
-    }
+      return message;
+    });
+    return messages.map((message) => ({
+      id: message.id,
+      sender: message.senderLane,
+      target: message.targetLane,
+      kind: message.kind,
+      replyTo: message.replyTo,
+      createdAt: message.createdAt,
+      body: this.dependencies.mailbox.readBody(message.relativePath),
+    }));
+  }
+
+  async ack(context: CallerContext, input: { messageIds: readonly string[] }): Promise<{ resolved: string[] }> {
+    const binding = this.requireCallerBinding(context);
+    if (input.messageIds.length === 0) throw new RouterError("MESSAGE_IDS_REQUIRED", "At least one message ID is required");
+    const uniqueIds = [...new Set(input.messageIds)];
+    const pending = uniqueIds.map((id) => {
+      const message = this.dependencies.state.message(id);
+      if (!message || message.targetLane !== binding.laneAddress || message.state !== "pending") {
+        throw new RouterError("MESSAGE_NOT_OWNED", `Message is not pending for the current lane: ${id}`);
+      }
+      return message;
+    });
+    for (const message of pending) this.dependencies.mailbox.assertResolvable(message.relativePath);
     this.dependencies.state.markMessagesResolved(uniqueIds, {
       laneAddress: binding.laneAddress, generation: binding.generation, now: this.dependencies.now(),
     });
