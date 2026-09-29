@@ -77,7 +77,8 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     tools = new ToolService(core);
     server = new LocalRouterServer({
       tools, codex, claude: claudeHub, instanceId: randomUUID(),
-      dsh: { token: dshToken, channel: dshHub, read: (context, messageIds) => core.read(context, { messageIds }) },
+      dsh: { token: dshToken, channel: dshHub, read: (context, messageIds) => core.read(context, { messageIds }),
+        handoff: (context, input) => core.handoffDsh(context, input) },
       recordCwd: (conversationId, cwd) => state.updateBindingCwd("claude", conversationId, cwd),
       resumeInfo: (address) => core.resumeInfo(address),
       archiveLane: (address) => core.archiveLane(address),

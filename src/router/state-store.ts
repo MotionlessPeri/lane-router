@@ -244,6 +244,11 @@ export class RouterStateStore {
     return binding;
   }
 
+  /** Preserve lane identity when an archived address is subsequently reused. */
+  bindingLaneId(id: string): string | undefined {
+    return (this.database.prepare("SELECT lane_id FROM binding WHERE id=?").get(id) as { lane_id: string } | undefined)?.lane_id;
+  }
+
   activeBindingForLane(laneAddress: string): BindingRecord | undefined {
     const row = this.database.prepare(`${BINDING_SELECT}
       WHERE l.address=? AND l.archived_at IS NULL AND b.inactive_at IS NULL

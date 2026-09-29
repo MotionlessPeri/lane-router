@@ -9,6 +9,7 @@ import type { ClaudeChannelPort, ClaudeChannelOutcome } from "../backends/claude
 import type { DshChannelHub } from "../backends/dsh-backend.js";
 import { CodexTuiBridge, type CodexTuiBridgeHost } from "../adapters/codex/tui-bridge.js";
 import type { Notification } from "../router/backend.js";
+import { parseLaneAddress } from "../router/address.js";
 import type { DashboardRouter } from "../router/dashboard.js";
 import type { CallerContext, BindingRecord, ReachSnapshot, ResolvedIdentity } from "../router/types.js";
 import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
@@ -282,6 +283,10 @@ export class LocalRouterServer {
       readonly token: string;
       readonly channel: DshChannelHub;
       readonly read: (context: CallerContext, messageIds: readonly string[]) => unknown | Promise<unknown>;
+      /** Host-only transfer, not a model-visible Router tool. */
+      readonly handoff?: (context: CallerContext, input: {
+        address: string; expectedBindingId: string; expectedGeneration: number; successorSessionId: string;
+      }) => Promise<unknown>;
     };
     /** Receives the working directory a lifecycle report carries for a conversation. */
     readonly recordCwd?: (conversationId: string, cwd: string) => void;
@@ -474,6 +479,30 @@ export class LocalRouterServer {
     if (!isRecord(body)) return dshError(response, 400, "INVALID_REQUEST", "Request body must be an object");
     for (const forbidden of ["backend", "generation", "conversationId", "sessionId"]) {
       if (forbidden in body) return dshError(response, 400, "IDENTITY_FIELD_FORBIDDEN", `${forbidden} is supplied by the Router Host`);
+    }
+    if (pathname === "/dsh/v1/handoff") {
+      const handoff = this.options.dsh.handoff;
+      if (!handoff) return dshError(response, 404, "NOT_FOUND", "not found");
+      const fields = ["address", "expectedBindingId", "expectedGeneration", "successorSessionId"];
+      if (Object.keys(body).some((key) => !fields.includes(key)) || fields.some((key) => !(key in body))
+        || typeof body.address !== "string" || body.address.trim().length === 0
+        || typeof body.expectedBindingId !== "string" || body.expectedBindingId.trim().length === 0
+        || !Number.isSafeInteger(body.expectedGeneration) || (body.expectedGeneration as number) < 1
+        || typeof body.successorSessionId !== "string" || body.successorSessionId.trim().length === 0) {
+        return dshError(response, 400, "INVALID_REQUEST", "A lane address, expected binding id/generation, and successor Session id are required");
+      }
+      try { parseLaneAddress(body.address); }
+      catch { return dshError(response, 400, "INVALID_REQUEST", "Invalid lane address"); }
+      try {
+        const result = await handoff({ backend: "dsh", conversationId: sessionId, requestKey: `handoff:${randomUUID()}` }, {
+          address: body.address, expectedBindingId: body.expectedBindingId,
+          expectedGeneration: body.expectedGeneration as number, successorSessionId: body.successorSessionId,
+        });
+        return json(response, 200, { protocolVersion: 1, result });
+      } catch (error) {
+        const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : "HANDOFF_FAILED";
+        return dshError(response, 409, code, error instanceof Error ? error.message : "handoff failed");
+      }
     }
     if (pathname === "/dsh/v1/call") {
       if (typeof body.method !== "string" || !DSH_TOOL_NAMES.includes(body.method as DshToolName)

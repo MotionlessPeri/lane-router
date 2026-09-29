@@ -27,17 +27,18 @@ async function setup() {
     ? { resolved: params.message_ids }
     : { ok: true }) };
   const read = vi.fn(async () => []);
+  const handoff = vi.fn(async () => ({ status: "committed", address: "alpha/root", laneId: "lane-1", bindingId: "new-binding", generation: 2, successorSessionId: "next" }));
   let now = 100;
   const channel = new DshChannelHub(() => undefined, () => now);
   const server = new LocalRouterServer({
     tools: tools as never,
     codex: { endpoint: `ws://127.0.0.1:${address.port}` } as never,
     instanceId: "instance",
-    dsh: { token: "secret", channel, read },
+    dsh: { token: "secret", channel, read, handoff },
   });
   const discovery = await server.start();
   return {
-    upstream, tools, read, channel, backend: new DshBackend(channel), server, discovery,
+    upstream, tools, read, handoff, channel, backend: new DshBackend(channel), server, discovery,
     advance: () => { now += 1; return now; },
   };
 }
@@ -130,6 +131,39 @@ test("DSH endpoints authenticate and derive identity outside request JSON", asyn
     ]) {
       expect((await fetch(`${fixture.discovery.url}/dsh/v1/call`, { method: "POST", headers: headers(), body: JSON.stringify(body) })).status).toBe(400);
     }
+  } finally {
+    await fixture.server.close();
+    await new Promise<void>((resolve) => fixture.upstream.close(() => resolve()));
+  }
+});
+
+test("DSH handoff is a separate authenticated Host endpoint, not an agent tool", async () => {
+  const fixture = await setup();
+  const url = `${fixture.discovery.url}/dsh/v1/handoff`;
+  const body = { address: "alpha/root", expectedBindingId: "old-binding", expectedGeneration: 1, successorSessionId: "next" };
+  const post = (payload: unknown, requestHeaders: Record<string, string> = headers("old")) => fetch(url, {
+    method: "POST", headers: requestHeaders, body: JSON.stringify(payload),
+  });
+  try {
+    expect((await post(body, { "content-type": "application/json", "x-dsh-session-id": "old" })).status).toBe(401);
+    expect((await post(body, { authorization: "Bearer secret", "content-type": "application/json" })).status).toBe(400);
+    for (const payload of [
+      { ...body, expectedGeneration: "1" }, { ...body, successorSessionId: " " },
+      { ...body, address: "not-a-lane" },
+      { ...body, conversationId: "old" }, { ...body, roleDescription: "stolen" },
+      { ...body, confirmed: true },
+    ]) expect((await post(payload)).status).toBe(400);
+    expect(fixture.handoff).not.toHaveBeenCalled();
+    const result = await post(body);
+    expect(result.status).toBe(200);
+    expect(await result.json()).toMatchObject({ protocolVersion: 1, result: { status: "committed", bindingId: "new-binding" } });
+    expect(fixture.handoff).toHaveBeenCalledWith(
+      { backend: "dsh", conversationId: "old", requestKey: expect.any(String) }, body,
+    );
+    expect(fixture.tools.call).not.toHaveBeenCalled();
+    expect((await fetch(`${fixture.discovery.url}/dsh/v1/call`, {
+      method: "POST", headers: headers("old"), body: JSON.stringify({ method: "lane_handoff", params: body, requestKey: "x" }),
+    })).status).toBe(400);
   } finally {
     await fixture.server.close();
     await new Promise<void>((resolve) => fixture.upstream.close(() => resolve()));

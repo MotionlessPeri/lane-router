@@ -244,6 +244,78 @@ export class RouterCore {
   }
 
   /**
+   * Transfer one DSH lane from its current Host Session to an explicitly prepared successor.
+   * The caller must be the current binding owner; an exact replay of a completed transfer is
+   * observational only. The Host obtains Owner consent before invoking this method.
+   * @param context Authenticated old DSH Session identity supplied by the Host header.
+   * @param input Existing binding CAS identity and exact successor Session.
+   * @returns Authoritative binding identity and whether this call committed it.
+   */
+  async handoffDsh(context: CallerContext, input: {
+    address: string; expectedBindingId: string; expectedGeneration: number; successorSessionId: string;
+  }): Promise<{ status: "committed" | "already_committed"; address: string; laneId: string; bindingId: string; generation: number; successorSessionId: string }> {
+    if (context.backend !== "dsh") throw new RouterError("NOT_BINDING_OWNER", "Only a DSH binding owner can hand off a DSH lane");
+    const address = parseLaneAddress(input.address).address;
+    const state = this.dependencies.state;
+    const lane = state.lane(address);
+    const current = lane && state.activeBindingForLane(address);
+    if (!lane || !current) throw new RouterError("LANE_NOT_BOUND", "The lane has no current binding");
+    if (input.successorSessionId === context.conversationId) throw new RouterError("SAME_SESSION", "The successor must be another DSH Session");
+
+    // An uncertain HTTP result is confirmed from binding history, not from a second mutation.
+    // Check the old row's lane id: an archived address can name a different lane later.
+    const old = state.binding(input.expectedBindingId);
+    if (old?.backend === "dsh" && old.conversationId === context.conversationId
+      && old.generation === input.expectedGeneration && old.inactiveAt !== null
+      && state.bindingLaneId(old.id) === lane.id && current.backend === "dsh"
+      && current.conversationId === input.successorSessionId && current.generation === old.generation + 1) {
+      return { status: "already_committed", address, laneId: lane.id, bindingId: current.id,
+        generation: current.generation, successorSessionId: input.successorSessionId };
+    }
+    if (current.backend !== "dsh" || current.conversationId !== context.conversationId) {
+      // A former owner may retry an exact operation, but may never begin a new one.
+      if (old?.backend === "dsh" && old.conversationId === context.conversationId
+        && state.bindingLaneId(old.id) === lane.id) {
+        throw new RouterError("BINDING_CHANGED", "The expected binding is no longer current");
+      }
+      throw new RouterError("NOT_BINDING_OWNER", "The caller does not own this lane's current DSH binding");
+    }
+    if (current.id !== input.expectedBindingId || current.generation !== input.expectedGeneration) {
+      throw new RouterError("BINDING_CHANGED", "The expected binding is no longer current");
+    }
+    const backend = this.dependencies.backends.require("dsh");
+    const oldReach = backend.reach(current);
+    if (oldReach.believedBusy !== false && oldReach.state !== "no_channel") {
+      throw new RouterError("CURRENT_BUSY", "The current Session has not finished its turn and deliveries");
+    }
+    if (state.activeBindingForConversation("dsh", input.successorSessionId)) {
+      throw new RouterError("SUCCESSOR_ALREADY_BOUND", "The successor Session already owns a lane");
+    }
+    const successorReach = backend.reach({ ...current, conversationId: input.successorSessionId });
+    if (successorReach.state !== "live" || successorReach.believedBusy !== false) {
+      throw new RouterError("SUCCESSOR_NOT_READY", "The successor Session needs a connected idle DSH channel");
+    }
+    let binding: BindingRecord | undefined;
+    try {
+      binding = state.replaceBinding({ expected: current, id: this.dependencies.newId("binding"), laneAddress: address,
+        backend: "dsh", conversationId: input.successorSessionId, generation: current.generation + 1,
+        startup: {}, now: this.dependencies.now() });
+    } catch (error) {
+      if (error instanceof Error && /active binding already exists/iu.test(error.message)) {
+        throw new RouterError("BINDING_CHANGED", "The binding or successor changed during handoff");
+      }
+      throw error;
+    }
+    if (!binding) throw new RouterError("BINDING_CHANGED", "The lane binding changed during handoff");
+    // The binding commit is authoritative even when a notification attempt fails. Startup and
+    // channel attention can repeat the pending index; an HTTP retry must not commit or notify twice.
+    try { await this.dependencies.pump.notifyLane(address); }
+    catch { /* pending mail remains in the same lane for startup/channel retry */ }
+    return { status: "committed", address, laneId: lane.id, bindingId: binding.id,
+      generation: binding.generation, successorSessionId: input.successorSessionId };
+  }
+
+  /**
    * Take a lane out of service. Two refusals, each guarding a different silent loss, and both
    * reported with the numbers behind them so the caller is not left guessing which one applied.
    *
