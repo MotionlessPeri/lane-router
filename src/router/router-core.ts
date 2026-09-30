@@ -289,8 +289,8 @@ export class RouterCore {
     }
     const backend = this.dependencies.backends.require("dsh");
     const oldReach = backend.reach(current);
-    if (oldReach.believedBusy !== false && oldReach.state !== "no_channel") {
-      throw new RouterError("CURRENT_BUSY", "The current Session has not finished its turn and deliveries");
+    if (oldReach.state !== "no_channel" && (oldReach.state !== "live" || oldReach.believedBusy !== false)) {
+      throw new RouterError("CURRENT_BUSY", "The current Session needs a confirmed idle channel with no unfinished deliveries");
     }
     if (state.activeBindingForConversation("dsh", input.successorSessionId)) {
       throw new RouterError("SUCCESSOR_ALREADY_BOUND", "The successor Session already owns a lane");

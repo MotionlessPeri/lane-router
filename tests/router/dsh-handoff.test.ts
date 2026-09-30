@@ -78,12 +78,16 @@ test("real DSH channel hold blocks old handoff, then new channel receives unchan
   try {
     hub.connect("old", oldSocket as unknown as WebSocket);
     hub.connect("next", nextSocket as unknown as WebSocket);
-    oldSocket.lifecycle("idle"); nextSocket.lifecycle("idle");
+    nextSocket.lifecycle("idle");
     await core.attachCurrent(context("old", "attach"), { address: "alpha/root", roleDescription: "root" }, undefined, { rejectTakeover: true });
     state.createLane({ address: "alpha/peer", project: "alpha", roleDescription: "peer", now: 5 });
     state.createBinding({ id: "peer-binding", laneAddress: "alpha/peer", backend: "dsh", conversationId: "peer", generation: 1, startup: {}, now: 5 });
     const original = state.activeBindingForLane("alpha/root")!;
     const input = { address: "alpha/root", expectedBindingId: original.id, expectedGeneration: original.generation, successorSessionId: "next" };
+    expect(backend.reach(original)).toMatchObject({ state: "unconfirmed", believedBusy: false });
+    await expect(core.handoffDsh(context("old", "handoff"), input)).rejects.toMatchObject({ code: "CURRENT_BUSY" });
+    expect(state.activeBindingForLane("alpha/root")).toEqual(original);
+    oldSocket.lifecycle("idle");
     const [first] = await core.send(context("peer", "send-1"), { target: "alpha/root", body: "first", kind: "normal" });
     await expect(core.handoffDsh(context("old", "handoff"), input)).rejects.toMatchObject({ code: "CURRENT_BUSY" });
     expect(state.activeBindingForLane("alpha/root")?.id).toBe(original.id);
@@ -116,6 +120,7 @@ test("owner hands off the same lane and mailbox without changing declarations, h
     const [pending] = await core.send(context("peer", "send-2"), { target: "alpha/root", body: "pending", kind: "correction", replyTo: resolved!.id });
     const beforeMessages = state.allMessages();
     const beforeNotify = backend.notifications.length;
+    backend.reachBySession.set("old", idle);
     backend.reachBySession.set("next", idle);
 
     const result = await core.handoffDsh(context("old"), request(original));
