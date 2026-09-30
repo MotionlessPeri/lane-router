@@ -59,18 +59,26 @@ Precondition failures leave the binding unchanged: missing Bearer → HTTP 401 `
 ```mermaid
 sequenceDiagram
   participant H as Owner-approved DSH Host
-  participant R as Router
   participant C as Company current pointer
+  participant D as Company durable Session record
   participant N as New Session channel
-  H->>C: Prepare successor Inbox and preflight current
+  participant R as Router
+  H->>D: Flush successor Inbox and original handoff tuple
   H->>N: Connect channel and report idle
+  H->>C: Commit Company's active/current edge CAS
   H->>R: POST /dsh/v1/handoff with old header and expected binding
   R-->>H: committed or authoritative conflict
   R-->>N: Notify pending ids on the unchanged mailbox
-  H->>C: Apply Company's own current-pointer CAS
+  H->>H: Verify same lane id, successor, binding id and next generation
 ```
 
-The Router binding and DSH Company current pointer belong to separate stores; this endpoint does not promise distributed atomicity or operate the Company pointer. Before Company CAS, the Host can compare the Router's current `(bindingId,generation)` with its preflight snapshot; after a lost response or process restart, it can retry the same handoff tuple or inspect the authoritative current binding for the expected successor and generation. Prepare the new Company Inbox before Company CAS, dispose the old Lead only under Company's own rules, and stop for explicit reconciliation if Company has changed current while Router still reports old or a different binding. Never silently revert to the old HTTP header. No Router restart, binding of a real Session, or Company migration is part of implementing this endpoint.
+The Company Host follows this order after the Owner approves the specific successor:
+
+1. Prepare and durably flush the successor Session Inbox. Before committing Company current, persist the old Session id, immutable lane id, old binding id and generation, successor Session id, and expected Company state in the Company's existing durable Session record. Capture the Router binding from authoritative preflight or attach results. Prepare the successor channel and establish the old Session's required quiescence or controlled-stop evidence.
+2. Commit Company's own active/current edge CAS first. If that CAS fails, do not begin the Router handoff.
+3. Send `/dsh/v1/handoff` using the saved old Session header and the original four-field tuple. Verify the returned lane id matches the saved immutable lane id, the successor matches exactly, and the authoritative new binding id and generation are the expected result (`old generation + 1`). The successor uses its own header only after Router ownership is confirmed.
+
+The Router binding and Company current pointer belong to separate stores; this endpoint neither operates the Company pointer nor promises distributed atomicity. If Company current has committed but Router handoff has not completed, retain the new Company current/lane as awaiting recovery and fail closed. Do not use ordinary read/send/ack through the old header, silently revert current, or report automatic restoration. A timeout or unknown HTTP response requires the identical saved tuple and old header for retry, followed by authoritative binding verification; a 409 requires reconciliation, never guessed replacement expectations. Across a crash, the original tuple must come from a trusted record durably saved before Company CAS or authoritative binding history. Never reconstruct it by sampling the current binding during recovery. Dispose the old Lead only under Company's own rules. No Router restart, binding of a real Session, or Company migration is part of implementing this endpoint.
 
 ### Read
 
