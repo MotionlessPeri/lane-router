@@ -245,8 +245,8 @@ export class RouterCore {
 
   /**
    * Transfer one DSH lane from its current Host Session to an explicitly prepared successor.
-   * The caller must be the current binding owner; an exact replay of a completed transfer is
-   * observational only. The Host obtains Owner consent before invoking this method.
+   * The caller must be the current binding owner; an exact replay confirms the binding and
+   * retries pending notifications. The Host obtains Owner consent before invoking this method.
    * @param context Authenticated old DSH Session identity supplied by the Host header.
    * @param input Existing binding CAS identity and exact successor Session.
    * @returns Authoritative binding identity and whether this call committed it.
@@ -269,6 +269,10 @@ export class RouterCore {
       && old.generation === input.expectedGeneration && old.inactiveAt !== null
       && state.bindingLaneId(old.id) === lane.id && current.backend === "dsh"
       && current.conversationId === input.successorSessionId && current.generation === old.generation + 1) {
+      // A lost response can follow a failed notification after the binding has committed.
+      // Repeating the pending index neither changes the binding nor acknowledges mail.
+      try { await this.dependencies.pump.notifyLane(address); }
+      catch { /* the committed binding remains authoritative; the same tuple may retry */ }
       return { status: "already_committed", address, laneId: lane.id, bindingId: current.id,
         generation: current.generation, successorSessionId: input.successorSessionId };
     }
@@ -308,7 +312,7 @@ export class RouterCore {
     }
     if (!binding) throw new RouterError("BINDING_CHANGED", "The lane binding changed during handoff");
     // The binding commit is authoritative even when a notification attempt fails. Startup and
-    // channel attention can repeat the pending index; an HTTP retry must not commit or notify twice.
+    // channel attention and exact HTTP retries can repeat the pending index without another commit.
     try { await this.dependencies.pump.notifyLane(address); }
     catch { /* pending mail remains in the same lane for startup/channel retry */ }
     return { status: "committed", address, laneId: lane.id, bindingId: binding.id,

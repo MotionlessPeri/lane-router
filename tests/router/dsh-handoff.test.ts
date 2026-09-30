@@ -136,7 +136,7 @@ test("owner hands off the same lane and mailbox without changing declarations, h
   } finally { database.close(); }
 });
 
-test("an identical uncertain-response retry reports authority without advancing generation or re-notifying", async () => {
+test("an identical uncertain-response retry reports authority without advancing generation on an empty mailbox", async () => {
   const { database, core, state, backend, context, request } = setup();
   try {
     await core.attachCurrent(context("old"), { address: "alpha/root", roleDescription: "root" });
@@ -153,7 +153,7 @@ test("an identical uncertain-response retry reports authority without advancing 
   } finally { database.close(); }
 });
 
-test("post-commit notification failure keeps pending and an exact retry is observational", async () => {
+test("post-commit notification failure is retried naturally without another binding commit or ack", async () => {
   const { database, core, state, backend, pump, context, request } = setup();
   try {
     await core.attachCurrent(context("peer"), { address: "alpha/peer", roleDescription: "peer" });
@@ -161,16 +161,21 @@ test("post-commit notification failure keeps pending and an exact retry is obser
     const [pending] = await core.send(context("peer", "send"), { target: "alpha/root", body: "pending", kind: "normal" });
     const original = state.activeBindingForLane("alpha/root")!;
     backend.reachBySession.set("next", idle);
+    const beforeNotify = backend.notifications.length;
+    const replace = vi.spyOn(state, "replaceBinding");
     const attempt = vi.spyOn(pump, "notifyLane").mockRejectedValueOnce(new Error("notification failed"));
     const first = await core.handoffDsh(context("old"), request(original));
     expect(first.status).toBe("committed");
     expect(state.requireMessage(pending!.id).state).toBe("pending");
-    const count = attempt.mock.calls.length;
+    expect(backend.notifications).toHaveLength(beforeNotify);
+    const committed = state.activeBindingForLane("alpha/root")!;
     await expect(core.handoffDsh(context("old"), request(original))).resolves.toMatchObject({ status: "already_committed", bindingId: first.bindingId });
-    expect(attempt.mock.calls).toHaveLength(count);
+    expect(backend.notifications.slice(beforeNotify)).toMatchObject([{ messageIds: [pending!.id] }]);
+    expect(attempt).toHaveBeenCalledTimes(2);
+    expect(state.activeBindingForLane("alpha/root")).toEqual(committed);
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(state.requireMessage(pending!.id).state).toBe("pending");
     attempt.mockRestore();
-    await pump.onAttentionOpportunity("alpha/root");
-    expect(backend.notifications.at(-1)?.messageIds).toEqual([pending!.id]);
   } finally { database.close(); }
 });
 
