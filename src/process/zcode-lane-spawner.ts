@@ -9,6 +9,12 @@ export interface HeadlessZcodeSpawnInput {
   readonly role: string;
   readonly cwd: string;
   readonly model?: string;
+  /**
+   * First turn of the new conversation. A headless session cannot be handed a bootstrap prompt by
+   * a window (there is no window), so an intro — when one is wanted, e.g. a TUI lane whose window
+   * will resume this session — travels as the session's first driven turn.
+   */
+  readonly intro?: string;
 }
 
 /**
@@ -48,6 +54,11 @@ export async function spawnHeadlessZcodeLane(options: {
     // nothing; stopping it keeps the spawn verb all-or-nothing.
     await options.driver.stop(sessionId).catch(() => undefined);
     throw error;
+  }
+  if (options.input.intro !== undefined && options.input.intro.trim().length > 0) {
+    // Fire-and-forget in the same sense mail is: the turn belongs to the session, and the caller
+    // waiting for it would make spawn latency depend on a model.
+    void options.driver.send(sessionId, options.input.intro).catch(() => undefined);
   }
   return { sessionId, address: options.input.address };
 }

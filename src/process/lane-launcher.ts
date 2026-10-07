@@ -81,17 +81,29 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
       throw new Error(`Lane ${invocation.address!.address} already exists; open it with: lane-router-lane open ${invocation.address!.address}`);
     }
     if (invocation.backend === "zcode") {
-      // A headless lane has no window to put a bootstrap prompt into: the Router-side spawner
-      // creates the session and the binding in one transaction, so there is nothing to open and
-      // nothing to wait for here beyond the answer.
-      const spawned = await (dependencies.spawnZcodeLane ?? ((input: { address: string; role: string; cwd: string; model?: string }) => spawnZcodeLaneDefault(dataRoot, input)))({
+      // The zcode TUI cannot take a first prompt (that flag is headless-only), so a windowed lane
+      // is born headless — the spawner binds it and fires an intro turn — and then the window
+      // resumes the same session: the user lands in a TUI whose lane is already registered.
+      // With --terminal absent the session simply stays headless.
+      const spawned = await (dependencies.spawnZcodeLane ?? ((input: { address: string; role: string; cwd: string; model?: string; intro?: string }) => spawnZcodeLaneDefault(dataRoot, input)))({
         address: invocation.address!.address,
         role: invocation.role,
         cwd: invocation.cwd ?? dependencies.cwd ?? process.cwd(),
         ...(invocation.model === undefined ? {} : { model: invocation.model }),
+        ...(invocation.terminal === undefined ? {} : { intro: zcodeIntroPrompt(invocation.address!.address, invocation.role) }),
       });
       const write = dependencies.write ?? ((text: string) => { process.stdout.write(text); });
-      write(`  headless zcode lane ${spawned.address} created (session ${spawned.sessionId})
+      if (invocation.terminal === undefined) {
+        write(`  headless zcode lane ${spawned.address} created (session ${spawned.sessionId})
+`);
+        return;
+      }
+      await openTerminal(dependencies, invocation.terminal, {
+        mode: "resume", backend: "zcode", cwd: invocation.cwd ?? dependencies.cwd ?? process.cwd(),
+        conversationId: spawned.sessionId, statusPath: newStatusPath(dataRoot),
+      } satisfies TerminalChildRequest, invocation.address!.address, invocation.address!.project);
+      write(`  zcode TUI lane ${spawned.address} created (session ${spawned.sessionId}); the window resumes it
+  note: two engines now own one conversation — while the window is open, prefer talking there; wake-driven turns may not render live in it
 `);
       return;
     }
@@ -202,10 +214,20 @@ function parseInvocation(args: readonly string[]): ParsedInvocation {
   if (backend !== "claude" && backend !== "codex" && backend !== "zcode") throw new Error(`--backend must be claude, codex, or zcode, not ${JSON.stringify(backend)}`);
   const profile = flags.get("--profile");
   if (profile !== undefined && backend !== "codex") throw new Error("--profile is only valid with --backend codex");
-  if (backend === "zcode" && terminalFlag !== undefined) throw new Error("--terminal is only valid for windowed backends; zcode lanes are headless");
   const role = flags.get("--role") ?? "";
   if (verb === "new" && !role.trim()) throw new Error("--role is required to create a lane");
   return { verb, address, project: undefined, role, backend, model: flags.get("--model"), profile, cwd: flags.get("--cwd"), terminal };
+}
+
+function zcodeIntroPrompt(address: string, role: string): string {
+  // The spawner binds the lane Router-side, so the intro must NOT instruct lane_attach_current
+  // (the session's own MCP identity is not the binding's): it only sets the scene for a session
+  // that will usually be opened in a TUI right after.
+  return `You are the lane ${address}. The Router has already registered this conversation as that lane; do not call lane_attach_current.
+
+Your role: ${role}
+
+Read the repository AGENTS.md if present, then confirm in one short line that you are ready and wait for direction.`;
 }
 
 function creationPrompt(address: string, role: string, model: string | undefined): string {
@@ -272,7 +294,7 @@ async function queryResumeInfoDefault(dataRoot: string, address: string): Promis
   return body.result;
 }
 
-async function spawnZcodeLaneDefault(dataRoot: string, input: { address: string; role: string; cwd: string; model?: string }): Promise<{ address: string; sessionId: string }> {
+async function spawnZcodeLaneDefault(dataRoot: string, input: { address: string; role: string; cwd: string; model?: string; intro?: string }): Promise<{ address: string; sessionId: string }> {
   const response = await fetch(`${await routerUrl(dataRoot)}/zcode/spawn`, {
     method: "POST",
     headers: { "content-type": "application/json" },

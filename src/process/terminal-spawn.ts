@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 export type TerminalChildRequest =
   | {
       readonly mode: "prompt";
-      readonly backend: "codex" | "claude";
+      readonly backend: "codex" | "claude" | "zcode";
       readonly cwd: string;
       readonly prompt: string;
       /** Where the terminal child reports whether the CLI actually started. */
@@ -26,7 +26,7 @@ export type TerminalChildRequest =
     }
   | {
       readonly mode: "resume";
-      readonly backend: "claude" | "codex";
+      readonly backend: "claude" | "codex" | "zcode";
       readonly cwd: string;
       readonly conversationId: string;
       readonly statusPath: string;

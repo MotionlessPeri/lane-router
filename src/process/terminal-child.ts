@@ -18,6 +18,15 @@ export function childCommand(
   environment: NodeJS.ProcessEnv,
   here: string,
 ): { executable: string; args: string[] } {
+  if (request.backend === "zcode") {
+    // The windowed face of a driver-created session: the community TUI resumes the session by id.
+    // It cannot take a first prompt (that is -p, headless-only), which is why windowed zcode lanes
+    // are born headless with an intro turn and only then handed a window; prompt mode is a caller
+    // bug, not a supported shape.
+    if (request.mode !== "resume") throw new Error("zcode windows resume a spawned session; prompt mode is headless-only");
+    const executable = environment.ZCODE_TUI_COMMAND?.trim() || "zcode";
+    return { executable, args: ["--resume", request.conversationId] };
+  }
   if (request.backend === "codex") {
     // Both codex modes go through the launcher, which owns Router discovery and TUI wiring.
     // codex has no session display-name flag, so the window keeps only the title escape below.

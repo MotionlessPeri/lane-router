@@ -330,7 +330,19 @@ test("new --backend zcode spawns headless through the Router and opens no termin
   expect(written.join("")).toContain("sess_1");
   // A headless lane has no window; the terminal path must not even be consulted.
   expect(deps.spawnTerminal).not.toHaveBeenCalled();
-  // The windowed-only flags are refused for headless, loudly rather than silently ignored.
-  await expect(launchLane(["new", "beta/glm", "--role", "r", "--backend", "zcode", "--terminal", "wt"], fakes())).rejects.toThrow(/headless/u);
+  // --profile remains codex-only; --terminal now switches zcode to the windowed form instead of
+  // being rejected, which the windowed test below covers.
   await expect(launchLane(["new", "beta/glm", "--role", "r", "--backend", "zcode", "--profile", "p"], fakes())).rejects.toThrow(/profile.*codex/iu);
+});
+
+test("new --backend zcode --terminal spawns headless with an intro and opens a TUI window on the session", async () => {
+  const spawnZcodeLane = vi.fn(async (input: { address: string; role: string; cwd: string; model?: string; intro?: string }) => ({ address: input.address, sessionId: "sess_9" }));
+  const deps = fakes({ spawnZcodeLane });
+  await launchLane(["new", "alpha/glm-tui", "--role", "Windowed GLM lane.", "--backend", "zcode", "--terminal", "wt"], deps);
+  // Windowed lanes get an intro turn (the TUI cannot take a first prompt); headless ones do not.
+  expect(spawnZcodeLane.mock.calls[0][0].intro).toContain("alpha/glm-tui");
+  const request = deps.spawnTerminal.mock.calls[0][0];
+  expect(request.mode).toBe("resume");
+  expect(request.backend).toBe("zcode");
+  expect(request.conversationId).toBe("sess_9");
 });
