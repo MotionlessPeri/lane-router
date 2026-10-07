@@ -549,3 +549,58 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 ⚠️ **这条修法不覆盖 Router 未运行的情形**：那时 hook 的 POST 根本发不出去，没有报告可暂存。要单独验就先停 Router 再开窗；预期是 MCP server 的 `ensureRouter` 把 Router 拉起、channel 连上、但首 turn 仍然被拒——**这是已知边界，不算回归**。
 
 **最后验证：** 尚未真机执行。自动测试覆盖三态（窗内应用 / 超窗作废且不可重复消费 / 早到的 Stop 以空闲状态应用并放行等待者），并经真实 `ClaudeBackend.validateAttach` 走通首 turn 三条件；变异检验结果见提交说明。
+
+## ZCode CLI
+
+ZCode 会话走 Claude Channel 这条已验证的链路：同一个 lane MCP server（ZCode 是标准 MCP client，stdio 注册即得五件工具）、同一套 lifecycle 上报与 join。身份是这条链路唯一的新东西——**ZCode 给 MCP 子进程不传任何会话身份**（initialize 参数与 env 均已实测确认），会话 id 只在 hook 侧存在（stdin 的 `session_id` 与 env 的 `CLAUDE_CODE_SESSION_ID`/`ZCODE_SESSION_ID`）。因此 join key 取共享父进程：同一 app-server 既 spawn 会话的 MCP server 又 spawn 它的 hook，`process.ppid` 相等即配对。
+
+**前提：** 已构建 `dist/`；`~/.zcode/cli/config.json` 同时注册两者（MCP server 见下；hook 必须 `type: "process"`——`type: "command"` 的 shell 会插在中间换掉父进程，join 从此配不上对）；**参与的会话都起于配置之后**（与 Claude 侧同因：MCP/hook 配置在进程启动时载入）。
+
+```json
+{
+  "mcp": { "servers": { "lane-router": { "type": "stdio", "command": "node", "args": ["<lane-router>/dist/mcp/lane-mcp-server.js"] } } },
+  "hooks": {
+    "enabled": true,
+    "events": {
+      "SessionStart":     [{ "hooks": [{ "type": "process", "command": "node", "args": ["<lane-router>/dist/adapters/zcode/lifecycle-hook.js"], "timeoutMs": 5000 }] }],
+      "UserPromptSubmit": [{ "hooks": [{ "type": "process", "command": "node", "args": ["<lane-router>/dist/adapters/zcode/lifecycle-hook.js"], "timeoutMs": 5000 }] }],
+      "Stop":             [{ "hooks": [{ "type": "process", "command": "node", "args": ["<lane-router>/dist/adapters/zcode/lifecycle-hook.js"], "timeoutMs": 5000 }] }]
+    }
+  }
+}
+```
+
+自动测试覆盖：hook 报文（joinKey 恒为父 pid、`agent_type` 不触发子代理过滤——ZCode 总带此字段，按 Claude 的 `agent_id` 规则会误杀全部上报、cwd 透传与坏值丢弃、stdin 不可解析时回退 env+`--event` argv、SessionStart 不冒充生命周期事件）、pending 提醒的四种沉默（零积压 / 未 attach 的 404 / Router 不可达 / Stop 事件不提醒），`/claude/pending-summary` 的 200/404/400 与未注入时 404，以及 `mailbox.pendingCount` 的三侧。
+
+### TC-ZCODE-1：真实 ZCode 会话首次 attach 与 join
+
+1. 新起一个 ZCode 会话（配置之后），attach 前先发一句话跑一个 turn，让 hook 完成一次上报。
+2. 调 `lane_directory`，看目标 `reach.state` 是否 `live`、`believedBusy` 是否随 turn 起落。
+3. 调 `lane_attach_current`，确认 binding 的 conversationId 是 **`sess_…` 真实会话 id**（join 生效），不是一串无前缀 UUID（join 失配，MCP server 的随机身份被当真了）。
+4. 重启该会话（同 id 恢复）后再调 `lane_directory`，确认 generation 不变、binding 仍认得它。
+
+**预期：** 四步全部成立。第 3 步的判据是 id 形状：随机 UUID 没有 `sess_` 前缀，两者在屏幕上一眼可分。
+
+### TC-ZCODE-2：pending 提醒在真实会话可见
+
+1. 一条已 attach 的 ZCode lane，从另一条 lane 发一封 normal，不 ack。
+2. 在目标会话里随便发一句话（触发 UserPromptSubmit hook）。
+3. 观察该 turn 是否出现 `Lane Router: N pending message(s)…` 的注入上下文，并读信 ack。
+4. 清空积压后重复第 2 步，确认不再注入。
+
+**预期：** 有信注入、无信沉默。第 4 步不能省——只验有信验不出「沉默侧」，跟 NO_COLOR 那条同构。
+
+### TC-ZCODE-3：通知帧的诚实边界
+
+1. 目标会话 idle 时从另一条 lane 发消息，确认 `notificationState` 为 `sent`（帧确实写进了 MCP stdio）。
+2. 确认目标会话**不会**自行开出 turn 处理它——ZCode 无 `claude/channel` 支持（bundle 0 命中，已核实），帧被发出去但无人消费。
+3. 下一次用户输入时经 TC-ZCODE-2 的提醒路径补投。
+
+**预期：** `sent` 与「无人处理」并存是设计明示的状态，不是缺陷；不要把 `sent` 读成「已处理」。真正的对等唤醒要等 Router 侧驱动面（见下）。
+
+### 已知边界（2026-10-07 调研结论）
+
+- **binding 记录 backend 为 `claude`**：ZCode 会话乘 Claude Channel，`lane open`/`rotate` 会按 Claude CLI 处理这类 lane 并失败。正经的 `zcode` backend 需要 schema 迁移（`lane`/`binding` 两表的 CHECK 约束枚举）与 launcher，是后续阶段。
+- **子代理干扰 join 未取证**：同 app-server 内子代理若也触发 hook，其上报会重键共享的 joinKey。真实会话里跑一次 subagent 后核对 `reach` 是否仍指向主会话（TC-ZCODE-1 第 4 步顺带）。
+- **hook 与 MCP 同父未取证**：`type: "process"` 直 spawn 下两者 ppid 应同为 app-server；若真实取证发现中间还有宿主辅助进程，join 需要换键。判据同 TC-ZCODE-1 第 3 步——join 失配会直接显形。
+- **Router 侧驱动面（真唤醒）被账户态挡住**：Router 自拉的 `zcode app-server`（ZCode Protocol，动词表与握手已摸清：`session/create` 收 `{workspace:{workspacePath,workspaceKey}, model:{providerId,modelId}}`，双向 JSON-RPC，`session/requestRuntimePreferences` 须 15 秒内应答）在 `provider/updateAccountConfig` 推送账户态前对所有套餐模型 fail-closed（"Provider Registry 中不存在 Model"，且 create 事务回滚）。协议推送的 schema 已知（`{revision, basedOnZCodeBuiltinRevision, providers, states}`），但裸 stdio 模式下该调用未获响应，成因未明。打通后 Codex adapter 的架构可大比例平移。

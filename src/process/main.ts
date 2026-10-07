@@ -80,6 +80,13 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
       dsh: { token: dshToken, channel: dshHub, read: (context, messageIds) => core.read(context, { messageIds }),
         handoff: (context, input) => core.handoffDsh(context, input) },
       recordCwd: (conversationId, cwd) => state.updateBindingCwd("claude", conversationId, cwd),
+      pendingSummary: (conversationId) => {
+        // "claude" and not a zcode name is deliberate: a ZCode session rides the Claude channel
+        // and its binding is stored under that backend, so this lookup is how its hook finds the
+        // lane the session owes mail to.
+        const binding = state.activeBindingForConversation("claude", conversationId);
+        return binding === undefined ? undefined : { laneAddress: binding.laneAddress, pendingCount: mailbox.pendingCount(binding.laneAddress) };
+      },
       resumeInfo: (address) => core.resumeInfo(address),
       archiveLane: (address) => core.archiveLane(address),
       listArchivedLanes: (project) => core.listArchivedLanes(project),

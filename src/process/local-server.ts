@@ -290,6 +290,13 @@ export class LocalRouterServer {
     };
     /** Receives the working directory a lifecycle report carries for a conversation. */
     readonly recordCwd?: (conversationId: string, cwd: string) => void;
+    /**
+     * The backlog one conversation owes, for hooks that surface it at the next turn: ZCode has no
+     * channel that could start a turn on its own, so the fact this answers is the only wake its
+     * sessions get. Read-only by the same reasoning as `resumeInfo` — this HTTP face has no
+     * authentication, so nothing on it may act.
+     */
+    readonly pendingSummary?: (conversationId: string) => { readonly laneAddress: string; readonly pendingCount: number } | undefined;
     /** Answers what a lane needs to be resumed; serves the lane launcher, not conversation tools. */
     readonly resumeInfo?: (address: string) => unknown;
     /**
@@ -386,6 +393,16 @@ export class LocalRouterServer {
           // Awaited, not passed through: the resolver is async (it may consult the session
           // locator), and serializing the pending promise answered `{}` on the real machine.
           return json(response, 200, { result: await this.options.resumeInfo(address) });
+        }
+        if (url.pathname === "/claude/pending-summary" && this.options.pendingSummary) {
+          const conversationId = url.searchParams.get("conversationId");
+          if (!conversationId) return json(response, 400, { error: "conversationId is required" });
+          const summary = this.options.pendingSummary(conversationId);
+          // 404, not a zero-count 200: "this conversation owns no lane" and "its lane owes
+          // nothing" are different facts, and a hook that cannot tell them apart would nudge
+          // sessions that were never attached.
+          if (summary === undefined) return json(response, 404, { error: "no attached lane for this conversation" });
+          return json(response, 200, { result: summary });
         }
       }
       if (request.method === "POST" && request.url === "/lanes/archive") {

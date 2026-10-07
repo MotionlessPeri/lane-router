@@ -56,6 +56,17 @@ export class MailboxStore {
     return join(mailboxLanePath(this.root, parseLaneAddress(address)), "pending");
   }
 
+  /**
+   * How many messages a lane's pending directory holds. The files are the pending truth — the
+   * database is an index of them — so a summary that counts anything else could say zero while
+   * mail is waiting. A missing directory is an empty mailbox, not an error.
+   */
+  pendingCount(address: string): number {
+    const directory = this.pendingPath(address);
+    if (!existsSync(directory)) return 0;
+    return readdirSync(directory).filter((name) => name.endsWith(".md")).length;
+  }
+
   writePending(input: MailboxMessageInput): MailboxFile {
     validateToken("message ID", input.id);
     validateHeaderValue("request key", input.requestKey);

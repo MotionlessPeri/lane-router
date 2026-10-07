@@ -119,4 +119,19 @@ describe("file mailbox", () => {
       x.database.close();
     }
   });
+
+  it("counts pending messages per lane, treating an absent mailbox as empty", () => {
+    const x = setup();
+    try {
+      expect(x.mailbox.pendingCount("alpha/target")).toBe(0);
+      seedReplyTarget(x);
+      x.mailbox.writePending(message);
+      expect(x.mailbox.pendingCount("alpha/target")).toBe(2);
+      // A lane nobody ever sent to has no directory at all, which is the same answer as zero:
+      // the pending summary nudges on owed mail, and a throw here would read as "unknown".
+      expect(x.mailbox.pendingCount("alpha/stranger")).toBe(0);
+    } finally {
+      x.database.close();
+    }
+  });
 });
