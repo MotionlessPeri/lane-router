@@ -54,6 +54,8 @@ export interface ZcodeClientPort {
   request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
   onEvent(handler: (event: SessionEventParams) => void): () => void;
   onServerRequest(handler: (request: { readonly method: string; readonly params?: Readonly<Record<string, unknown>>; readonly id: string | number }) => Promise<unknown>): () => void;
+  /** Optional because test doubles need only the paths they exercise; the real client has it. */
+  onProtocolError?(handler: (error: Error) => void): () => void;
 }
 
 export interface ZcodeProcessPort {
@@ -116,6 +118,9 @@ export class ZcodeDriver {
       ...(options.onStderrLine === undefined ? {} : { onStderrLine: options.onStderrLine }),
     });
     this.client.onEvent((event) => this.observeEvent(event));
+    // A decode rejection is silent by default, and its signature is exactly a stuck busy: events
+    // drop at the transport and the driver never hears the turn ended. Surface it on the log.
+    this.client.onProtocolError?.((error) => this.options.onLog?.(`zcode driver: protocol decode rejected a line (${error.message.slice(0, 120)})`));
   }
 
   get processState(): string { return this.process.state; }
@@ -140,12 +145,20 @@ export class ZcodeDriver {
       // registry knows the active plan cannot resolve its model, and the failure mode without the
       // push is an error at turn time that names neither plan nor push.
       const revision = newAccountConfigRevision(this.now(), (this.options.newId ?? defaultId)());
-      await pushAccountConfig(this.client, {
-        builtinPath: this.options.builtinConfigPath,
-        activeProviderId: this.options.plan.providerId,
-        revision,
-        timeoutMs: this.options.bootTimeoutMs ?? 60_000,
-      });
+      try {
+        await pushAccountConfig(this.client, {
+          builtinPath: this.options.builtinConfigPath,
+          activeProviderId: this.options.plan.providerId,
+          revision,
+          timeoutMs: this.options.bootTimeoutMs ?? 60_000,
+        });
+      } catch (error) {
+        // A runtime that boots with its own credential-driven account source (standalone mode —
+        // e.g. a distribution shipping a login flow) rejects host pushes outright; its registry is
+        // already entitled from the shared credential store, so the push is unneeded, not failed.
+        if (!String((error as Error | undefined)?.message ?? "").includes("Standalone Account")) throw error;
+        this.options.onLog?.("zcode driver: runtime manages its own account (standalone); skipping host account push");
+      }
       this.options.onLog?.(`zcode driver: app-server ready (plan ${this.options.plan.providerId}/${this.options.plan.modelId})`);
     } catch (error) {
       // A failed boot resets so the next attempt starts clean instead of reusing a half-open child.
@@ -285,6 +298,11 @@ export class ZcodeDriver {
     const state = this.sessions.get(event.sessionId);
     if (state === undefined) return;
     const lifecycle = classifySessionEvent(event.payload);
+    if (lifecycle.kind !== "ignored" && lifecycle.kind !== "text_delta") {
+      // Turn-boundary evidence on the wire, named where a stuck busy/idle would otherwise have to
+      // be diagnosed from silence.
+      this.options.onLog?.(`zcode driver: event ${lifecycle.kind} session=${event.sessionId} busy=${state.busy} keys=${Object.keys(event.payload).sort().slice(0, 6).join("/")}`);
+    }
     switch (lifecycle.kind) {
       case "turn_started":
         if (!state.busy) this.beginTurn(state);

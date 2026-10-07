@@ -72,3 +72,27 @@ describe("zcode session event classification", () => {
     expect(classifySessionEvent({ type: "turn_complete_ack", whatever: 1 })).toEqual({ kind: "ignored" });
   });
 });
+
+describe("classifySessionEvent against the real wire shapes", () => {
+  // Signatures verified from the spike's raw event stream: no discriminator field exists.
+  it("settles a turn on the result event and starts one on the input event", () => {
+    expect(classifySessionEvent({ resultType: "success", response: "WAKE_OK", tokenCount: 18103, usage: {} }))
+      .toEqual({ kind: "turn_completed", text: "WAKE_OK" });
+    expect(classifySessionEvent({ resultType: "error", response: "bad", usage: {} }))
+      .toEqual({ kind: "turn_failed", message: "bad" });
+    expect(classifySessionEvent({ executionStartedAt: 1791371099605.1536, input: "hello", turnNumber: 3, messageId: "m1" }))
+      .toEqual({ kind: "turn_started", turnNumber: 3 });
+  });
+
+  it("streams text from kind+delta and settles on a main_turn stop", () => {
+    expect(classifySessionEvent({ assistantMessageId: "a1", delta: "WAKE", done: false, kind: "text_delta" }))
+      .toEqual({ kind: "text_delta", text: "WAKE" });
+    expect(classifySessionEvent({ content: "done", querySource: "main_turn", stopReason: "stop", usage: {} }))
+      .toEqual({ kind: "turn_completed", text: "done" });
+    // A tool-using iteration ends with a non-stop reason: that must not settle the turn early.
+    expect(classifySessionEvent({ content: "...", querySource: "main_turn", stopReason: "tool_use", usage: {} }).kind).toBe("ignored");
+    // Title generation and model-switch chatter are not turn lifecycle.
+    expect(classifySessionEvent({ title: "t", source: "generated", previousTitle: "" }).kind).toBe("ignored");
+    expect(classifySessionEvent({ contextWindow: 1000000, modelSelection: { providerId: "p", modelId: "m" } }).kind).toBe("ignored");
+  });
+});

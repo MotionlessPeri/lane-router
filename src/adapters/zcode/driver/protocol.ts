@@ -24,15 +24,18 @@ export const notificationMessageSchema = z.object({ method: z.string().min(1), p
 
 /**
  * The event payload is the one deliberately non-strict surface: the server emits a long tail of
- * event types we do not consume, and new ones arrive with app updates. Rejecting an unknown field
- * would drop the turn lifecycle the driver tracks, so the envelope (sessionId/seq/payload) is
- * strict while the payload body only promises a `type`.
+ * event shapes we do not consume, new ones arrive with app updates, and — verified against a real
+ * stream — payloads carry no discriminator field at all (the classifier reads key signatures, not
+ * a `type`). Requiring any field here would drop the turn lifecycle the driver tracks.
  */
 export const sessionEventParamsSchema = z.object({
   sessionId: z.string().min(1),
   seq: z.number(),
-  payload: z.object({ type: z.string().min(1) }).passthrough(),
-}).strict();
+  payload: z.object({}).passthrough(),
+  // The real envelope also carries deliveryKind/eventId/timestamp/traceId/turnId/type; the
+  // envelope must stay open or every event — and with them every busy→idle transition — is
+  // dropped at decode, which is exactly the stuck-busy signature seen on the real wire.
+}).passthrough();
 
 export type SessionEventParams = z.infer<typeof sessionEventParamsSchema>;
 export type SessionEventPayload = SessionEventParams["payload"];
@@ -78,8 +81,11 @@ export function decodeServerMessage(input: unknown): ZcodeServerMessage {
 // defensively there too, so both spellings are accepted rather than betting the lane's whole
 // binding on which one a given build uses.
 export const sessionCreateResultSchema = z.union([
-  z.object({ sessionId: z.string().min(1) }).strict(),
-  z.object({ session: z.object({ sessionId: z.string().min(1) }).strict() }).strict(),
+  // The real result is a full state snapshot (messages/projection/runtime/settings) whose sibling
+  // fields grow with the protocol; only the session id is load-bearing here, so the surrounding
+  // objects stay open — an unknown key must not cost the lane its whole binding.
+  z.object({ sessionId: z.string().min(1) }).passthrough(),
+  z.object({ session: z.object({ sessionId: z.string().min(1) }).passthrough() }).passthrough(),
 ]);
 
 export type SessionCreateResult = { readonly sessionId: string };
@@ -87,7 +93,11 @@ export type SessionCreateResult = { readonly sessionId: string };
 export function decodeSessionCreateResult(input: unknown): SessionCreateResult {
   const parsed = sessionCreateResultSchema.safeParse(input);
   if (!parsed.success) throw new ZcodeProtocolDecodeError("session/create result carries no sessionId");
-  return "sessionId" in parsed.data ? { sessionId: parsed.data.sessionId } : { sessionId: parsed.data.session.sessionId };
+  // The passthrough union keeps sibling fields open, so narrow by hand instead of by union arm.
+  const data = parsed.data as { sessionId?: unknown; session?: { sessionId?: unknown } };
+  const sessionId = typeof data.sessionId === "string" ? data.sessionId : typeof data.session?.sessionId === "string" ? data.session.sessionId : undefined;
+  if (sessionId === undefined) throw new ZcodeProtocolDecodeError("session/create result carries no sessionId");
+  return { sessionId };
 }
 
 /**
@@ -133,8 +143,26 @@ export type TurnLifecycleEvent =
   | Readonly<{ kind: "ignored" }>;
 
 export function classifySessionEvent(payload: SessionEventPayload): TurnLifecycleEvent {
+  // The wire has no discriminator field: a real stream (verified against the spike log) identifies
+  // each event by its key signature — resultType+response settles a turn, executionStartedAt+input
+  // starts one, kind+delta carries streaming text. The type-field spellings below stay as a
+  // fallback for shapes the spike never exercised.
+  if (payload.resultType !== undefined || (payload.stopReason === "stop" && payload.querySource === "main_turn" && typeof payload.content === "string")) {
+    const text = stringField(payload.response) ?? stringField(payload.content) ?? stringField(payload.text);
+    return payload.resultType === undefined || payload.resultType === "success"
+      ? { kind: "turn_completed", text }
+      : { kind: "turn_failed", message: text ?? "turn failed" };
+  }
+  if (typeof payload.error === "object" && payload.error !== null) return { kind: "turn_failed", message: errorMessage(payload.error) };
+  if (payload.kind === "text_delta" || payload.type === "text_delta") {
+    return { kind: "text_delta", text: stringField(payload.delta) ?? stringField(payload.text) ?? "" };
+  }
+  if (typeof payload.executionStartedAt === "number" && typeof payload.input === "string") {
+    const turnNumber = payload.turnNumber;
+    return { kind: "turn_started", turnNumber: typeof turnNumber === "number" ? turnNumber : null };
+  }
   const type = payload.type;
-  if (type === "text_delta") return { kind: "text_delta", text: stringField(payload.text) ?? "" };
+  if (typeof type !== "string") return { kind: "ignored" };
   if (TURN_STARTED_TYPES.has(type) || type.startsWith("input.")) {
     const turnNumber = payload.turnNumber;
     return { kind: "turn_started", turnNumber: typeof turnNumber === "number" ? turnNumber : null };
@@ -144,6 +172,7 @@ export function classifySessionEvent(payload: SessionEventPayload): TurnLifecycl
     return { kind: "turn_completed", text };
   }
   if (TURN_FAILED_TYPES.has(type)) return { kind: "turn_failed", message: errorMessage(payload.error) };
+  if (typeof payload.error === "string") return { kind: "turn_failed", message: payload.error };
   return { kind: "ignored" };
 }
 

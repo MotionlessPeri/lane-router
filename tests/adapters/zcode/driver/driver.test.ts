@@ -87,6 +87,20 @@ describe("ZcodeDriver boot", () => {
     expect(logs).toHaveLength(1);
   });
 
+  it("treats a standalone-account refusal as self-managed and still becomes ready", async () => {
+    // A distribution with its own login flow builds the registry from the shared credential store
+    // and rejects host pushes; that must read as "push unneeded", not as a broken boot.
+    const { driver, logs } = await makeDriver({
+      handle: (method) => {
+        if (method === "provider/updateAccountConfig") throw new Error("Standalone Account 由本进程管理，不接收 Host 覆盖");
+        return defaultHandle(method, {});
+      },
+    });
+    await expect(driver.ensureStarted()).resolves.toBeUndefined();
+    expect(logs.join("\n")).toContain("standalone");
+    await expect(driver.createSession({ workspacePath: "E:\\w", workspaceKey: "E:\\w" })).resolves.toMatchObject({ sessionId: "sess-1" });
+  });
+
   it("stays unstarted when the push is refused, and retries from scratch afterwards", async () => {
     let pushes = 0;
     const { driver, mock } = await makeDriver({
