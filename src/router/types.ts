@@ -1,4 +1,4 @@
-export type BackendName = "claude" | "codex" | "dsh" | "zcode";
+export type BackendName = "claude" | "codex" | "dsh" | "zcode" | "native-codex";
 export type MessageKind = "normal" | "correction";
 export type MessageState = "pending" | "resolved";
 

@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 
-import type Database from "better-sqlite3";
+import Database from "better-sqlite3";
 
-export const ROUTER_SCHEMA_VERSION = 8;
+export const ROUTER_SCHEMA_VERSION = 9;
 
 /**
  * The version 2 message table, kept verbatim because the version 1 migration has to build exactly
@@ -188,12 +188,15 @@ const ROUTER_SCHEMA_SUFFIX = `${MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${ME
 /** Exact schema produced by the version 5 to 6 migration before version 7 widens BackendName. */
 export const ROUTER_SCHEMA_V6_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V6_SQL}${ROUTER_SCHEMA_SUFFIX}`;
 
+const BINDING_TABLE_V9_SQL = BINDING_TABLE_V8_SQL.replace("'claude','codex','dsh','zcode'", "'claude','codex','dsh','zcode','native-codex'");
+
 /** Schema for newly created databases at the current version. */
-export const ROUTER_SCHEMA_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V8_SQL}${ROUTER_SCHEMA_SUFFIX}`;
+export const ROUTER_SCHEMA_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V9_SQL}${ROUTER_SCHEMA_SUFFIX}`;
 
 export function initializeRouterSchema(database: Database.Database): void {
   let version = database.pragma("user_version", { simple: true }) as number;
   if (version === ROUTER_SCHEMA_VERSION) {
+    assertSharedSchema(database, version);
     assertForeignKeys(database);
     return;
   }
@@ -214,8 +217,69 @@ export function initializeRouterSchema(database: Database.Database): void {
   if (version === 5) { rebuildWithLaneIdentity(database); version = 6; }
   if (version === 6) { addDshBackend(database); version = 7; }
   if (version === 7) { addZcodeBackend(database); version = 8; }
+  if (version === 8) { addSharedNativeBackend(database); version = 9; }
   if (version !== ROUTER_SCHEMA_VERSION) throw new Error(`Router database version ${version} is not supported`);
   assertForeignKeys(database);
+}
+
+/** SQL whitespace is not identity; quoted values and every structural token still are. */
+function normalizedSql(sql: string): string {
+  return sql.split(/('(?:''|[^'])*')/).map((part, index) => index % 2 ? part : part.replace(/\s+/g, "").toLowerCase()).join("");
+}
+
+function schemaShape(database: Database.Database): unknown {
+  const objects = database.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").all() as Array<{ type: string; name: string; tbl_name: string; sql: string }>;
+  return objects.map(row => ({ ...row, sql: normalizedSql(row.name === "binding" && row.type === "table"
+    ? row.sql.replace(/CHECK\s*\(\s*backend\s+IN\s*\([^)]*\)\s*\)/i, "CHECK (backend IN ('known'))") : row.sql) }));
+}
+
+/** Both released version-eight shapes are accepted; unknown constraints or indexes are not. */
+function assertSharedSchema(database: Database.Database, version: number): void {
+  const sql = (database.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='binding'").get() as { sql?: string } | undefined)?.sql ?? "";
+  const match = sql.match(/CHECK\s*\(\s*backend\s+IN\s*\(([^)]*)\)\s*\)/i);
+  const values = match?.[1]?.split(",").map(value => value.trim()).sort().join(",");
+  const vocabulary = (names: string[]) => names.map(name => `'${name}'`).sort().join(",");
+  const base = ["claude", "codex", "dsh"];
+  const known = version === 8 ? [vocabulary([...base, "zcode"]), vocabulary([...base, "native-codex"])] : [vocabulary([...base, "zcode", "native-codex"])];
+  if (!values || !known.includes(values)) throw new Error("Router database schema shape is not supported");
+  const reference = new Database(":memory:");
+  try {
+    reference.exec(ROUTER_SCHEMA_SQL);
+    if (JSON.stringify(schemaShape(database)) !== JSON.stringify(schemaShape(reference))) throw new Error("Router database schema shape is not supported");
+  } finally { reference.close(); }
+}
+
+/**
+ * 流程：1. 核旧形态与外键；2. 事务重建并逐记录核对；3. 恢复外键开关。
+ * Native Host and ZCode use distinct identities while all historical data stays unchanged.
+ */
+function addSharedNativeBackend(database: Database.Database): void {
+  // 步骤 1: 未知输入在任何修改前拒绝。
+  assertSharedSchema(database, 8);
+  assertForeignKeys(database);
+  const foreignKeysWereOn = database.pragma("foreign_keys", { simple: true }) === 1;
+  database.pragma("foreign_keys = OFF");
+  try {
+    // 步骤 2: 复制不重发身份，完整对账后才提交版本。
+    database.transaction(() => {
+      const tables = ["lane", "binding", "message", "message_archive"];
+      const snapshot = () => tables.map(table => database.prepare(`SELECT * FROM ${table} ORDER BY id`).all());
+      const before = JSON.stringify(snapshot());
+      database.exec("ALTER TABLE binding RENAME TO binding_legacy;");
+      for (const index of ["binding_active_lane_idx", "binding_active_conversation_idx", "binding_lane_generation_idx"]) database.exec(`DROP INDEX ${index};`);
+      database.exec(BINDING_TABLE_V9_SQL);
+      database.exec(`INSERT INTO binding(id,lane_id,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd)
+        SELECT id,lane_id,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd FROM binding_legacy;`);
+      if (JSON.stringify(snapshot()) !== before) throw new Error("Router database migration changed records");
+      database.exec("DROP TABLE binding_legacy;");
+      assertSharedSchema(database, 9);
+      assertForeignKeys(database);
+      database.pragma("user_version = 9");
+    })();
+  } finally {
+    // 步骤 3: 成功与回滚都恢复连接原设定。
+    if (foreignKeysWereOn) database.pragma("foreign_keys = ON");
+  }
 }
 
 function assertForeignKeys(database: Database.Database): void {

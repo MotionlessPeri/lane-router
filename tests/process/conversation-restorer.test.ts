@@ -45,6 +45,16 @@ test("launches an offline Codex binding and reserves it for thirty seconds", asy
   } finally { x.database.close(); }
 });
 
+test("native Host binding never enters the shared terminal restore path", async () => {
+  const x = setup();
+  try {
+    const binding = { ...x.binding, backend: "native-codex" as const };
+    await expect(x.restorer.restore(binding)).resolves.toMatchObject({ status: "failed", reason: "backend_unavailable" });
+    expect(x.launch).not.toHaveBeenCalled();
+    expect(await x.restorer.resolveCwd(binding)).toBeNull();
+  } finally { x.database.close(); }
+});
+
 test("skips online clients and fails without launching when the backend is unavailable", async () => {
   const online = setup();
   try {
