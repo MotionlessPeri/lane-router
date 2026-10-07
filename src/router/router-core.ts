@@ -3,7 +3,7 @@ import { parseLaneAddress } from "./address.js";
 import type { MailboxStore } from "./mailbox-store.js";
 import type { NotificationPump } from "./notification-pump.js";
 import type { RouterStateStore } from "./state-store.js";
-import type { CallerContext, LaneRecord, MessageKind, MessageRecord, ReachSnapshot, ResolvedIdentity } from "./types.js";
+import type { CallerContext, BackendName, LaneRecord, MessageKind, MessageRecord, ReachSnapshot, ResolvedIdentity } from "./types.js";
 import type { BindingRecord } from "./types.js";
 
 export interface LaneRestoreResult {
@@ -42,7 +42,7 @@ export interface DirectoryEntry {
   readonly roleDescription: string;
   /** The model this lane declares, or null when it declares none and the client decides. */
   readonly model: string | null;
-  readonly backend: "claude" | "codex" | "dsh" | null;
+  readonly backend: BackendName | null;
   readonly binding: DirectoryBinding | null;
   readonly reach: ReachSnapshot | null;
 }
@@ -61,7 +61,7 @@ export type ResumeInfo =
   | { readonly state: "archived" }
   | {
       readonly state: "bound";
-      readonly backend: "claude" | "codex" | "dsh";
+      readonly backend: BackendName;
       readonly conversationId: string;
       readonly cwd: string | null;
       readonly generation: number;

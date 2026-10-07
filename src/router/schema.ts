@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type Database from "better-sqlite3";
 
-export const ROUTER_SCHEMA_VERSION = 7;
+export const ROUTER_SCHEMA_VERSION = 8;
 
 /**
  * The version 2 message table, kept verbatim because the version 1 migration has to build exactly
@@ -143,6 +143,26 @@ CREATE UNIQUE INDEX binding_lane_generation_idx
   ON binding(lane_id,generation);
 `;
 
+const BINDING_TABLE_V8_SQL = `
+CREATE TABLE binding (
+  id TEXT PRIMARY KEY,
+  lane_id TEXT NOT NULL REFERENCES lane(id) ON DELETE RESTRICT,
+  backend TEXT NOT NULL CHECK (backend IN ('claude','codex','dsh','zcode')),
+  conversation_id TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK (generation > 0),
+  startup_json TEXT NOT NULL,
+  active_at INTEGER NOT NULL,
+  inactive_at INTEGER,
+  cwd TEXT
+);
+CREATE UNIQUE INDEX binding_active_lane_idx
+  ON binding(lane_id) WHERE inactive_at IS NULL;
+CREATE UNIQUE INDEX binding_active_conversation_idx
+  ON binding(backend,conversation_id) WHERE inactive_at IS NULL;
+CREATE UNIQUE INDEX binding_lane_generation_idx
+  ON binding(lane_id,generation);
+`;
+
 const ROUTER_SCHEMA_PREFIX = `
 CREATE TABLE lane (
   id TEXT PRIMARY KEY,
@@ -169,7 +189,7 @@ const ROUTER_SCHEMA_SUFFIX = `${MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${ME
 export const ROUTER_SCHEMA_V6_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V6_SQL}${ROUTER_SCHEMA_SUFFIX}`;
 
 /** Schema for newly created databases at the current version. */
-export const ROUTER_SCHEMA_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V7_SQL}${ROUTER_SCHEMA_SUFFIX}`;
+export const ROUTER_SCHEMA_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V8_SQL}${ROUTER_SCHEMA_SUFFIX}`;
 
 export function initializeRouterSchema(database: Database.Database): void {
   let version = database.pragma("user_version", { simple: true }) as number;
@@ -193,6 +213,7 @@ export function initializeRouterSchema(database: Database.Database): void {
   if (version === 4) { addLaneRetiredAtColumn(database); version = 5; }
   if (version === 5) { rebuildWithLaneIdentity(database); version = 6; }
   if (version === 6) { addDshBackend(database); version = 7; }
+  if (version === 7) { addZcodeBackend(database); version = 8; }
   if (version !== ROUTER_SCHEMA_VERSION) throw new Error(`Router database version ${version} is not supported`);
   assertForeignKeys(database);
 }
@@ -222,6 +243,38 @@ function addDshBackend(database: Database.Database): void {
       if (count(database, "binding") !== before) throw new Error("Router database migration lost binding rows");
       database.exec("DROP TABLE binding_legacy;");
       database.pragma("user_version = 7");
+      assertForeignKeys(database);
+    })();
+  } finally {
+    if (foreignKeysWereOn) database.pragma("foreign_keys = ON");
+  }
+}
+
+/**
+ * Version 8 adds the same kind of name for ZCode: its sessions ride the Claude channel, but a
+ * binding stored under "zcode" keeps the two conversations distinguishable everywhere a
+ * (backend, conversation) pair is the key. Same rebuild as version 7 because SQLite still cannot
+ * alter a CHECK, and the same row-count reconciliation because a copy that drops rows silently is
+ * still the one failure nothing downstream could detect.
+ */
+function addZcodeBackend(database: Database.Database): void {
+  const foreignKeysWereOn = database.pragma("foreign_keys", { simple: true }) === 1;
+  database.pragma("foreign_keys = OFF");
+  try {
+    database.transaction(() => {
+      const before = count(database, "binding");
+      database.exec("ALTER TABLE binding RENAME TO binding_legacy;");
+      for (const index of ["binding_active_lane_idx", "binding_active_conversation_idx", "binding_lane_generation_idx"]) {
+        database.exec(`DROP INDEX IF EXISTS ${index};`);
+      }
+      database.exec(BINDING_TABLE_V8_SQL);
+      database.exec(`
+        INSERT INTO binding(id,lane_id,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd)
+        SELECT id,lane_id,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd FROM binding_legacy;
+      `);
+      if (count(database, "binding") !== before) throw new Error("Router database migration lost binding rows");
+      database.exec("DROP TABLE binding_legacy;");
+      database.pragma("user_version = 8");
       assertForeignKeys(database);
     })();
   } finally {

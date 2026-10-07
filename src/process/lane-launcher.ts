@@ -109,6 +109,10 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
   if (info.backend === "dsh") {
     throw new Error(`The dsh backend is Host-managed and cannot be opened by lane-router-lane`);
   }
+  // The guard is the scope, not a policy choice: no ZCode launcher exists to hand this to yet.
+  if (info.backend === "zcode") {
+    throw new Error(`The zcode backend cannot be opened by lane-router-lane yet`);
+  }
   // Reach describes notification transport, not ownership by a visible client. Codex can keep a
   // thread loaded in the shared App Server after its TUI closes, so only the backend's restore
   // decision can prevent a duplicate interactive client without also stranding offline lanes.

@@ -33,6 +33,44 @@ interface ChannelConnection {
   lastNotifiedAt: number | null;
 }
 
+/**
+ * The moments the two halves of a join meet, or fail to. `at` is when this process saw the event;
+ * `deltaMs` is the gap to the other half whenever one exists, so a post-mortem of a first-turn
+ * attach failure can tell a channel that arrived slowly from a report that landed on a dead key.
+ */
+export type JoinEvent =
+  | {
+    readonly event: "join.lifecycle_received";
+    readonly joinKey: string;
+    readonly conversationId: string;
+    readonly lifecycle: "Stop" | "UserPromptSubmit";
+    readonly at: number;
+    /** held: no channel carried the key yet; adopted: a live channel was joined to the report; direct: the conversation already had a channel without the join's help. */
+    readonly outcome: "held" | "adopted" | "direct";
+    readonly deltaMs?: number;
+  }
+  | {
+    readonly event: "join.channel_connected";
+    readonly joinKey: string;
+    readonly conversationId: string;
+    readonly at: number;
+    /** awaiting_report: nothing was held for the key; placed: a held report was applied; expired: one was held but older than the window. */
+    readonly outcome: "awaiting_report" | "placed" | "expired";
+    readonly reportConversationId?: string;
+    readonly reportAt?: number;
+    readonly deltaMs?: number;
+  }
+  | {
+    readonly event: "join.unplaced_expired";
+    readonly joinKey: string;
+    readonly conversationId: string;
+    readonly at: number;
+    readonly reportAt: number;
+    readonly deltaMs: number;
+  };
+
+export type JoinEventSink = (event: JoinEvent) => void;
+
 export class ClaudeChannelHub implements ClaudeChannelPort {
   private readonly connections = new Map<string, ChannelConnection>();
   private readonly bindings = new Map<string, BindingRecord>();
@@ -40,13 +78,15 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
   private readonly waiters = new Map<string, Set<() => void>>();
 
   /**
-   * joinKey -> the identity a lifecycle report claimed for it. A channel only knows the id of the
-   * process that opened it, which is not the conversation's; the hook knows the conversation's id
-   * but not where the channel is. The key both of them can see is what puts the two together.
-   * It is never stored: it lives exactly as long as the session whose processes share it, which
-   * is why a reused pid cannot make two conversations look like one.
+   * joinKey -> the identity a lifecycle report claimed for it, and when the claim was made. A
+   * channel only knows the id of the process that opened it, which is not the conversation's; the
+   * hook knows the conversation's id but not where the channel is. The key both of them can see
+   * is what puts the two together. It is never stored beyond the session whose processes share
+   * it: `forgetJoinKey` ends it when the carrying channel closes, and the recorded moment lets
+   * `liveIdentityByJoinKey` expire a claim no close will ever name — which is why a reused pid
+   * cannot make two conversations look like one.
    */
-  private readonly identityByJoinKey = new Map<string, string>();
+  private readonly identityByJoinKey = new Map<string, { conversationId: string; at: number }>();
 
   /**
    * joinKey -> a lifecycle report that arrived before any channel carried that key. On a session
@@ -63,6 +103,7 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
   constructor(
     private readonly resolveBinding: (conversationId: string) => BindingRecord | undefined = () => undefined,
     private readonly now: () => number = Date.now,
+    private readonly observeJoin: JoinEventSink = defaultJoinEventSink,
   ) {}
 
   connect(conversationId: string, socket: WebSocket, joinKey?: string): void {
@@ -99,12 +140,24 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
    */
   private placeEarlierReport(key: string, joinKey: string | undefined): string | undefined {
     if (joinKey === undefined) return undefined;
+    const at = this.now();
     const report = this.unplacedReports.get(joinKey);
-    if (!report) return undefined;
+    if (!report) {
+      this.emitJoin({ event: "join.channel_connected", joinKey, conversationId: key, at, outcome: "awaiting_report" });
+      return undefined;
+    }
     this.unplacedReports.delete(joinKey);
-    if (this.now() - report.at > UNPLACED_REPORT_WINDOW_MS) return undefined;
+    const deltaMs = at - report.at;
+    if (deltaMs > UNPLACED_REPORT_WINDOW_MS) {
+      // Two records of one drop: the connect still happened and belongs on the timeline, while the
+      // expired event is the one a scan for window casualties can count on finding.
+      this.emitJoin({ event: "join.channel_connected", joinKey, conversationId: key, at, outcome: "expired", reportConversationId: report.conversationId, reportAt: report.at, deltaMs });
+      this.emitJoin({ event: "join.unplaced_expired", joinKey, conversationId: report.conversationId, at, reportAt: report.at, deltaMs });
+      return undefined;
+    }
     const connection = this.connections.get(key);
     if (!connection) return undefined;
+    this.emitJoin({ event: "join.channel_connected", joinKey, conversationId: key, at, outcome: "placed", reportConversationId: report.conversationId, reportAt: report.at, deltaMs });
     if (key !== report.conversationId) this.rekey(key, report.conversationId, connection);
     connection.busy = report.event === "UserPromptSubmit";
     connection.lastLifecycleAt = report.at;
@@ -113,10 +166,30 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
 
   /** The identity this caller's lane should be stored under, and whether a join established it. */
   resolveIdentity(context: { conversationId: string; joinKey?: string }): ResolvedIdentity {
-    const joined = context.joinKey === undefined ? undefined : this.identityByJoinKey.get(context.joinKey);
+    const joined = context.joinKey === undefined ? undefined : this.liveIdentityByJoinKey(context.joinKey);
     return joined === undefined
       ? { value: context.conversationId, source: "caller" }
       : { value: joined, source: "joined" };
+  }
+
+  /**
+   * A join key's identity is meant to live exactly as long as a channel carrying the key does —
+   * `forgetJoinKey` already ends it on that channel's close, and only that path sees a normal
+   * session out. This window is the backstop for claims no close will ever name: a report whose
+   * channel never arrived, or whose channel died before the report did. Liveness is anchored to
+   * the conversation the identity names rather than to the key, so a reused pid's brand-new
+   * channel cannot keep a dead session's identity alive — while a session mid-turn, which reports
+   * far less often than the window, keeps its mapping for as long as its own conversation's
+   * channel stays open.
+   */
+  private liveIdentityByJoinKey(joinKey: string): string | undefined {
+    const identity = this.identityByJoinKey.get(joinKey);
+    if (identity === undefined) return undefined;
+    if (this.now() - identity.at <= UNPLACED_REPORT_WINDOW_MS) return identity.conversationId;
+    const connection = this.connections.get(identity.conversationId);
+    if (connection !== undefined && connection.socket.readyState === connection.socket.OPEN) return identity.conversationId;
+    this.identityByJoinKey.delete(joinKey);
+    return undefined;
   }
 
   /** A channel is keyed by whatever identity it currently answers to, which a join can change. */
@@ -192,18 +265,27 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
   }
 
   reportLifecycle(conversationId: string, event: "Stop" | "UserPromptSubmit", joinKey?: string): boolean {
-    if (joinKey !== undefined) this.identityByJoinKey.set(joinKey, conversationId);
+    const at = this.now();
+    if (joinKey !== undefined) this.identityByJoinKey.set(joinKey, { conversationId, at });
     // The join key names the session that is reporting right now, so a channel carrying it wins
     // over whatever is filed under the conversation — which, just after a restart, is the dead
     // predecessor whose socket has not finished closing.
-    const connection = this.adoptByJoinKey(conversationId, joinKey) ?? this.connections.get(conversationId);
+    const adopted = joinKey === undefined ? undefined : this.adoptByJoinKey(conversationId, joinKey);
+    const connection = adopted ?? this.connections.get(conversationId);
     if (!connection) {
       // Not accepted — nothing carried it — but kept, so the channel that arrives next can take it.
-      if (joinKey !== undefined) this.unplacedReports.set(joinKey, { conversationId, event, at: this.now() });
+      if (joinKey !== undefined) {
+        this.unplacedReports.set(joinKey, { conversationId, event, at });
+        this.emitJoin({ event: "join.lifecycle_received", joinKey, conversationId, lifecycle: event, at, outcome: "held" });
+      }
       return false;
     }
+    if (joinKey !== undefined) this.emitJoin(adopted === undefined
+      ? { event: "join.lifecycle_received", joinKey, conversationId, lifecycle: event, at, outcome: "direct" }
+      // connectedAt is the other half of this pairing: how long the channel sat unjoined.
+      : { event: "join.lifecycle_received", joinKey, conversationId, lifecycle: event, at, outcome: "adopted", deltaMs: at - adopted.connectedAt });
     connection.busy = event === "UserPromptSubmit";
-    connection.lastLifecycleAt = this.now();
+    connection.lastLifecycleAt = at;
     if (event === "Stop") this.signal(conversationId);
     return true;
   }
@@ -258,6 +340,11 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     // attached. Resolving first also keeps a takeover from being announced under its old generation.
     const binding = this.resolveBinding(conversationId) ?? this.bindings.get(conversationId);
     if (binding) for (const handler of this.attentionHandlers) handler(binding);
+  }
+
+  // An observer must not be able to take routing down with it, so its failures stop here.
+  private emitJoin(event: JoinEvent): void {
+    try { this.observeJoin(event); } catch { /* an observer's failure is not the Router's */ }
   }
 }
 
@@ -600,6 +687,16 @@ const ATTACH_WAIT_MS = 60_000;
  */
 const UNPLACED_REPORT_WINDOW_MS = 30_000;
 
+/**
+ * The detached Router has no console of its own: detach-router.ts hands router-start.log to the
+ * child as its stderr, so stderr is the one channel a join post-mortem can count on finding after
+ * the fact. One JSON object per line keeps that file greppable without a parser, and nothing is
+ * buffered in this process — the log line is the record, so retention needs no bound of its own.
+ */
+function defaultJoinEventSink(event: JoinEvent): void {
+  process.stderr.write(`${JSON.stringify(event)}\n`);
+}
+
 function callerLifetime(request: IncomingMessage): AbortSignal {
   const abandoned = new AbortController();
   request.once("close", () => abandoned.abort(new Error("the caller disconnected")));
@@ -618,7 +715,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function callerContext(value: unknown): CallerContext | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const context = value as Record<string, unknown>;
-  if ((context.backend !== "claude" && context.backend !== "codex") || typeof context.conversationId !== "string" || typeof context.requestKey !== "string") return undefined;
+  // ZCode rides this RPC face with its own backend name because its bindings are stored under it;
+  // "dsh" stays absent because the Host path supplies its context server-side, never over /rpc.
+  if ((context.backend !== "claude" && context.backend !== "codex" && context.backend !== "zcode")
+    || typeof context.conversationId !== "string" || typeof context.requestKey !== "string") return undefined;
   return {
     backend: context.backend, conversationId: context.conversationId, requestKey: context.requestKey,
     ...(typeof context.joinKey === "string" ? { joinKey: context.joinKey } : {}),

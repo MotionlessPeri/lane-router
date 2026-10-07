@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCodexRuntime } from "../adapters/codex/codex-runtime.js";
 import { ClaudeBackend } from "../backends/claude-backend.js";
 import { DshBackend, DshChannelHub } from "../backends/dsh-backend.js";
+import { ZcodeBackend } from "../backends/zcode-backend.js";
 import { BackendRegistry } from "../router/backend.js";
 import { dashboardSnapshot, type DashboardLauncherChoices } from "../router/dashboard.js";
 import { openRouterDatabase } from "../router/database.js";
@@ -34,8 +35,16 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
   catch (error) { lock.release(); throw error; }
   const state = new RouterStateStore(database);
   const mailbox = new MailboxStore(dataRoot);
-  const claudeHub = new ClaudeChannelHub((conversationId) => state.activeBindingForConversation("claude", conversationId));
+  // The channel hub knows a conversation only by id, but a ZCode session riding that hub stores its
+  // binding under "zcode", so a claude-only lookup would leave every zcode channel binding-less and
+  // reach/notify blind. Claude answers first: it is the hub's native backend, and the same id bound
+  // under both names is not a state any session can produce.
+  const activeChannelBinding = (conversationId: string) =>
+    state.activeBindingForConversation("claude", conversationId)
+      ?? state.activeBindingForConversation("zcode", conversationId);
+  const claudeHub = new ClaudeChannelHub(activeChannelBinding);
   const claudeBackend = new ClaudeBackend(claudeHub);
+  const zcodeBackend = new ZcodeBackend(claudeHub);
   const dshHub = new DshChannelHub((sessionId) => state.activeBindingForConversation("dsh", sessionId));
   const dshBackend = new DshBackend(dshHub);
   let tools: ToolService | undefined;
@@ -55,7 +64,7 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     const dshToken = loadDshHostToken(dataRoot);
     await codex.start();
     const launcherChoices = await codexLauncherChoices(codex.client);
-    const backends = new BackendRegistry([claudeBackend, codex.backend, dshBackend]);
+    const backends = new BackendRegistry([claudeBackend, codex.backend, dshBackend, zcodeBackend]);
     const pump = new NotificationPump(state, mailbox, backends);
     const restore = new ConversationRestorer({
       state, backends,
@@ -79,12 +88,16 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
       tools, codex, claude: claudeHub, instanceId: randomUUID(),
       dsh: { token: dshToken, channel: dshHub, read: (context, messageIds) => core.read(context, { messageIds }),
         handoff: (context, input) => core.handoffDsh(context, input) },
-      recordCwd: (conversationId, cwd) => state.updateBindingCwd("claude", conversationId, cwd),
+      // The cwd travels with whichever backend owns the binding, so the channel resolver decides
+      // where the fact lands rather than the /claude path assuming it is always "claude".
+      recordCwd: (conversationId, cwd) => {
+        const binding = activeChannelBinding(conversationId);
+        if (binding !== undefined) state.updateBindingCwd(binding.backend, conversationId, cwd);
+      },
       pendingSummary: (conversationId) => {
-        // "claude" and not a zcode name is deliberate: a ZCode session rides the Claude channel
-        // and its binding is stored under that backend, so this lookup is how its hook finds the
-        // lane the session owes mail to.
-        const binding = state.activeBindingForConversation("claude", conversationId);
+        // The channel resolver, not a claude-only lookup: a ZCode session rides the Claude channel
+        // but its binding is stored under "zcode", and this nudge is the only wake its sessions get.
+        const binding = activeChannelBinding(conversationId);
         return binding === undefined ? undefined : { laneAddress: binding.laneAddress, pendingCount: mailbox.pendingCount(binding.laneAddress) };
       },
       resumeInfo: (address) => core.resumeInfo(address),
@@ -96,7 +109,7 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     mailbox.reconcile(state);
     const discovery = await server.start();
     writeDiscovery(discoveryPath, discovery);
-    for (const backend of [claudeBackend, codex.backend, dshBackend]) backend.onAttentionOpportunity((lane) => { void pump.onAttentionOpportunity(lane); });
+    for (const backend of [claudeBackend, codex.backend, dshBackend, zcodeBackend]) backend.onAttentionOpportunity((lane) => { void pump.onAttentionOpportunity(lane); });
     await pump.onStartup();
   } catch (error) {
     await codex.stop().catch(() => undefined);

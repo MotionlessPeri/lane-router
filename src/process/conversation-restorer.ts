@@ -38,6 +38,9 @@ export class ConversationRestorer {
 
   async restore(binding: BindingRecord, override: RestoreOverride = {}): Promise<RestoreResult> {
     if (binding.backend === "dsh") return failure("backend_unavailable", "dsh conversations are restored by their Host");
+    // Not "later by someone else" but "not yet by anyone": spawning a ZCode client headless has no
+    // implementation, and falling through would hand a ZCode conversation to a Claude terminal.
+    if (binding.backend === "zcode") return failure("backend_unavailable", "zcode conversations cannot be reopened by the Router yet");
     const now = (this.dependencies.now ?? Date.now)();
     const reservedUntil = this.reservations.get(binding.id) ?? 0;
     if (reservedUntil > now) return { status: "skipped_launching" };
