@@ -320,3 +320,17 @@ test("prints the Router's refusal instead of turning it into a bare failure", as
   // value of the refusal and has to survive the trip to the terminal.
   await expect(launchLane(["archive", "alpha/busy"], deps)).rejects.toThrow(/2 unread message/u);
 });
+
+test("new --backend zcode spawns headless through the Router and opens no terminal", async () => {
+  const spawnZcodeLane = vi.fn(async (input: { address: string; role: string; cwd: string; model?: string }) => ({ address: input.address, sessionId: "sess_1" }));
+  const written: string[] = [];
+  const deps = fakes({ spawnZcodeLane, write: (text: string) => written.push(text) });
+  await launchLane(["new", "alpha/glm", "--role", "GLM worker.", "--backend", "zcode", "--cwd", "D:\w"], deps);
+  expect(spawnZcodeLane).toHaveBeenCalledWith({ address: "alpha/glm", role: "GLM worker.", cwd: "D:\w" });
+  expect(written.join("")).toContain("sess_1");
+  // A headless lane has no window; the terminal path must not even be consulted.
+  expect(deps.spawnTerminal).not.toHaveBeenCalled();
+  // The windowed-only flags are refused for headless, loudly rather than silently ignored.
+  await expect(launchLane(["new", "beta/glm", "--role", "r", "--backend", "zcode", "--terminal", "wt"], fakes())).rejects.toThrow(/headless/u);
+  await expect(launchLane(["new", "beta/glm", "--role", "r", "--backend", "zcode", "--profile", "p"], fakes())).rejects.toThrow(/profile.*codex/iu);
+});
