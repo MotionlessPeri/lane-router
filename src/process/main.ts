@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createCodexRuntime } from "../adapters/codex/codex-runtime.js";
+import { ZcodeDriver } from "../adapters/zcode/driver/driver.js";
 import { ClaudeBackend } from "../backends/claude-backend.js";
 import { DshBackend, DshChannelHub } from "../backends/dsh-backend.js";
 import { ZcodeBackend } from "../backends/zcode-backend.js";
@@ -21,6 +22,8 @@ import { ConversationRestorer } from "./conversation-restorer.js";
 import { DashboardLaneOpener } from "./dashboard-lane-opener.js";
 import { CLAUDE_LAUNCHER_MODELS } from "./claude-models.js";
 import { defaultCodexModelProvider, listCodexModelProviders, listCodexProfiles, profileModelProvider } from "./codex-profiles.js";
+import { readRouterConfig } from "./router-config.js";
+import { spawnHeadlessZcodeLane } from "./zcode-lane-spawner.js";
 import { ToolService } from "../tools/tool-service.js";
 import { ClaudeChannelHub, LocalRouterServer } from "./local-server.js";
 import { RuntimeLock } from "./runtime-lock.js";
@@ -44,7 +47,32 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
       ?? state.activeBindingForConversation("zcode", conversationId);
   const claudeHub = new ClaudeChannelHub(activeChannelBinding);
   const claudeBackend = new ClaudeBackend(claudeHub);
-  const zcodeBackend = new ZcodeBackend(claudeHub);
+  // Constructed but never started here: the driver spawns its app-server on first use, so a missing
+  // or broken zcode install costs exactly the features that need it and never the Router's boot.
+  // A config file that exists but does not parse is an operator error the Router must refuse to
+  // run on, so the read sits inside the lock-owning lifecycle rather than before it.
+  const zcodeDriverConfig = (await readRouterConfig({ dataRoot }).catch((error: unknown) => {
+    database.close(); lock.release(); throw error;
+  })).zcode?.driver;
+  const zcodeDriver = zcodeDriverConfig === undefined ? undefined : new ZcodeDriver({
+    launch: {
+      command: zcodeDriverConfig.command,
+      ...(zcodeDriverConfig.args === undefined ? {} : { args: zcodeDriverConfig.args }),
+      ...(zcodeDriverConfig.env === undefined ? {} : { env: zcodeDriverConfig.env }),
+    },
+    plan: zcodeDriverConfig.plan,
+    ...(zcodeDriverConfig.builtinPath === undefined ? {} : { builtinConfigPath: zcodeDriverConfig.builtinPath }),
+    ...(zcodeDriverConfig.personalPath === undefined ? {} : { personalConfigPath: zcodeDriverConfig.personalPath }),
+    credentialsPath: zcodeDriverConfig.credentialsPath,
+    ...(zcodeDriverConfig.host === undefined ? {} : { host: zcodeDriverConfig.host }),
+    onLog: (line) => process.stderr.write(`${line}\n`),
+    onStderrLine: (line) => process.stderr.write(`zcode app-server: ${line}\n`),
+  });
+  const zcodeBackend = new ZcodeBackend(
+    claudeHub,
+    zcodeDriver,
+    (sessionId) => state.activeBindingForConversation("zcode", sessionId)?.laneAddress,
+  );
   const dshHub = new DshChannelHub((sessionId) => state.activeBindingForConversation("dsh", sessionId));
   const dshBackend = new DshBackend(dshHub);
   let tools: ToolService | undefined;
@@ -103,6 +131,16 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
       resumeInfo: (address) => core.resumeInfo(address),
       archiveLane: (address) => core.archiveLane(address),
       listArchivedLanes: (project) => core.listArchivedLanes(project),
+      ...(zcodeDriver === undefined ? {} : {
+        zcodeSpawnLane: (input) => spawnHeadlessZcodeLane({
+          driver: zcodeDriver,
+          callTool: (name, args, context) => {
+            if (!tools) throw new Error("Router tools are not ready");
+            return tools.call(name, args, context);
+          },
+          input,
+        }),
+      }),
       dashboardState: (router) => dashboardSnapshot({ state, mailbox, backends, now: Date.now, launcherChoices }, router),
       dashboardOpen: (input) => dashboardOpener.open(input),
     });
@@ -113,6 +151,7 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     await pump.onStartup();
   } catch (error) {
     await codex.stop().catch(() => undefined);
+    await zcodeDriver?.shutdown().catch(() => undefined);
     database.close(); lock.release(); throw error;
   }
 
@@ -121,6 +160,7 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     rmSync(discoveryPath, { force: true });
     await server?.close();
     await codex.stop();
+    await zcodeDriver?.shutdown().catch(() => undefined);
     database.close();
     lock.release();
   } };

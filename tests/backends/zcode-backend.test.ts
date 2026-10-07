@@ -1,13 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ZcodeBackend } from "../../src/backends/zcode-backend.js";
+import { ZcodeBackend, type ZcodeDriverSessionPort } from "../../src/backends/zcode-backend.js";
 import type { ClaudeChannelOutcome, ClaudeChannelPort } from "../../src/backends/claude-backend.js";
-import type { BindingRecord, ReachSnapshot } from "../../src/router/types.js";
+import { notificationPayload } from "../../src/router/notification-payload.js";
+import type { BindingRecord, NotificationOutcome, ReachSnapshot } from "../../src/router/types.js";
 
 const binding: BindingRecord = {
   id: "binding-1", laneAddress: "alpha/design", backend: "zcode", conversationId: "session-1",
   generation: 1, startup: {}, activeAt: 1, inactiveAt: null, cwd: null,
 };
+const drivenBinding: BindingRecord = { ...binding, conversationId: "sess-headless" };
 const notification = {
   laneAddress: "alpha/design", pendingPath: "C:/mailboxes/alpha/design/pending",
   kind: "normal" as const, messageIds: ["message-1"],
@@ -27,6 +29,17 @@ function setup(result: ClaudeChannelOutcome = "sent", reach: ReachSnapshot = liv
     resolveIdentity: vi.fn((context: { conversationId: string }) => ({ value: context.conversationId, source: "caller" as const })),
   };
   return { backend: new ZcodeBackend(channel), channel, emit: () => attention?.(binding) };
+}
+
+function driverPort(overrides: Partial<ZcodeDriverSessionPort> = {}): ZcodeDriverSessionPort {
+  return {
+    hasSession: (sessionId) => sessionId === drivenBinding.conversationId,
+    send: vi.fn(async (): Promise<NotificationOutcome> => "sent"),
+    waitUntilIdle: vi.fn(async () => undefined),
+    sessionSnapshot: () => ({ busy: false, createdAt: 5, lastLifecycleAt: 6, lastNotifiedAt: 7 }),
+    onTurnSettled: () => () => undefined,
+    ...overrides,
+  };
 }
 
 describe("ZcodeBackend", () => {
@@ -78,6 +91,78 @@ describe("ZcodeBackend", () => {
 
     vi.mocked(x.channel.resolveIdentity).mockReturnValue({ value: "conversation", source: "joined" });
     expect(x.backend.validateAttach({ backend: "zcode", conversationId: "mcp", requestKey: "r" })).toBeUndefined();
-    expect(x.channel.reach).toHaveBeenLastCalledWith("conversation");
+    expect(x.channel.reach).toHaveBeenCalledWith("conversation");
+  });
+});
+
+describe("ZcodeBackend driver sessions", () => {
+  it("delivers notifications to a driven session as a send of the payload text, never via the channel", async () => {
+    const x = setup();
+    const driver = driverPort();
+    const backend = new ZcodeBackend(x.channel, driver, () => "alpha/design");
+    await expect(backend.notifyNormal(drivenBinding, notification)).resolves.toBe("sent");
+    await expect(backend.notifyCorrection(drivenBinding, { ...notification, kind: "correction" })).resolves.toBe("sent");
+    expect(driver.send).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(driver.send)).toHaveBeenNthCalledWith(1, drivenBinding.conversationId, notificationPayload(notification));
+    // The correction is marked inside the payload itself — the driver gets one text surface.
+    const correctionText = vi.mocked(driver.send).mock.calls[1]![1]!;
+    expect(JSON.parse(correctionText).messageKind).toBe("correction");
+    expect(x.channel.notify).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the channel for conversations the driver does not own", async () => {
+    const x = setup();
+    const driver = driverPort();
+    const backend = new ZcodeBackend(x.channel, driver, () => "alpha/design");
+    await expect(backend.notifyNormal(binding, notification)).resolves.toBe("sent");
+    expect(driver.send).not.toHaveBeenCalled();
+    expect(x.channel.notify).toHaveBeenCalledWith(binding, notification);
+  });
+
+  it("reports reach, replaceability and restore presence from the driver's own state", async () => {
+    const x = setup();
+    const driver = driverPort({
+      sessionSnapshot: () => ({ busy: true, createdAt: 99, lastLifecycleAt: 100, lastNotifiedAt: 101 }),
+    });
+    const backend = new ZcodeBackend(x.channel, driver, () => "alpha/design");
+    expect(backend.reach(drivenBinding)).toEqual({
+      state: "live", connectedAt: 99, lastLifecycleAt: 100, lastNotifiedAt: 101, believedBusy: true,
+    });
+    const signal = AbortSignal.timeout(1_000);
+    await backend.waitUntilReplaceable(drivenBinding, signal);
+    expect(driver.waitUntilIdle).toHaveBeenCalledWith(drivenBinding.conversationId, signal);
+    expect(x.channel.waitUntilReplaceable).not.toHaveBeenCalled();
+    expect(backend.restorePresence(drivenBinding)).toBe("online");
+  });
+
+  it("reports an unsettled driven session as unconfirmed the way a fresh channel is", () => {
+    const x = setup();
+    const driver = driverPort({ sessionSnapshot: () => ({ busy: false, createdAt: 1, lastLifecycleAt: null, lastNotifiedAt: null }) });
+    const backend = new ZcodeBackend(x.channel, driver, () => "alpha/design");
+    expect(backend.reach(drivenBinding)).toMatchObject({ state: "unconfirmed", believedBusy: false });
+  });
+
+  it("vouches for attach and a caller-source identity when the driver owns the session", () => {
+    const x = setup("sent", { ...live, believedBusy: true });
+    const backend = new ZcodeBackend(x.channel, driverPort(), () => "alpha/design");
+    const context = { backend: "zcode" as const, conversationId: drivenBinding.conversationId, requestKey: "r" };
+    expect(backend.validateAttach(context)).toBeUndefined();
+    expect(backend.resolveIdentity(context)).toEqual({ value: drivenBinding.conversationId, source: "caller" });
+    // An interactive session still needs its channel join.
+    expect(backend.validateAttach({ ...context, conversationId: "session-1" })).toMatch(/not joined/i);
+  });
+
+  it("turns a driver turn settlement into an attention opportunity for the lane", () => {
+    const x = setup();
+    let settled: ((sessionId: string) => void) | undefined;
+    const driver = driverPort({ onTurnSettled: (handler) => { settled = handler; return () => { settled = undefined; }; } });
+    const backend = new ZcodeBackend(x.channel, driver, (sessionId) => sessionId === drivenBinding.conversationId ? "alpha/design" : undefined);
+    const handler = vi.fn();
+    backend.onAttentionOpportunity(handler);
+    settled?.(drivenBinding.conversationId);
+    expect(handler).toHaveBeenCalledWith("alpha/design");
+    // A session with no lane binding yet settles silently.
+    settled?.("sess-orphan");
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 });

@@ -395,6 +395,13 @@ export class LocalRouterServer {
     readonly archiveLane?: (address: string) => Promise<unknown>;
     readonly listArchivedLanes?: (project: string | undefined) => unknown;
     /**
+     * Creates a headless zcode lane (Router-owned app-server session + attach) for the spawn CLI.
+     * Absent means this Router runs without the zcode driver, and the endpoint says so instead of
+     * pretending. Act-able like archiving, and exposed on the same unauthenticated loopback face
+     * every other lane-lifecycle verb lives on.
+     */
+    readonly zcodeSpawnLane?: (input: { readonly address: string; readonly role: string; readonly cwd: string; readonly model?: string }) => Promise<{ readonly sessionId: string; readonly address: string }>;
+    /**
      * One snapshot for the observation board, given the facts only this server holds. Optional for
      * the same reason as the surfaces above — the board is a face a Router may be built without —
      * and read-only for a reason of its own: this HTTP face has no authentication, so anything on
@@ -529,6 +536,24 @@ export class LocalRouterServer {
           return json(response, 200, await opener({ addresses: body.addresses as string[], override }));
         } catch (error) {
           return json(response, 400, { error: error instanceof Error ? error.message : "dashboard open request failed" });
+        }
+      }
+      if (request.method === "POST" && request.url === "/zcode/spawn") {
+        const spawn = this.options.zcodeSpawnLane;
+        if (!spawn) return json(response, 503, { error: "The zcode driver is not enabled; configure zcode.driver in the Router config to spawn headless lanes" });
+        const body = await readJson(request) as { address?: unknown; role?: unknown; cwd?: unknown; model?: unknown };
+        if (typeof body.address !== "string" || body.address.trim() === "") return json(response, 400, { error: "address is required" });
+        try { parseLaneAddress(body.address); } catch { return json(response, 400, { error: "Invalid lane address" }); }
+        if (typeof body.role !== "string" || body.role.trim() === "") return json(response, 400, { error: "role is required" });
+        if (typeof body.cwd !== "string" || body.cwd.trim() === "") return json(response, 400, { error: "cwd is required" });
+        if (body.model !== undefined && typeof body.model !== "string") return json(response, 400, { error: "model must be a string" });
+        try {
+          return json(response, 200, { result: await spawn({
+            address: body.address, role: body.role, cwd: body.cwd,
+            ...(body.model === undefined ? {} : { model: body.model as string }),
+          }) });
+        } catch (error) {
+          return json(response, 409, { error: error instanceof Error ? error.message : "zcode spawn failed" });
         }
       }
       if (request.method === "POST" && request.url === "/claude/lifecycle") {

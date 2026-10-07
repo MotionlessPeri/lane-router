@@ -8,7 +8,8 @@
     "lane-router-lane": "dist/process/lane-launcher.js",
     "lane-router-restore-project": "dist/process/project-restore-cli.js",
     "lane-router-rotate": "dist/process/rotation-launcher.js",
-    "lane-router-zcode": "dist/mcp/zcode-lane-mcp-server.js"
+    "lane-router-zcode": "dist/mcp/zcode-lane-mcp-server.js",
+    "lane-router-zcode-spawn": "dist/process/zcode-spawn-cli.js"
   },
   "engines": {
     "node": ">=22.12"
