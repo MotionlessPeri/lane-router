@@ -572,14 +572,34 @@ ZCode 会话走 Claude Channel 这条已验证的链路：同一个 lane MCP ser
 
 自动测试覆盖：hook 报文（joinKey 恒为父 pid、`agent_type` 不触发子代理过滤——ZCode 总带此字段，按 Claude 的 `agent_id` 规则会误杀全部上报、cwd 透传与坏值丢弃、stdin 不可解析时回退 env+`--event` argv、SessionStart 不冒充生命周期事件）、pending 提醒的四种沉默（零积压 / 未 attach 的 404 / Router 不可达 / Stop 事件不提醒），`/claude/pending-summary` 的 200/404/400 与未注入时 404，以及 `mailbox.pendingCount` 的三侧。
 
-### TC-ZCODE-1：真实 ZCode 会话首次 attach 与 join
+### TC-ZCODE-1a：冷启动首 turn 一次 attach
 
-1. 新起一个 ZCode 会话（配置之后），attach 前先发一句话跑一个 turn，让 hook 完成一次上报。
+**目标：** 新会话的**第一个** turn（bootstrap prompt 触发）里直接 attach，让冷启动竞态有机会显形：hook 上报可能早于 MCP channel 就绪，报告超 30 秒配对超窗即作废——首次 attach 失败、次轮自愈。原用例第 1 步「attach 前先发一句话跑一个 turn」恰好把这层行为绕掉：那之后的一次成功只证明了暖启动。本条同时是 hook bounded retry 修复的验收用例。
+
+1. 新起一个 ZCode 会话（配置之后），把 attach 作为**第一个** turn（bootstrap prompt 或新会话里敲的第一句话）直接提出，此前不跑任何别的 turn。
+2. 看该 turn 内那一次 `lane_attach_current` 的结果。若失败，**逐字记录错误原文**——失败形态是本用例的产出，不得只记「失败了」。
+3. 同轮或次轮重试，确认重试成功；成功后 `lane_directory` 应显示 `reach.state=live`、`believedBusy=true`（turn 还在跑）。
+
+**预期：** 首次 attach 允许受竞态影响而失败，但重试必须在同轮或次轮成功。重试仍失败 = hook bounded retry 修复没生效，不是竞态本身。binding 的 conversationId 判据同 TC-ZCODE-1b 第 3 步。
+
+⚠️ **别先发一句话「热身」。** 一暖机就变成 1b，竞态被绕掉——那不是通过，是没测到。与 TC-ROTATE-FIRST-TURN 第 2 步的「不要敲字」同因。
+
+**最后验证：** 尚未真机执行。
+
+### TC-ZCODE-1b：暖启动恢复与精确身份
+
+**目标：** 已跑过 turn 的会话一次 attach 成功；重启（同 id resume）后 binding 仍**精确**认得它。
+
+1. 新起一个 ZCode 会话（配置之后），先发一句话跑一个 turn，让 hook 完成一次上报。
 2. 调 `lane_directory`，看目标 `reach.state` 是否 `live`、`believedBusy` 是否随 turn 起落。
-3. 调 `lane_attach_current`，确认 binding 的 conversationId 是 **`sess_…` 真实会话 id**（join 生效），不是一串无前缀 UUID（join 失配，MCP server 的随机身份被当真了）。
-4. 重启该会话（同 id 恢复）后再调 `lane_directory`，确认 generation 不变、binding 仍认得它。
+3. 调 `lane_attach_current`，**从 hook 输入抓取精确 `session_id`**（真实机器上可在 hook 侧临时打印 stdin，或读 ZCode 日志），断言 `binding.conversationId` 与它**完全相等**——逐字符比对，不是看前缀。
+4. 重启该会话（同 id 恢复）后再抓一次 hook 侧 `session_id`、再调 `lane_directory`：id 仍完全相等、generation 不变、binding 仍认得它。
 
-**预期：** 四步全部成立。第 3 步的判据是 id 形状：随机 UUID 没有 `sess_` 前缀，两者在屏幕上一眼可分。
+**预期：** 一次 attach 成功；hook 侧 id 与 binding 的 conversationId 逐字符一致，重启后仍相等、generation 不变。
+
+**为什么前缀不够：** `sess_` 前缀只是弱 sanity。它分得开「真实 ZCode id」与「join 失配时 MCP server 的无前缀随机 UUID」，但分不开「这个会话的 sess_ id」与「任何另一个 sess_ id」——旧会话的、子代理的、别的 lane 的 id 同样带前缀（精确同一与唯一都证不了），重启后换了新 id 也照样带前缀（持久性证不了）。只有与 hook 侧真实 id **逐字符相等、且重启后仍相等**才把三者一起锁死。前缀检查保留为辅助快判：无前缀 UUID 一眼即失配，但**过了前缀检查不等于过了本判据**。
+
+**最后验证：** 尚未真机执行。
 
 ### TC-ZCODE-2：pending 提醒在真实会话可见
 
@@ -598,9 +618,25 @@ ZCode 会话走 Claude Channel 这条已验证的链路：同一个 lane MCP ser
 
 **预期：** `sent` 与「无人处理」并存是设计明示的状态，不是缺陷；不要把 `sent` 读成「已处理」。真正的对等唤醒要等 Router 侧驱动面（见下）。
 
+### TC-ZCODE-4：open/rotate 对 ZCode lane 的确定性拒绝（与存量 claude 形态的错分支）
+
+**目标：** 核销 launcher 边界的两侧。新形态（`backend=zcode`，经 `lane-router-zcode` MCP 入口注册）应有确定性优雅拒绝；存量形态（binding 仍记 `claude`，经旧 claude 形态入口注册，如迁移前的 `smoke/zcode-agent`）仍会真的把 ZCode 会话交给 Claude 终端。两条路径的失败形态都要逐字记录。
+
+1. **TC-ZCODE-4a（新形态拒绝）**：一条经 `lane-router-zcode` 入口 attach 的 lane（`lane_directory` 显示 backend 为 `zcode`）。关闭会话使其离线，运行 `lane-router-lane open <address>`。
+2. **TC-ZCODE-4b（存量形态错分支）**：一条经旧 claude 形态入口 attach 的存量 lane（backend 仍为 `claude`、conversationId 为 `sess_…`）。同样离线后 `open`。
+3. 两条各核对：是否有窗口/进程被拉起、错误原文（4a 预期 `zcode conversations cannot be reopened by the Router yet` 类守卫消息；4b 预期实际执行 `claude --resume <该 sess_ id>` 并由 claude 侧报错）。
+4. 失败后 `lane_directory` 与 mailbox 核对：lane 状态、binding、generation、消息全部不受影响。
+
+**预期：** 4a 是优雅拒绝（不开 Claude 终端）；4b 是确定性错误恢复（真的开了 Claude）。**4b 不能省**——只验 4a 会以为边界已全部收拢，实际存量 binding 仍暴露在错分支下，这正是配置要从旧入口迁到 `lane-router-zcode` 的原因。`rotate`/恢复守卫同因，不另立步骤。
+
+**前提：** 4a 需要 Router 已受控重启到 schema v8 构建、且 `~/.zcode/cli/config.json` 的 MCP 入口已从 `dist/mcp/lane-mcp-server.js` 切到 `dist/mcp/zcode-lane-mcp-server.js`（顺序不能反：旧 Router 的 CHECK 约束与 `/rpc` 校验都不认 `zcode`，先切配置会让该会话的所有 lane 调用 400）。
+
+**最后验证：** 尚未真机执行。
+
 ### 已知边界（2026-10-07 调研结论）
 
-- **binding 记录 backend 为 `claude`**：ZCode 会话乘 Claude Channel，`lane open`/`rotate` 会按 Claude CLI 处理这类 lane 并失败。正经的 `zcode` backend 需要 schema 迁移（`lane`/`binding` 两表的 CHECK 约束枚举）与 launcher，是后续阶段。
-- **子代理干扰 join 未取证**：同 app-server 内子代理若也触发 hook，其上报会重键共享的 joinKey。真实会话里跑一次 subagent 后核对 `reach` 是否仍指向主会话（TC-ZCODE-1 第 4 步顺带）。
-- **hook 与 MCP 同父未取证**：`type: "process"` 直 spawn 下两者 ppid 应同为 app-server；若真实取证发现中间还有宿主辅助进程，join 需要换键。判据同 TC-ZCODE-1 第 3 步——join 失配会直接显形。
+- **backend 已有正经的 `zcode`（schema v8），launcher 守卫确定性拒绝**：`lane`/`binding` 枚举已含 `zcode`，经 `lane-router-zcode` MCP 入口注册的 binding 记 `zcode`，open/rotate/restore 对它直接拒绝（`zcode conversations cannot be reopened by the Router yet`），不再误启 Claude。**存量风险**：经旧 claude 形态入口注册的 binding（迁移前的会话，含 `smoke/zcode-agent`）仍记 `claude`，恢复时会真的执行 `claude --resume <sess_…>`——配置迁移顺序见 TC-ZCODE-4 前提。真正的 ZCode launcher 等驱动面解锁后实现；手测核销见 TC-ZCODE-4a/4b。
+- **首 turn 冷启动竞态**：hook 上报早于 MCP channel 就绪、超 30 秒配对超窗时，首次 attach 失败、次轮自愈。原 TC-ZCODE-1 的暖启动步骤把这层行为绕掉了，现由 TC-ZCODE-1a 专门覆盖（同时是 hook bounded retry 修复的验收用例）。
+- **子代理干扰 join 未取证**：同 app-server 内子代理若也触发 hook，其上报会重键共享的 joinKey。真实会话里跑一次 subagent 后核对 `reach` 是否仍指向主会话（TC-ZCODE-1b 第 4 步顺带）。
+- **hook 与 MCP 同父未取证**：`type: "process"` 直 spawn 下两者 ppid 应同为 app-server；若真实取证发现中间还有宿主辅助进程，join 需要换键。判据同 TC-ZCODE-1b 第 3 步——join 失配会直接显形。
 - **Router 侧驱动面（真唤醒）被账户态挡住**：Router 自拉的 `zcode app-server`（ZCode Protocol，动词表与握手已摸清：`session/create` 收 `{workspace:{workspacePath,workspaceKey}, model:{providerId,modelId}}`，双向 JSON-RPC，`session/requestRuntimePreferences` 须 15 秒内应答）在 `provider/updateAccountConfig` 推送账户态前对所有套餐模型 fail-closed（"Provider Registry 中不存在 Model"，且 create 事务回滚）。协议推送的 schema 已知（`{revision, basedOnZCodeBuiltinRevision, providers, states}`），但裸 stdio 模式下该调用未获响应，成因未明。打通后 Codex adapter 的架构可大比例平移。

@@ -7,7 +7,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { parseZcodeHookInput, reportZcodeLifecycle, runZcodeHook, zcodePendingNudge } from "../../../src/adapters/zcode/lifecycle-hook.js";
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 test("reports the lifecycle with the shared-parent join key, whatever the session claims", async () => {
   const fetch = vi.fn(async () => new Response(JSON.stringify({ accepted: true }), { status: 200 }));
@@ -87,4 +87,74 @@ test("one invocation reports lifecycle and nudges only on turn-starting events",
   // restarted session is exactly the one whose mail waited the longest.
   const start = await runZcodeHook({ env: { LANE_ROUTER_URL: url }, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "sess-1" }), fetch, ppid: 9 });
   expect(start).toEqual({ lifecycle: false, additionalContext: expect.stringContaining("3 pending message(s)") });
+});
+
+test("retries an unplaced report for a second when the session's channel has not caught up", async () => {
+  vi.useFakeTimers();
+  // The Router answers "alive but nothing adopted this join key yet" as 400 + accepted:false — the
+  // cold-start race — so the retry must key on that body, not treat every 400 as final.
+  const fetch = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: false }), { status: 400 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 200 }));
+  const pending = reportZcodeLifecycle({
+    env: { LANE_ROUTER_URL: "http://127.0.0.1:42" },
+    input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "sess-4" }),
+    fetch, ppid: 11,
+  });
+  await vi.advanceTimersByTimeAsync(999);
+  expect(fetch).toHaveBeenCalledTimes(1); // a full second passes before the report is re-sent
+  await vi.advanceTimersByTimeAsync(1);
+  await expect(pending).resolves.toBe(true);
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+test("spends exactly three attempts on reports nothing will adopt", async () => {
+  vi.useFakeTimers();
+  const fetch = vi.fn(async () => new Response(JSON.stringify({ accepted: false }), { status: 200 }));
+  const pending = reportZcodeLifecycle({
+    env: { LANE_ROUTER_URL: "http://127.0.0.1:42" },
+    input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "sess-5" }),
+    fetch, ppid: 12,
+  });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(1_000);
+  await expect(pending).resolves.toBe(false);
+  // The budget is spent with the third attempt: no fourth POST and no trailing wait before exit.
+  expect(fetch).toHaveBeenCalledTimes(3);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(fetch).toHaveBeenCalledTimes(3);
+});
+
+test("retries a POST that never reached the Router", async () => {
+  vi.useFakeTimers();
+  const fetch = vi.fn()
+    .mockRejectedValueOnce(new Error("router not listening yet"))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 200 }));
+  const pending = reportZcodeLifecycle({
+    env: { LANE_ROUTER_URL: "http://127.0.0.1:42" },
+    input: JSON.stringify({ hook_event_name: "Stop", session_id: "sess-6" }),
+    fetch, ppid: 13,
+  });
+  await vi.advanceTimersByTimeAsync(1_000);
+  await expect(pending).resolves.toBe(true);
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+test("a refusal the Router means is never retried", async () => {
+  vi.useFakeTimers();
+  // A 400 carrying an error is a different fact from the 400 carrying accepted:false above: the
+  // Router declined, and the same POST cannot elicit a different answer a second later.
+  for (const status of [400, 500]) {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ error: "refused" }), { status }));
+    await expect(reportZcodeLifecycle({
+      env: { LANE_ROUTER_URL: "http://127.0.0.1:42" },
+      input: JSON.stringify({ hook_event_name: "Stop", session_id: "sess-7" }),
+      fetch, ppid: 14,
+    })).resolves.toBe(false);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  }
 });

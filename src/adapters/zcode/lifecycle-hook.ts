@@ -35,6 +35,41 @@ export function parseZcodeHookInput(input: string, env: NodeJS.ProcessEnv = proc
   return { event, sessionId, ...(cwd === undefined || cwd.length === 0 ? {} : { cwd }) };
 }
 
+/** ZCode kills the hook process at 5s and npx+node startup already spends roughly a second of
+ *  that, so the loop's worst case — every request hanging to its own timeout — must leave that
+ *  reserve: 3×600 + 2×1000 = 3800ms. The interval is the part that spans the MCP cold start, so
+ *  the per-request timeout is what gives way. */
+const LIFECYCLE_ATTEMPTS = 3;
+const LIFECYCLE_ATTEMPT_TIMEOUT_MS = 600;
+const LIFECYCLE_RETRY_INTERVAL_MS = 1_000;
+
+type LifecycleAttemptOutcome = "accepted" | "retry" | "give-up";
+
+/**
+ * One POST, classified for the retry loop. The Router encodes "alive but no channel carries this
+ * join key yet" as 400 + {accepted:false} — the cold-start race this loop exists for — so the
+ * body, not the status alone, decides whether another attempt can change the answer. Any other
+ * shape (a refusal carrying {error:...}, a proxy's 5xx) is an answer waiting cannot improve.
+ */
+async function postLifecycleReport(fetch: typeof globalThis.fetch, url: string, body: string): Promise<LifecycleAttemptOutcome> {
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+      signal: AbortSignal.timeout(LIFECYCLE_ATTEMPT_TIMEOUT_MS),
+    });
+    const parsed: unknown = await response.json().catch(() => undefined);
+    if (isRecord(parsed)) {
+      if (parsed.accepted === true) return "accepted";
+      if (parsed.accepted === false) return "retry";
+    }
+    return "give-up";
+  } catch {
+    return "retry";
+  }
+}
+
 export async function reportZcodeLifecycle(options: {
   readonly env?: NodeJS.ProcessEnv;
   readonly input: string;
@@ -49,21 +84,21 @@ export async function reportZcodeLifecycle(options: {
   const env = options.env ?? process.env;
   const baseUrl = env.LANE_ROUTER_URL ?? discoveryUrl(env.LANE_ROUTER_DATA_ROOT);
   if (!baseUrl) return false;
-  try {
-    const response = await (options.fetch ?? globalThis.fetch)(`${baseUrl.replace(/\/$/u, "")}/claude/lifecycle`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        conversationId: report.sessionId,
-        event: report.event,
-        ...(report.cwd === undefined ? {} : { cwd: report.cwd }),
-        joinKey: String(options.ppid ?? process.ppid),
-      }),
-      signal: AbortSignal.timeout(2_000),
-    });
-    if (!response.ok) return false;
-    return (await response.json() as { accepted?: unknown }).accepted === true;
-  } catch { return false; }
+  const body = JSON.stringify({
+    conversationId: report.sessionId,
+    event: report.event,
+    ...(report.cwd === undefined ? {} : { cwd: report.cwd }),
+    joinKey: String(options.ppid ?? process.ppid),
+  });
+  // The first turn's report can beat the session's own MCP channel to the Router, and a report
+  // that stays unplaced is lost once the Router's window closes. The hook is the only side of
+  // that race that can afford to wait, and only for outcomes a bounded wait can still fix.
+  for (let attempt = 1; ; attempt += 1) {
+    const outcome = await postLifecycleReport(options.fetch ?? globalThis.fetch, `${baseUrl.replace(/\/$/u, "")}/claude/lifecycle`, body);
+    if (outcome === "accepted") return true;
+    if (outcome === "give-up" || attempt >= LIFECYCLE_ATTEMPTS) return false;
+    await new Promise<void>((resolve) => { setTimeout(resolve, LIFECYCLE_RETRY_INTERVAL_MS); });
+  }
 }
 
 /**
