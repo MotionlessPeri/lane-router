@@ -15,6 +15,8 @@ export interface HeadlessZcodeSpawnInput {
    * will resume this session — travels as the session's first driven turn.
    */
   readonly intro?: string;
+  /** Windowed lanes set this: open the TUI only after the intro turn has settled. */
+  readonly waitForIntro?: boolean;
 }
 
 /**
@@ -56,9 +58,18 @@ export async function spawnHeadlessZcodeLane(options: {
     throw error;
   }
   if (options.input.intro !== undefined && options.input.intro.trim().length > 0) {
-    // Fire-and-forget in the same sense mail is: the turn belongs to the session, and the caller
-    // waiting for it would make spawn latency depend on a model.
-    void options.driver.send(sessionId, options.input.intro).catch(() => undefined);
+    // Fire-and-forget in the same sense mail is: the turn belongs to the session, and a headless
+    // caller waiting for it would make spawn latency depend on a model. The windowed form opts in
+    // (waitForIntro): a TUI that opens on a still-running intro renders the question without the
+    // answer — the user lands in a conversation that looks stuck until they poke it — because a
+    // window does not live-render turns driven by the Router's engine.
+    const sent = options.driver.send(sessionId, options.input.intro).catch(() => undefined);
+    if (options.input.waitForIntro === true) {
+      await Promise.race([
+        sent.then(() => options.driver.waitUntilIdle(sessionId, AbortSignal.timeout(90_000))).catch(() => undefined),
+        new Promise((resolve) => setTimeout(resolve, 95_000).unref?.()),
+      ]);
+    }
   }
   return { sessionId, address: options.input.address };
 }

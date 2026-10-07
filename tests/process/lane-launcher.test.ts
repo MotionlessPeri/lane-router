@@ -341,6 +341,8 @@ test("new --backend zcode --terminal spawns headless with an intro and opens a T
   await launchLane(["new", "alpha/glm-tui", "--role", "Windowed GLM lane.", "--backend", "zcode", "--terminal", "wt"], deps);
   // Windowed lanes get an intro turn (the TUI cannot take a first prompt); headless ones do not.
   expect(spawnZcodeLane.mock.calls[0][0].intro).toContain("alpha/glm-tui");
+  // The window must not open on a still-running intro: the TUI would show an unanswered prompt.
+  expect(spawnZcodeLane.mock.calls[0][0].waitForIntro).toBe(true);
   const request = deps.spawnTerminal.mock.calls[0][0];
   expect(request.mode).toBe("resume");
   expect(request.backend).toBe("zcode");

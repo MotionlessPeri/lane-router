@@ -85,12 +85,12 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
       // is born headless — the spawner binds it and fires an intro turn — and then the window
       // resumes the same session: the user lands in a TUI whose lane is already registered.
       // With --terminal absent the session simply stays headless.
-      const spawned = await (dependencies.spawnZcodeLane ?? ((input: { address: string; role: string; cwd: string; model?: string; intro?: string }) => spawnZcodeLaneDefault(dataRoot, input)))({
+      const spawned = await (dependencies.spawnZcodeLane ?? ((input: { address: string; role: string; cwd: string; model?: string; intro?: string; waitForIntro?: boolean }) => spawnZcodeLaneDefault(dataRoot, input)))({
         address: invocation.address!.address,
         role: invocation.role,
         cwd: invocation.cwd ?? dependencies.cwd ?? process.cwd(),
         ...(invocation.model === undefined ? {} : { model: invocation.model }),
-        ...(invocation.terminal === undefined ? {} : { intro: zcodeIntroPrompt(invocation.address!.address, invocation.role) }),
+        ...(invocation.terminal === undefined ? {} : { intro: zcodeIntroPrompt(invocation.address!.address, invocation.role), waitForIntro: true }),
       });
       const write = dependencies.write ?? ((text: string) => { process.stdout.write(text); });
       if (invocation.terminal === undefined) {
@@ -294,7 +294,7 @@ async function queryResumeInfoDefault(dataRoot: string, address: string): Promis
   return body.result;
 }
 
-async function spawnZcodeLaneDefault(dataRoot: string, input: { address: string; role: string; cwd: string; model?: string; intro?: string }): Promise<{ address: string; sessionId: string }> {
+async function spawnZcodeLaneDefault(dataRoot: string, input: { address: string; role: string; cwd: string; model?: string; intro?: string; waitForIntro?: boolean }): Promise<{ address: string; sessionId: string }> {
   const response = await fetch(`${await routerUrl(dataRoot)}/zcode/spawn`, {
     method: "POST",
     headers: { "content-type": "application/json" },

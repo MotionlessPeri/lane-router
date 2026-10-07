@@ -541,8 +541,9 @@ export class LocalRouterServer {
       if (request.method === "POST" && request.url === "/zcode/spawn") {
         const spawn = this.options.zcodeSpawnLane;
         if (!spawn) return json(response, 503, { error: "The zcode driver is not enabled; configure zcode.driver in the Router config to spawn headless lanes" });
-        const body = await readJson(request) as { address?: unknown; role?: unknown; cwd?: unknown; model?: unknown; intro?: unknown };
+        const body = await readJson(request) as { address?: unknown; role?: unknown; cwd?: unknown; model?: unknown; intro?: unknown; waitForIntro?: unknown };
         if (body.intro !== undefined && typeof body.intro !== "string") return json(response, 400, { error: "intro must be a string" });
+        if (body.waitForIntro !== undefined && typeof body.waitForIntro !== "boolean") return json(response, 400, { error: "waitForIntro must be a boolean" });
         if (typeof body.address !== "string" || body.address.trim() === "") return json(response, 400, { error: "address is required" });
         try { parseLaneAddress(body.address); } catch { return json(response, 400, { error: "Invalid lane address" }); }
         if (typeof body.role !== "string" || body.role.trim() === "") return json(response, 400, { error: "role is required" });
@@ -553,6 +554,7 @@ export class LocalRouterServer {
             address: body.address, role: body.role, cwd: body.cwd,
             ...(body.model === undefined ? {} : { model: body.model as string }),
             ...(body.intro === undefined ? {} : { intro: body.intro as string }),
+            ...(body.waitForIntro === undefined ? {} : { waitForIntro: body.waitForIntro }),
           }) });
         } catch (error) {
           return json(response, 409, { error: error instanceof Error ? error.message : "zcode spawn failed" });
