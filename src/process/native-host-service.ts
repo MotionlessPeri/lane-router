@@ -6,12 +6,12 @@ import type { RouterCore } from "../router/router-core.js";
 import type { RouterStateStore } from "../router/state-store.js";
 import type { ToolService } from "../tools/tool-service.js";
 import { parseLaneAddress } from "../router/address.js";
-import { ActiveExternalCalls, externalFail, externalParse, nativeHostPermitSchema, normalizeExternalCall, type NativeHostPermit, type SharedNativeBinding } from "./native-external-contract.js";
+import { ActiveExternalCalls, externalFail, externalParse, nativeHostPermitSchema, sharedNativeBindingSchema, sameSharedBinding, normalizeExternalCall, type NativeHostPermit, type SharedNativeBinding } from "./native-external-contract.js";
 
 interface PermitState { permit: NativeHostPermit; threadId?: string; shared?: SharedNativeBinding; registering?: Promise<SharedNativeBinding> }
-const registerSchema = z.object({ threadId: z.string().min(1) }).strict();
+const registerSchema = z.object({ threadId: z.string().min(1), previousBinding: sharedNativeBindingSchema.optional() }).strict();
 
-/** Trusted startup descriptors are memory-only; there is no discovery, token minting or cold restore. */
+/** Trusted permits authorize exact identities; explicit recovery reuses S without attaching or rotating it. */
 export class NativeHostService {
   private readonly permits: PermitState[];
   private readonly calls = new ActiveExternalCalls();
@@ -35,14 +35,26 @@ export class NativeHostService {
     const row = this.auth(token);
     if (!threadId || (row.threadId && row.threadId !== threadId)) externalFail("NATIVE_HOST_STALE_BINDING");
     if (row.shared) this.assertCurrent(row, false);
-    this.options.backend.connect(conversation(row.permit.hostInstanceId, threadId), socket);
+    const id = conversation(row.permit.hostInstanceId, threadId);
+    if (this.options.backend.connected(id)) externalFail("NATIVE_HOST_CHANNEL_ACTIVE");
+    this.options.backend.connect(id, socket);
   }
   async register(token: string, input: unknown): Promise<SharedNativeBinding> {
-    const row = this.auth(token), { threadId } = externalParse(registerSchema, input);
+    const row = this.auth(token), { threadId, previousBinding } = externalParse(registerSchema, input);
     if (row.threadId && row.threadId !== threadId) externalFail("NATIVE_HOST_STALE_BINDING");
     const id = conversation(row.permit.hostInstanceId, threadId);
     if (!this.options.backend.connected(id)) externalFail("NATIVE_HOST_CHANNEL_REQUIRED");
-    if (row.shared) { this.assertCurrent(row); return structuredClone(row.shared); }
+    if (row.shared) {
+      if (previousBinding && !sameSharedBinding(row.shared, previousBinding)) externalFail("NATIVE_HOST_STALE_BINDING");
+      this.assertCurrent(row); return structuredClone(row.shared);
+    }
+    if (previousBinding) {
+      if (previousBinding.laneAddress !== row.permit.address || previousBinding.conversationId !== id) externalFail("NATIVE_HOST_STALE_BINDING");
+      // Check persistent facts before changing this permit's live mapping. Unknown history remains refused.
+      this.assertCurrent({ ...row, shared: previousBinding });
+      row.threadId = threadId; row.shared = structuredClone(previousBinding);
+      return structuredClone(row.shared);
+    }
     if (row.registering) return row.registering;
     if (this.options.state.lane(row.permit.address) || this.options.state.archivedLaneAt(row.permit.address)) externalFail("NATIVE_HOST_ADDRESS_USED");
     row.threadId = threadId;

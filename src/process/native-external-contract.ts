@@ -16,12 +16,16 @@ export const nativeHostPermitSchema = z.object({
   token: text, hostInstanceId: text, address: text, slot: z.literal("lead"), roleDescription: z.string().trim().min(1), model: text,
 }).strict();
 export type NativeHostPermit = z.infer<typeof nativeHostPermitSchema>;
-export const nativeExternalConfigSchema = z.object({ endpoint: z.string().url(), token: text, hostInstanceId: text, address: text }).strict();
-export type NativeExternalConfig = z.infer<typeof nativeExternalConfigSchema>;
 export const sharedNativeBindingSchema = z.object({
   laneId: text, laneAddress: text, bindingId: text, generation: z.number().int().positive(), backend: z.literal("native-codex"), conversationId: text,
 }).strict();
 export type SharedNativeBinding = z.infer<typeof sharedNativeBindingSchema>;
+export function sameSharedBinding(a: SharedNativeBinding, b: SharedNativeBinding): boolean {
+  return a.laneId === b.laneId && a.laneAddress === b.laneAddress && a.bindingId === b.bindingId
+    && a.generation === b.generation && a.backend === b.backend && a.conversationId === b.conversationId;
+}
+export const nativeExternalConfigSchema = z.object({ endpoint: z.string().url(), token: text, hostInstanceId: text, address: text, previousBinding: sharedNativeBindingSchema.optional() }).strict();
+export type NativeExternalConfig = z.infer<typeof nativeExternalConfigSchema>;
 export const externalIndexSchema = z.object({
   protocolVersion: z.literal(1), type: z.literal("notification"), bindingId: text, generation: z.number().int().positive(),
   kind: z.enum(["normal", "correction"]), messageIds: z.array(text).min(1), messages: z.array(z.object({ id: text, sender: text }).strict()),

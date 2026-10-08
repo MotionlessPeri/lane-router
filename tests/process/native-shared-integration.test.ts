@@ -63,8 +63,41 @@ async function setup() {
   const localBinding = localState.createBinding({ id: "private-L", laneAddress: permit.address, backend: "codex", conversationId: "lead-thread", generation: 7, startup: {}, now: 2 });
   const localServer = new LocalRouterServer({ tools: {} as never, codex: {} as never, instanceId: "private-fixture" });
   await localServer.start(); cleanups.push(() => localServer.close());
-  return { root, client, shared, state, rpc, call, indices, signal, discovery, sockets, frames, localState, localBinding };
+  return { root, runtime, permit, client, shared, state, rpc, call, indices, signal, discovery, sockets, frames, localState, localBinding };
 }
+
+test("canonical receiver restart preserves original S and pending reply with explicit recovery identity", async () => {
+  const x = await setup();
+  const sent = await x.rpc("lane_send", { target: x.permit.address, body: "before synthetic restart", kind: "normal" });
+  const id = sent.body.result[0].id;
+  x.client.close();
+  await x.runtime.close();
+  const restarted = await runRouterProcess({ dataRoot: x.root }); cleanups.push(() => restarted.close());
+  const discovery = JSON.parse(readFileSync(join(x.root, "discovery.json"), "utf8"));
+  expect(discovery.instanceId).not.toBe(x.discovery.instanceId);
+  const restored = new NativeExternalClient({ endpoint: discovery.url, token: x.permit.token, hostInstanceId: x.permit.hostInstanceId, address: x.permit.address, previousBinding: x.shared });
+  cleanups.push(() => restored.close());
+  const indices: unknown[] = [];
+  await restored.connect("lead-thread", notice => indices.push(notice), () => {}, x.signal);
+  const register = async (previousBinding: unknown) => {
+    const response = await fetch(`${discovery.url}/native-host/v1/register`, { method: "POST", headers: { Authorization: `Bearer ${x.permit.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ threadId: "lead-thread", previousBinding }) });
+    return { status: response.status, body: await response.json() as any };
+  };
+  const missing = await register(undefined);
+  expect(missing.status).toBe(409);
+  expect(missing.body.error.code).toBe("NATIVE_HOST_ADDRESS_USED");
+  expect((await register({ ...x.shared, generation: x.shared.generation + 1 })).status).toBe(409);
+  expect(await restored.register("lead-thread", x.signal)).toEqual(x.shared);
+  restored.attention(x.shared, true);
+  await vi.waitFor(() => expect(JSON.stringify(indices)).toContain(id));
+  const state = fixture.state!;
+  expect(state.activeBindingForLane(x.permit.address)!.id).toBe(x.shared.bindingId);
+  expect(state.activeBindingForLane(x.permit.address)!.generation).toBe(x.shared.generation);
+  expect(await restored.call({ callId: "cold-read", name: "external_lane_read", args: { message_ids: [id] } }, x.signal)).toMatchObject([{ id, body: "before synthetic restart" }]);
+  expect(state.requireMessage(id).state).toBe("pending");
+  await restored.call({ callId: "cold-ack", name: "external_lane_ack", args: { message_ids: [id] } }, x.signal);
+  expect(state.requireMessage(id).state).toBe("resolved");
+});
 
 test("canonical startup keeps five backends, ZCode config and distinct private/shared bindings", async () => {
   const x = await setup();

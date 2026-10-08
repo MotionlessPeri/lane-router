@@ -29,7 +29,7 @@ token 与完整许可记录不会进入 dashboard 或 discovery。Host ID 不是
 仅监听现有 loopback 服务。普通 `/rpc` 不能声明 `native-codex` 身份。
 
 1. Host 用 `Authorization: Bearer <permit token>` 和 `X-Native-Thread-Id` 连接 `/native-host/v1/channel` WebSocket。
-2. Host 向 `/native-host/v1/register` POST `{"threadId":"<Lead thread>"}`。首次注册只接受从未使用的地址；不替换现有、inactive 或 archived lane。成功返回 `protocolVersion:1` 和 S，含 `laneId,laneAddress,bindingId,generation,backend,conversationId`。共享 conversation ID 为 Host ID 与 thread ID 的 JSON 二元组。
+2. Host 向 `/native-host/v1/register` POST `{"threadId":"<Lead thread>","previousBinding":{...}}`；首次注册省略 `previousBinding`，只接受从未使用的地址。显式恢复需提供原 S 的全部六字段，严格匹配静态许可、原 Host/thread 复合身份和持久当前活动绑定；错误、inactive、archived、非 native 或不同代次拒绝，不 attach 或增加代次。成功返回 `protocolVersion:1` 和 S，含 `laneId,laneAddress,bindingId,generation,backend,conversationId`。共享 conversation ID 为 Host ID 与 thread ID 的 JSON 二元组。
 3. Host 向 `/native-host/v1/call` POST `{"callId":"<unique>","name":"external_lane_send","args":{...}}`。只允许 `external_lane_send`、`external_lane_read`、`external_lane_ack`；调用参数不接受自供 backend 或身份覆盖。
 
 `external_lane_send` 采用 `lane_send` 参数，回执不含存储路径。read/ACK 使用 `message_ids`，read 不 ACK，ACK 只作用于 S 拥有的消息。发送中的相同 `callId` 与相同参数合并；改参数拒绝。完成后不能复用 `callId`，也不能因丢失回执而自动重发。
@@ -51,13 +51,13 @@ sequenceDiagram
 
 图仅辅助阅读；未对目标 Markdown 渲染器做验证，编号步骤与文字独立包含合同。
 
-Host 的 `attention` 帧须含 `protocolVersion:1,type:"attention",bindingId,generation,canDeliver`。busy 时通知 deferred；真实 idle 或同一 Host 重连提供重试机会。通知仅含 ID 与 sender，不含正文、摘要或 mailbox 路径。不同 thread/Host 不继承旧许可；新进程不自动恢复 S。Company 产品侧仍须核 L 与当前 principal，这不是共享接口对 Employee 的授权。
+Host 的 `attention` 帧须含 `protocolVersion:1,type:"attention",bindingId,generation,canDeliver`。busy 时通知 deferred；真实 idle 或同一 Host 重连提供重试机会。通知仅含 ID 与 sender，不含正文、摘要或 mailbox 路径。活通道在线时第二连接被拒绝，不踢掉原 socket；原连接关闭后才可重连。不同 thread/Host 不继承旧许可；新进程不自动恢复 S，必须显式携带原 `previousBinding`。Company 产品侧仍须核旧 Host 已退出、L、当前 principal 和 Lead 重新准入，这不是共享接口对 Employee 的授权，也不由共享 Router 管理 Company PID。
 
 ## 数据版本与运行边界
 
 schema 9 同时允许五种 backend。准确主线 ZCode v8 与准确 Company native v8 迁移前核实际表、约束和索引；未知形态拒绝。事务内保留全部记录、ID、代次与原始 startup/cwd，重建 binding 索引并核外键。不能仅修改 `user_version` 冒充迁移。
 
-`native-codex` 由 Host 管理，`lane-router-lane open` 和普通恢复不启动它。当前仅支持 Lead 首次接入及同一活 Host 重连，不支持 Employee、许可轮换或 Company 冷恢复。
+`native-codex` 由 Host 管理，`lane-router-lane open` 和普通恢复不启动它。共享端支持 Lead 首次接入、同活 Host 重连及原静态许可下精确 S 的显式恢复；恢复身份由 Company 非秘密记录保存并传入可信配置。共享接收端的合成冷重启验证不代表真实 Company 冷恢复已验收。不支持 Employee 或许可轮换。
 
 升级必须由运行使用者确定维护时段，先停写再取得一致 DB/mailbox 与完整旧构建。无新写入时失败可恢复完整旧构建及一致快照；有新写入时保存新状态并前向修复，不能只降级 dist、恢复旧 DB 或删除 native 记录。此文档不授权重启或数据读取。
 

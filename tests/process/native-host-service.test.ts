@@ -100,6 +100,72 @@ test("notice is an index, read does not ACK, ACK changes only shared messages", 
   expect(x.state.activeBindingForLane(x.permit.address)!.id).toBe(s.bindingId);
 });
 
+test("a restarted receiver restores only the explicit original S and keeps its pending messages", async () => {
+  const x = await sharedFixture(); const s = await x.register();
+  const [message] = await x.core.send({ backend: "codex", conversationId: "target", requestKey: "before-restart" }, { target: x.permit.address, body: "deployment result", kind: "normal" });
+  x.service.close();
+  const service = new NativeHostService({ permits: [x.permit], state: x.state, core: x.core, tools: x.tools, backend: x.backend, attention: async () => {} });
+  cleanups.push(() => service.close());
+  service.connect(x.permit.token, "lead-thread", new Socket() as never);
+  await expect(service.register(x.permit.token, { threadId: "lead-thread" })).rejects.toThrow("NATIVE_HOST_ADDRESS_USED");
+  expect(await service.register(x.permit.token, { threadId: "lead-thread", previousBinding: s })).toEqual(s);
+  expect(x.state.activeBindingForLane(x.permit.address)!.id).toBe(s.bindingId);
+  expect(x.state.pendingMessages(x.permit.address).map(m => m.id)).toEqual([message!.id]);
+  expect(await service.call(x.permit.token, { callId: "restored-read", name: "external_lane_read", args: { message_ids: [message!.id] } })).toMatchObject([{ body: "deployment result" }]);
+  await service.call(x.permit.token, { callId: "restored-ack", name: "external_lane_ack", args: { message_ids: [message!.id] } });
+  expect(x.state.requireMessage(message!.id).state).toBe("resolved");
+});
+
+test.each(["laneId", "laneAddress", "bindingId", "generation", "backend", "conversationId"])("restore refuses a changed %s without a new S", async field => {
+  const x = await sharedFixture(); const s = await x.register(); x.service.close();
+  const service = new NativeHostService({ permits: [x.permit], state: x.state, core: x.core, tools: x.tools, backend: x.backend, attention: async () => {} });
+  cleanups.push(() => service.close()); service.connect(x.permit.token, "lead-thread", new Socket() as never);
+  const changed = { ...s, [field]: field === "generation" ? s.generation + 1 : "foreign" };
+  await expect(service.register(x.permit.token, { threadId: "lead-thread", previousBinding: changed })).rejects.toThrow();
+  expect(x.state.activeBindingForLane(x.permit.address)!.id).toBe(s.bindingId);
+  expect(x.state.activeBindingForLane(x.permit.address)!.generation).toBe(s.generation);
+});
+
+test.each(["laneId", "laneAddress", "bindingId", "generation", "backend", "conversationId"])("a warm receiver also refuses changed previousBinding %s", async field => {
+  const x = await sharedFixture(); const s = await x.register();
+  const changed = { ...s, [field]: field === "generation" ? s.generation + 1 : "foreign" };
+  await expect(x.service.register(x.permit.token, { threadId: "lead-thread", previousBinding: changed })).rejects.toThrow();
+  expect(await x.register()).toEqual(s);
+  expect(x.socket.readyState).toBe(x.socket.OPEN);
+});
+
+test.each(["inactive", "archived", "non-native", "new-generation"])("cold restore rejects %s persistent S while preserving its pending", async change => {
+  const x = await sharedFixture(); const s = await x.register();
+  const [message] = await x.core.send({ backend: "codex", conversationId: "target", requestKey: "preserved" }, { target: x.permit.address, body: "pending deployment result", kind: "normal" });
+  x.service.close();
+  if (change === "inactive") x.state.deactivateBinding(s.bindingId, s.generation, 7);
+  if (change === "archived") x.state.archiveLane(s.laneAddress, 7);
+  if (change === "non-native") x.db.prepare("UPDATE binding SET backend='codex' WHERE id=?").run(s.bindingId);
+  if (change === "new-generation") x.db.prepare("UPDATE binding SET generation=generation+1 WHERE id=?").run(s.bindingId);
+  const service = new NativeHostService({ permits: [x.permit], state: x.state, core: x.core, tools: x.tools, backend: x.backend, attention: async () => {} });
+  cleanups.push(() => service.close()); service.connect(x.permit.token, "lead-thread", new Socket() as never);
+  const before = x.state.activeBindingForLane(s.laneAddress);
+  await expect(service.register(x.permit.token, { threadId: "lead-thread", previousBinding: s })).rejects.toThrow("NATIVE_HOST_STALE_BINDING");
+  expect(x.state.activeBindingForLane(s.laneAddress)).toEqual(before);
+  expect(x.state.requireMessage(message!.id).state).toBe("pending");
+});
+
+test("a closing original channel permits reconnect to the same S", async () => {
+  const x = await sharedFixture(); const s = await x.register(); x.socket.readyState = 2;
+  const next = new Socket(); x.service.connect(x.permit.token, "lead-thread", next as never);
+  expect(await x.register()).toEqual(s);
+  expect(x.backend.connected(s.conversationId)).toBe(true);
+});
+
+test("another Host channel cannot replace the live original channel", async () => {
+  const x = await sharedFixture(); const s = await x.register();
+  const other = new Socket();
+  expect(() => x.service.connect(x.permit.token, "lead-thread", other as never)).toThrow("NATIVE_HOST_CHANNEL_ACTIVE");
+  expect(x.socket.readyState).toBe(x.socket.OPEN);
+  x.socket.close(); x.service.connect(x.permit.token, "lead-thread", other as never);
+  expect(await x.register()).toEqual(s);
+});
+
 test("late send completion cannot return a receipt for a replaced shared binding", async () => {
   const x = await sharedFixture(); const s = await x.register();
   let release!: () => void;

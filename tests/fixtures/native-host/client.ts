@@ -1,4 +1,4 @@
-// Frozen Company 07d8815 transport, test-only: shared Router does not execute private Host clients.
+// Frozen Company b3e994e transport, test-only: shared Router does not execute private Host clients.
 import WebSocket from "ws";
 import { externalFail, externalIndexSchema, externalParse, nativeExternalConfigSchema, sharedNativeBindingSchema, type ExternalIndex, type NativeExternalConfig, type SharedNativeBinding } from "../../../src/process/native-external-contract.js";
 
@@ -37,7 +37,7 @@ export class NativeExternalClient {
     });
   }
   async register(threadId: string, signal: AbortSignal): Promise<SharedNativeBinding> {
-    return externalParse(sharedNativeBindingSchema, await this.post("register", { threadId }, signal));
+    return externalParse(sharedNativeBindingSchema, await this.post("register", { threadId, previousBinding: this.config.previousBinding }, signal));
   }
   call(call: unknown, signal: AbortSignal): Promise<unknown> { return this.post("call", call, signal); }
   attention(shared: SharedNativeBinding, canDeliver: boolean): void {
