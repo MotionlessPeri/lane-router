@@ -1,6 +1,6 @@
 # 从 lane 之外给一条 lane 捎话：`lane-router-lane tell`
 
-**状态：** 用户 2026-10-12 定稿（含「存量三处入口一起加守卫」的裁定），交 `lane-router/impl` 实现。需求来自 `vikunja/main`（2026-10-12，用户在那条 lane 里同意了方向），需求原文在 `H:\xd_projects_h\req_manage_study\docs\plans\2026-10-12-lane-router-tell-request.md`。审过后由 `lane-router/impl` 实现，`vikunja/main` 按本稿第三节的接口接入。
+**状态：** 用户 2026-10-12 定稿（含「存量入口一起加守卫」的两次裁定：先三处，impl 实现时又报两处，用户再裁并入），交 `lane-router/impl` 实现。需求来自 `vikunja/main`（2026-10-12，用户在那条 lane 里同意了方向），需求原文在 `H:\xd_projects_h\req_manage_study\docs\plans\2026-10-12-lane-router-tell-request.md`。审过后由 `lane-router/impl` 实现，`vikunja/main` 按本稿第三节的接口接入。
 
 **一句话：** 加一条本机命令，让以用户身份运行的本地程序把一条**固定格式**的消息放进某条 lane 的收件箱，并拿回目标 lane 的状态。消息头上的发送方写成 `user:<来源>`，不是任何 lane 的地址；存储上用一列 `sender_label` 承载，而不是伪造一条 lane。
 
@@ -112,7 +112,7 @@ sequenceDiagram
 1. **要求 `Content-Type: application/json`。** 这不是简单请求的 content-type，浏览器发它之前必须先预检（`OPTIONS`）；Router 不回任何 `Access-Control-Allow-*` 头，预检失败，真正的请求发不出去。
 2. **带 `Origin` 头的请求一律 403。** 浏览器发跨站 POST 必带 `Origin`；Node 的 `fetch`、`curl`、PowerShell 都不带。Router 不给任何网页用这个端点，所以不需要白名单，有 `Origin` 就拒。
 
-两道都在读 body **之前**做，不合规的请求不进 `readJson`。实现成一个共用的守卫函数，**套到 Router 上所有有副作用的入口**（用户 2026-10-12 裁定一起修）：`POST /lanes/tell`、`POST /lanes/archive`、`POST /rpc`，以及 `/claude` 的 WebSocket 升级——后者只有第二道（拒 `Origin`），因为握手没有 content-type。合法来访者一个都不受影响：CLI 与 lane MCP server 用 Node 的 `fetch`，带 `application/json`、不带 `Origin`；channel 用 `ws` 库连 WebSocket，默认不带 `Origin`；dashboard 页面只调 `/dashboard/state` 与自带三道检查的 `/dashboard/lanes/open`，碰不到这四处。
+两道都在读 body **之前**做，不合规的请求不进 `readJson`。实现成一个共用的守卫函数，**套到 Router 上所有有副作用的入口**（用户 2026-10-12 裁定一起修）：`POST /lanes/tell`、`POST /lanes/archive`、`POST /rpc`、`POST /claude/lifecycle`、`POST /codex/provider-endpoint`，以及 `/claude` 的 WebSocket 升级——后者只有第二道（拒 `Origin`），因为握手没有 content-type。后两个 POST 是 impl 实现时补报的：`/claude/lifecycle` 没守卫时，网页伪造一个 `Stop` 就能提前放行正在等待的接替。合法来访者一个都不受影响：CLI、lane MCP server、lifecycle hook（`lifecycle-hook.ts:21-23`）、Codex launcher（`codex-launcher.ts:71-73`）都用 Node 的 `fetch`，带 `application/json`、不带 `Origin`；channel 用 `ws` 库连 WebSocket，默认不带 `Origin`；dashboard 页面只调 `/dashboard/state` 与自带三道检查的 `/dashboard/lanes/open`，碰不到这六处。
 
 ### 3.5 新建 lane 的两个问题
 
@@ -156,7 +156,7 @@ Router 太旧（正在跑的构建没有 `/lanes/tell`，返回 404）时 stderr
 | 固定正文模板 | Router 内部 | 需求「安全」节把权衡交给本稿 | 退回任意正文，调用方可往 lane 里塞指令 | — | **保留** |
 | `project.cwdHint` | Vikunja 走 `new` 时 | 需求待定问题 2（明示） | Vikunja 要自己猜目录 | 无 | **保留**（只读，不是新状态） |
 | 来源守卫：content-type + 拒 `Origin` | `/lanes/tell` 每次请求 | 威胁模型已含「网页够得着 loopback」——dashboard 开窗端点的三道检查是代码里的明示证据；新端点有副作用 | 任意网页可往任意 lane 塞「用户的讨论请求」 | 无（action token 是给 dashboard 页面的，CLI 拿不到） | **保留** |
-| 同一守卫套到 `/lanes/archive`、`/rpc`、`/claude` 升级 | 现有 CLI / MCP / channel | 存量漏洞；用户 2026-10-12 裁定与本稿一起修 | 网页可归档任意 lane、冒用已绑定对话调工具、冒充 channel | — | **保留**（同一函数，各处一行） |
+| 同一守卫套到 `/lanes/archive`、`/rpc`、`/claude/lifecycle`、`/codex/provider-endpoint`、`/claude` 升级 | 现有 CLI / MCP / hook / Codex launcher / channel | 存量漏洞；用户 2026-10-12 两次裁定与本稿一起修 | 网页可归档任意 lane、冒用已绑定对话调工具、伪造 lifecycle 提前放行接替、改 Codex provider 端点、冒充 channel | — | **保留**（同一函数，各处一行） |
 | 任意正文 `--body` | — | 无 | 无影响 | — | **删除** |
 | 自动 `open` / 自动 `new` | — | 需求「不做」节 | 无影响 | 调用方自己调两条现有命令 | **删除** |
 | 调用方认证 | — | 威胁模型不要求 | 无影响 | 同机可信 | **删除** |
@@ -175,7 +175,7 @@ Router 太旧（正在跑的构建没有 `/lanes/tell`，返回 404）时 stderr
 9. `project.cwdHint` 取同项目 binding 里 `cwd` 非空且 `active_at` 最新的值；项目里没有任何记录过 cwd 的 binding 时为 `null`。
 10. 对没有 `/lanes/tell` 的 Router，命令退出 1，stderr 指明需要重启 Router；不落任何文件。
 11. 对话工具数量、名称、参数不变；`/rpc` 无新增方法；除 `/lanes/tell` 外无新增 HTTP 端点。
-12. 对 `/lanes/tell`、`/lanes/archive`、`/rpc` 三个 POST：`Content-Type` 不是 `application/json` 的返回 400，带任意 `Origin` 头的返回 403，两者都**不读 body、不写任何东西**；对这些路径的 `OPTIONS` 预检不回任何 `Access-Control-Allow-*` 头。
+12. 对 `/lanes/tell`、`/lanes/archive`、`/rpc`、`/claude/lifecycle`、`/codex/provider-endpoint` 五个 POST：`Content-Type` 不是 `application/json` 的返回 400，带任意 `Origin` 头的返回 403，两者都**不读 body、不写任何东西**；对这些路径的 `OPTIONS` 预检不回任何 `Access-Control-Allow-*` 头。
 13. 对 `/claude` 的 WebSocket 升级：握手带 `Origin` 头时拒绝升级（socket 关闭，hub 里不出现连接）；不带时行为与改造前逐字一致。
 14. 现有 CLI（`lane-router-lane` 各动词）、lane MCP server 的工具调用、channel 连接在守卫加上后全部照常——这条靠跑既有测试套件证明，不另写。
 
@@ -187,7 +187,7 @@ Router 太旧（正在跑的构建没有 `/lanes/tell`，返回 404）时 stderr
 - **通知同形**：复用通知泵测试的假 channel，断言 payload 的 `sender` 与 `summary`（5）。
 - **收养**：往 `pending/` 手放一个 `sender: user:x` 的文件跑 `reconcile`（7）。这条**先造红**：把 mailbox 头解析里对 `user:` 的放行去掉，它必须因 `parseLaneAddress` 抛错而红。
 - **迁移**：在 v6 fixture（有消息、有归档消息）上跑，断言 8 的三件事；**空库也跑一次**。
-- **模拟浏览器**：用原始 HTTP 对 `/lanes/tell`、`/lanes/archive`、`/rpc` 各发三种请求——`Content-Type: text/plain` 正文是合法 JSON、`Content-Type: application/json` 但带 `Origin: http://evil.example`、`OPTIONS` 预检——断言状态码与「副作用未发生」（tell：文件数与行数不变；archive：lane 仍活着；rpc：以一个真实绑定的 conversation id 调 `lane_send`，目标收件箱不变）（12）。这条**先造红**：去掉守卫，三处的第一种都必须变成「副作用发生」。
+- **模拟浏览器**：用原始 HTTP 对五个 POST 入口各发三种请求——`Content-Type: text/plain` 正文是合法 JSON、`Content-Type: application/json` 但带 `Origin: http://evil.example`、`OPTIONS` 预检——断言状态码与「副作用未发生」（tell：文件数与行数不变；archive：lane 仍活着；rpc：以一个真实绑定的 conversation id 调 `lane_send`，目标收件箱不变；lifecycle：一个正在等待接替的 attach 仍在等，连接的 `busy` 不变；provider-endpoint：Router 不新起 provider 端点）（12）。这条**先造红**：去掉守卫，每处的第一种都必须变成「副作用发生」。
 - **WebSocket**：用 `ws` 客户端带 `origin` 选项连 `/claude`，断言升级被拒、hub 无该连接；不带 `origin` 连，断言与既有 channel 测试一致（13）。
 - **变异检验**（每条先说凭什么会红）：`archived` 分支也写消息（杀 3）；守卫在 `readJson` 之后才检查（超大 `text/plain` 正文仍被读完 ⇒ 用 1 MiB 上限的「request too large」时机杀 12）；`sender:` 写成 lane 地址形式（杀 2 的头断言）；`COALESCE` 漏掉 label 列（通知 `sender` 为空 ⇒ 杀 5）；`cwdHint` 取 `active_at` 最旧的（用两条不同 cwd 的 binding 杀 9）；约束漏掉「恰好一个」（两列都空能插入 ⇒ 杀 8）。
 
@@ -196,7 +196,7 @@ Router 太旧（正在跑的构建没有 `/lanes/tell`，返回 404）时 stderr
 - 不收任意正文；不做调用方认证；不把窗口调到前台。
 - 不自动 `open`、不自动 `new`、不自动归档临时 lane。调用方自己串这几条命令。
 - 不改 `new` 的默认工作目录。
-- **来源守卫只做这两道，不做更多。** 不做 action token（那是给浏览器页面用的，CLI 拿不到）、不做 CORS 白名单（Router 不给任何网页用这些入口）、不查 `Sec-Fetch-*`。存量三处（`/lanes/archive`、`/rpc`、`/claude` 升级）由 `vikunja/main` 审稿时发现、本稿核实、用户裁定并入，见 3.4。
+- **来源守卫只做这两道，不做更多。** 不做 action token（那是给浏览器页面用的，CLI 拿不到）、不做 CORS 白名单（Router 不给任何网页用这些入口）、不查 `Sec-Fetch-*`。存量入口共五处：`/lanes/archive`、`/rpc`、`/claude` 升级三处由 `vikunja/main` 审稿时发现；`/claude/lifecycle`、`/codex/provider-endpoint` 两处由 `lane-router/impl` 实现时补报。都经本稿核实、用户裁定并入，见 3.4。
 - 临时 lane 的地址形式由调用方定；`vikunja/main` 打算用 `<project>/task-<编号>`，不复用原来源 lane 的地址——合规，且避免临时 lane 顶替原 lane 的身份。
 - 不处理「channel 重连瞬间补发的通知丢失」（`docs/manual-tests.md` 2026-09-21 记录的启动期竞态）。它影响本流程的 `offline → open` 一段：`open` 之后补发的那次唤醒可能丢，消息本身在 pending 里，用户在终端开口时 lane 读一下就有。要根治是另一条修复（MCP server 在握手完成前缓冲通知），不归本稿。
 
