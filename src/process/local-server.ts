@@ -433,6 +433,9 @@ export class LocalRouterServer {
         }
       }
       if (request.method === "POST" && request.url === "/claude/lifecycle") {
+        // A forged Stop would tell the hub a busy conversation went idle and release a takeover
+        // waiting for it, so a web page is kept out here exactly as on the entries that write.
+        if (refuseWebPage(request, response)) return;
         const body = await readJson(request) as { conversationId?: unknown; event?: unknown; joinKey?: unknown; cwd?: unknown };
         const valid = typeof body.conversationId === "string" && (body.event === "Stop" || body.event === "UserPromptSubmit");
         // The cwd is a fact about the conversation, not about the channel: it is recorded even
@@ -446,6 +449,8 @@ export class LocalRouterServer {
         return json(response, accepted ? 200 : 400, { accepted });
       }
       if (request.method === "POST" && request.url === "/codex/provider-endpoint") {
+        // Each new provider name starts another Codex endpoint, so a page must not be able to ask.
+        if (refuseWebPage(request, response)) return;
         const body = await readJson(request) as { modelProvider?: unknown; profile?: unknown; persistStartup?: unknown };
         if (typeof body.modelProvider !== "string") return json(response, 400, { error: "modelProvider is required" });
         if (body.profile !== undefined && typeof body.profile !== "string") return json(response, 400, { error: "profile must be a string" });
