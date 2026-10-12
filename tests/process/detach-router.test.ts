@@ -3,7 +3,11 @@ import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
+
+// These tests start real child processes, and on a loaded Windows machine one can take longer than
+// the 5 s default just to come up. Scoped to this file so a genuine hang elsewhere still fails fast.
+vi.setConfig({ testTimeout: 30_000 });
 
 const roots: string[] = [];
 const strays: number[] = [];
@@ -42,6 +46,16 @@ async function waitForFile(path: string, timeoutMs = 20_000): Promise<string> {
   throw new Error(`file never appeared: ${path}`);
 }
 
+/** Polled rather than slept: how long a process takes to exit depends on the machine, not the test. */
+async function waitForExit(pid: number, timeoutMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!alive(pid)) return true;
+    await settle(50);
+  }
+  return !alive(pid);
+}
+
 test("the launcher hands back a running Router and then gets out of the way", () => {
   const space = workspace();
   const result = spawnSync(process.execPath, [tsx, launcher, space.longLived, space.log], { encoding: "utf8" });
@@ -71,7 +85,8 @@ test("the launcher reports a missing Router entry point instead of leaving a sil
   expect(result.error).toBeUndefined();
   const reported = Number.parseInt(result.stdout.trim(), 10);
   if (Number.isInteger(reported)) {
-    return settle(500).then(() => { expect(alive(reported)).toBe(false); });
+    strays.push(reported);
+    return waitForExit(reported).then((exited) => { expect(exited).toBe(true); });
   }
   expect(result.status).toBe(1);
   expect(result.stderr).toMatch(/Router launcher failed/u);

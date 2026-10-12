@@ -11,6 +11,10 @@ import {
   awaitChildStart, childEnvironment, claudeExecutable, withoutInheritedConsoleDescription, withoutVendorSessionIdentity,
 } from "../../src/process/terminal-spawn.js";
 
+// These tests start real child processes, and on a loaded Windows machine one can take longer than
+// the 5 s default just to come up. Scoped to this file so a genuine hang elsewhere still fails fast.
+vi.setConfig({ testTimeout: 30_000 });
+
 /** Stands in for a terminal that came up and whose CLI reported for itself. */
 const terminalThatStarts = (status = "ok") =>
   vi.fn(async (request: { statusPath: string }) => { writeFileSync(request.statusPath, status, "utf8"); });

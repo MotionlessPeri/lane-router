@@ -6,6 +6,10 @@ import { expect, test, vi } from "vitest";
 
 import { launchCodex } from "../../src/process/codex-launcher.js";
 
+// These tests start real child processes, and on a loaded Windows machine one can take longer than
+// the 5 s default just to come up. Scoped to this file so a genuine hang elsewhere still fails fast.
+vi.setConfig({ testTimeout: 30_000 });
+
 const codexExecutable = process.env.CODEX_EXE ?? "codex";
 
 test("keeps Router discovery inside the inherited isolated data root", async () => {

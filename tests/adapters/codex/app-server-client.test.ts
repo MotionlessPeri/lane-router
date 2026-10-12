@@ -9,6 +9,10 @@ import { AppServerClient, AppServerDisconnectedError, AppServerRequestTimeoutErr
 import { decodeServerMessage, decodeThreadReadResult, decodeTurnStartResult, ProtocolDecodeError } from "../../../src/adapters/codex/protocol.js";
 import { CodexAppServerProcess, CodexCapabilityError, CodexCapabilityGate } from "../../../src/adapters/codex/app-server-process.js";
 
+// These tests start real child processes, and on a loaded Windows machine one can take longer than
+// the 5 s default just to come up. Scoped to this file so a genuine hang elsewhere still fails fast.
+vi.setConfig({ testTimeout: 30_000 });
+
 const servers: WebSocketServer[] = [];
 const dirs: string[] = [];
 afterEach(async () => {
