@@ -486,6 +486,36 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 **最后验证：** 2026-08-27 用真实离线 Codex thread 和隔离 Router 验证离线分支：`resume-info` 为 `reach=unconfirmed`、`restorePresence=offline`，批量脚本报告 `1 opened, 0 skipped, 0 failed`；开出的真实 Codex 进程使用隔离 endpoint，ownership 建立后同一接口变为 `restorePresence=online`。所有 child 都保留同一 `LANE_ROUTER_DATA_ROOT`。在线跳过、backend unavailable 与逐 lane 失败隔离仍由自动测试覆盖；本次真机 fixture 没有额外构造这三种分支。
 
+## 从 lane 之外捎话：`lane-router-lane tell`
+
+自动测试覆盖五种目标状态（文件与 `message` 行两边都数）、正文逐字等于模板（有无链接各一）、参数边界（含 URL 解析器吞换行那一例）、通知的 `sender` 与 `summary`、ack 与归档拒绝句、孤儿收养、v6 → v7 迁移（含空库）、`cwdHint`、旧 Router 的 404、三个 POST 入口与 `/claude` 握手的来源守卫，以及一条不注入任何东西的「命令行 → 真实 Router 服务 → mailbox」端到端；变异检验结果见设计稿第六节与 impl 的回报。下面两条不能自动化：**lane 读到之后会不会照模板末句等用户开口**，只有真实模型能答；**真实生产库的迁移**，只有重启那一次能验。
+
+**前提：** 已构建 `dist/` 且 `npm link` 已刷新；**共享 Router 已受控重启到本构建**——新端点与 v7 迁移都在 Router 进程里，旧 Router 上命令以退出 1、stderr 含 `restart` 失败，不落任何文件。**接收方会话不必是新起的**：Claude 侧 MCP server 拼通知载荷时对 `sender` 原样透传、不做地址校验（`local-client.ts` 的 `toNotificationMessages`），旧会话也能收到 `user:<来源>`。
+
+⚠️ **这次重启会把生产库从 v6 迁到 v7**（`message` / `message_archive` 两张表重建）。迁移在事务里、带逐表行数校验，但重启前仍建议先复制一份 `~/.lane-router/router.sqlite`。
+
+### TC-TELL-1：在线 lane 收到捎话、准备好、但不动手
+
+1. 选一条在线 lane `<p>/<l>`，在任意终端运行：
+   `lane-router-lane tell <p>/<l> --origin manual --subject "试一下捎话：读 README 第一节" --link https://example.com/x`
+2. 看命令输出：一行 JSON，退出码 0，`target.state` 为 `online`，`delivered: true`。
+3. 在那条 lane 的窗口里，**先不要敲字**，看它自己开出的 turn。
+
+**预期：** 第 3 步那一行通知里发件方是 `user:manual`、摘要是「用户想讨论：试一下捎话：读 README 第一节」；lane 去读主题所指的内容、然后**停下等你开口，不改动任何文件**，并按 ack 语义（读了且理解了）把它 ack 掉，不会因为没 ack 而反复自唤醒。
+
+**关键看点：** 第 3 步的「不动手」是整条用例的目的——自动测试只能证明模板末句**送到了**，证明不了模型**照做了**。若 lane 读完就开始改东西，那是模板措辞的问题，回报 design，不要在 impl 侧改模板。
+
+### TC-TELL-2：生产库迁移与存量消息
+
+1. 重启前记下 `SELECT COUNT(*) FROM message` 与 `SELECT COUNT(*) FROM message_archive`（用只读方式打开 `router.sqlite`）。
+2. 受控重启共享 Router。
+3. 重启后再数一次，并查 `PRAGMA user_version`、`SELECT COUNT(*) FROM message WHERE sender_lane_id IS NULL OR sender_label IS NOT NULL`。
+4. 任选一条在线 lane 用 `lane_send` 给另一条发一封普通消息，确认照常送达、通知里发件方是 lane 地址。
+
+**预期：** 两张表行数前后相等；`user_version = 7`；第 3 步最后一个查询为 0（存量消息全是 lane 发的）；第 4 步与改造前无差别。
+
+**最后验证：** 两条均尚未真机执行——需要共享 Router 受控重启到本构建，重启时机由用户决定。
+
 ## 当前记录
 
 ### TC-PROJECT-RESTORE-1：重启后从主 lane 恢复同项目原对话

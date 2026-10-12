@@ -9,6 +9,7 @@ import type { ClaudeChannelPort, ClaudeChannelOutcome } from "../backends/claude
 import { CodexTuiBridge, type CodexTuiBridgeHost } from "../adapters/codex/tui-bridge.js";
 import type { Notification } from "../router/backend.js";
 import type { DashboardRouter } from "../router/dashboard.js";
+import { parseTellInput, type TellInput, type TellResult } from "../router/tell.js";
 import type { CallerContext, BindingRecord, ReachSnapshot, ResolvedIdentity } from "../router/types.js";
 import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
 import type { ToolService } from "../tools/tool-service.js";
@@ -289,6 +290,12 @@ export class LocalRouterServer {
     readonly archiveLane?: (address: string) => Promise<unknown>;
     readonly listArchivedLanes?: (project: string | undefined) => unknown;
     /**
+     * Telling a lane something from outside every lane, for the lane CLI's `tell`. Not a sixth
+     * conversation tool for the reason `/rpc` gives its callers a context: the caller here is not a
+     * conversation, so there is no binding to name it by.
+     */
+    readonly tell?: (input: TellInput) => Promise<TellResult>;
+    /**
      * One snapshot for the observation board, given the facts only this server holds. Optional for
      * the same reason as the surfaces above — the board is a face a Router may be built without —
      * and read-only for a reason of its own: this HTTP face has no authentication, so anything on
@@ -303,6 +310,13 @@ export class LocalRouterServer {
     this.codexBridge = new CodexTuiBridge(options.codex);
     this.claude = options.claude ?? new ClaudeChannelHub();
     this.http.on("upgrade", (request, socket, head) => {
+      // A browser always sends Origin on a WebSocket handshake and the channel client sends none, so
+      // any Origin means a web page is trying to become a lane's channel. There is no content type to
+      // check on a handshake, so this is the only one of the two guards that applies here.
+      if (request.headers.origin !== undefined) {
+        socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        return;
+      }
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       const conversationId = url.searchParams.get("conversationId");
       const joinKey = url.searchParams.get("joinKey") ?? undefined;
@@ -366,9 +380,22 @@ export class LocalRouterServer {
           return json(response, 200, { result: await this.options.resumeInfo(address) });
         }
       }
+      if (request.method === "POST" && request.url === "/lanes/tell") {
+        const handler = this.options.tell;
+        if (!handler) return json(response, 404, { error: "not found" });
+        if (refuseWebPage(request, response)) return;
+        let input: TellInput;
+        // Validated again here, not trusted from the command line: this endpoint is reachable by
+        // anything on loopback, and the validator is what keeps a caller's text to one subject line
+        // and one link.
+        try { input = parseTellInput(await readJson(request)); }
+        catch (error) { return json(response, 400, { error: error instanceof Error ? error.message : "invalid request" }); }
+        return json(response, 200, { result: await handler(input) });
+      }
       if (request.method === "POST" && request.url === "/lanes/archive") {
         const handler = this.options.archiveLane;
         if (!handler) return json(response, 404, { error: "not found" });
+        if (refuseWebPage(request, response)) return;
         const body = await readJson(request) as { address?: unknown };
         if (typeof body.address !== "string" || body.address.trim() === "") return json(response, 400, { error: "address is required" });
         try { return json(response, 200, { result: await handler(body.address) }); }
@@ -430,6 +457,7 @@ export class LocalRouterServer {
         }
       }
       if (request.method !== "POST" || request.url !== "/rpc") return json(response, 404, { error: "not found" });
+      if (refuseWebPage(request, response)) return;
       const body = await readJson(request) as { method?: unknown; params?: unknown; context?: unknown };
       if (LANE_TOOL_NAMES.includes(body.method as LaneToolName)) {
         const context = callerContext(body.context);
@@ -494,6 +522,33 @@ function callerContext(value: unknown): CallerContext | undefined {
     ...(typeof context.joinKey === "string" ? { joinKey: context.joinKey } : {}),
     ...(typeof context.cwd === "string" ? { cwd: context.cwd } : {}),
   };
+}
+
+/**
+ * Keep web pages out of the entries that change state. Any page open in a browser on this machine
+ * can POST to the loopback port; it cannot read the answer, but a "simple" request — text/plain, no
+ * custom headers — is sent without a preflight, so its side effect happens regardless. Two checks,
+ * each enough on its own, so either can fail without the other going with it:
+ *
+ *   - Origin present ⇒ 403. A browser always sends it on a cross-site POST, and nothing meant to
+ *     call these entries — the command line, the lane server — sends one, so no list is needed.
+ *   - Content type other than application/json ⇒ 400. A page can only send JSON after a preflight,
+ *     and the Router grants no cross-origin permission, so that request is never sent.
+ *
+ * Both run before the body is read: a refused request must not cost the Router a parse, and must
+ * not reach the code that would act on it. Answers true when it has already written the refusal.
+ */
+function refuseWebPage(request: IncomingMessage, response: ServerResponse): boolean {
+  if (request.headers.origin !== undefined) {
+    json(response, 403, { error: "requests from a web page are not accepted here" });
+    return true;
+  }
+  const contentType = request.headers["content-type"];
+  if (typeof contentType !== "string" || !contentType.toLowerCase().startsWith("application/json")) {
+    json(response, 400, { error: "content-type must be application/json" });
+    return true;
+  }
+  return false;
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {

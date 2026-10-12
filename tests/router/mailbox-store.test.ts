@@ -120,3 +120,59 @@ describe("file mailbox", () => {
     }
   });
 });
+
+describe("a message sent from outside every lane", () => {
+  const told = {
+    id: "told-1", requestKey: "tell:1", senderLane: "user:vikunja", targetLane: "alpha/target",
+    kind: "normal" as const, replyTo: null, createdAt: 200, body: "subject line\n\nmore",
+  };
+
+  // The header is where every reader first sees who sent a message, so the label goes there as it
+  // is — not rewritten into something lane-shaped.
+  it("writes the label into the header and reads it back unchanged", () => {
+    const x = setup();
+    try {
+      const file = x.mailbox.writePending(told);
+      expect(readFileSync(join(x.root, file.relativePath), "utf8")).toMatch(/^sender: user:vikunja$/mu);
+      expect(x.mailbox.readBody(file.relativePath)).toBe("subject line\n\nmore");
+    } finally { x.database.close(); }
+  });
+
+  // Acceptance 7. Adopting an orphaned file goes through the header parser, which used to accept
+  // only a lane address as a sender — so a message from outside, written but never recorded, would
+  // have stopped reconcile with a corruption error instead of being adopted.
+  it("adopts an orphaned file whose sender is a label, recording no lane for it", () => {
+    const x = setup();
+    try {
+      x.mailbox.writePending(told);
+      expect(x.mailbox.reconcile(x.state).recovered).toBe(1);
+      expect(x.database.prepare("SELECT sender_lane_id,sender_label FROM message WHERE id='told-1'").get())
+        .toEqual({ sender_lane_id: null, sender_label: "user:vikunja" });
+      expect(x.state.requireMessage("told-1").senderLane).toBe("user:vikunja");
+    } finally { x.database.close(); }
+  });
+
+  // The other side of acceptance 7: a lane-shaped orphan is adopted exactly as before, naming its lane.
+  it("still adopts a lane-sent orphan as a lane-sent message", () => {
+    const x = setup();
+    try {
+      x.mailbox.writePending({ ...told, id: "lane-1", requestKey: "lane:1", senderLane: "alpha/source" });
+      expect(x.mailbox.reconcile(x.state).recovered).toBe(1);
+      const row = x.database.prepare("SELECT sender_lane_id,sender_label FROM message WHERE id='lane-1'").get() as { sender_lane_id: string | null; sender_label: string | null };
+      expect(row.sender_label).toBeNull();
+      expect(row.sender_lane_id).toBe(x.state.requireLane("alpha/source").id);
+    } finally { x.database.close(); }
+  });
+
+  // A sender that is neither shape is still refused at the door, so loosening the parser for labels
+  // did not loosen it for anything else.
+  it("still refuses a sender that is neither a lane nor a label", () => {
+    const x = setup();
+    try {
+      for (const senderLane of ["user:Vikunja", "vikunja", "user:"]) {
+        expect(() => x.mailbox.writePending({ ...told, id: `bad-${senderLane.length}`, requestKey: `bad:${senderLane}`, senderLane }))
+          .toThrow(/sender|lane address/iu);
+      }
+    } finally { x.database.close(); }
+  });
+});

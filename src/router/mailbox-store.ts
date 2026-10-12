@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
-import { mailboxLanePath, parseLaneAddress } from "./address.js";
+import { isSenderLabel, mailboxLanePath, parseLaneAddress } from "./address.js";
 import type { RouterStateStore } from "./state-store.js";
 import type { MessageKind, NewMessageRecord } from "./types.js";
 
@@ -60,7 +60,7 @@ export class MailboxStore {
     validateToken("message ID", input.id);
     validateHeaderValue("request key", input.requestKey);
     if (input.replyTo !== null) validateToken("reply_to", input.replyTo);
-    parseLaneAddress(input.senderLane);
+    validateSender(input.senderLane);
     const target = parseLaneAddress(input.targetLane);
     const directory = join(mailboxLanePath(this.root, target), "pending");
     mkdirSync(directory, { recursive: true });
@@ -263,7 +263,7 @@ function parseMessage(contents: string): NewMessageRecord {
   if (!Number.isSafeInteger(createdAt)) throw new MailboxCorruptionError("Message created_at is invalid");
   validateToken("message ID", id);
   validateHeaderValue("request key", requestKey);
-  parseLaneAddress(senderLane);
+  validateSender(senderLane);
   parseLaneAddress(targetLane);
   const reply = header.get("reply_to") ?? "";
   if (reply) validateToken("reply_to", reply);
@@ -278,6 +278,16 @@ function parseMessage(contents: string): NewMessageRecord {
     contentSha256: "",
     createdAt,
   };
+}
+
+/**
+ * A sender is a lane address or the label of something outside every lane, and nothing else. Both
+ * the writer and the reader go through this, because `reconcile` adopts orphaned files through the
+ * reader: a reader stricter than the writer would turn a message that was written but never
+ * recorded into a corruption error the moment its sender was not a lane.
+ */
+function validateSender(value: string): void {
+  if (!isSenderLabel(value)) parseLaneAddress(value);
 }
 
 function requiredHeader(header: ReadonlyMap<string, string>, name: string): string {

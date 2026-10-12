@@ -212,3 +212,54 @@ describe("archiving", () => {
     } finally { database.close(); }
   });
 });
+
+describe("messages sent from outside every lane", () => {
+  const SHA = "a".repeat(64);
+  const fromUser = (id: string, target = "alpha/target") => ({
+    id, requestKey: `request:${id}`, senderLane: "user:vikunja", targetLane: target,
+    kind: "normal" as const, replyTo: null, relativePath: `p/${id}.md`, contentSha256: SHA, createdAt: 10,
+  });
+
+  // Stored as a label with no lane behind it — inventing a lane row would make the sender read like
+  // a lane — and read back under the same `senderLane` every consumer already uses, so the board,
+  // the notification pump, and the archive refusal need no change of their own.
+  it("stores the sender as a label and reads it back where a lane address would be", () => {
+    const { database, store } = setup();
+    try {
+      store.createLane({ address: "alpha/target", project: "alpha", roleDescription: "target", now: 1 });
+      store.insertMessage(fromUser("m-1"));
+
+      expect(database.prepare("SELECT sender_lane_id,sender_label FROM message WHERE id='m-1'").get())
+        .toEqual({ sender_lane_id: null, sender_label: "user:vikunja" });
+      expect(store.requireMessage("m-1").senderLane).toBe("user:vikunja");
+      expect(store.pendingMessages("alpha/target").map((message) => message.senderLane)).toEqual(["user:vikunja"]);
+      expect(store.recentMessages(10).map((message) => message.senderLane)).toEqual(["user:vikunja"]);
+      // Not listed as a lane anywhere: there is no row for it to be.
+      expect(store.listAllLanes().map((lane) => lane.address)).toEqual(["alpha/target"]);
+    } finally { database.close(); }
+  });
+
+  // Archiving copies rows into the archive table. A copy that dropped the label would leave a row
+  // naming no sender at all — which the archive table's own constraint refuses — so this is also
+  // the check that the copy carries both sender columns rather than only the lane one.
+  it("keeps the label when the receiving lane is archived", () => {
+    const { database, store } = setup();
+    try {
+      const target = store.createLane({ address: "alpha/target", project: "alpha", roleDescription: "target", now: 1 });
+      store.insertMessage(fromUser("m-1"));
+      store.archiveLaneMessages(target.id, 500);
+      expect(database.prepare("SELECT sender_lane_id,sender_label FROM message_archive WHERE id='m-1'").get())
+        .toEqual({ sender_lane_id: null, sender_label: "user:vikunja" });
+    } finally { database.close(); }
+  });
+
+  // The other half of the same rule: anything that is not a label is a lane address and must name
+  // a lane in service, exactly as before.
+  it("still requires a lane-shaped sender to be a lane in service", () => {
+    const { database, store } = setup();
+    try {
+      store.createLane({ address: "alpha/target", project: "alpha", roleDescription: "target", now: 1 });
+      expect(() => store.insertMessage({ ...fromUser("m-2"), senderLane: "alpha/ghost" })).toThrow(/not found/iu);
+    } finally { database.close(); }
+  });
+});

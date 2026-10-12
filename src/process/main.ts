@@ -74,6 +74,7 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
       resumeInfo: (address) => core.resumeInfo(address),
       archiveLane: (address) => core.archiveLane(address),
       listArchivedLanes: (project) => core.listArchivedLanes(project),
+      tell: (input) => core.tell(input),
       dashboardState: (router) => dashboardSnapshot({ state, mailbox, backends, now: Date.now, launcherChoices }, router),
       dashboardOpen: (input) => dashboardOpener.open(input),
     });

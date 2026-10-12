@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { isSenderLabel } from "./address.js";
 import type { RouterDatabase } from "./database.js";
 import type {
   BackendName,
@@ -327,18 +328,21 @@ export class RouterStateStore {
   insertMessage(input: NewMessageRecord): MessageRecord {
     // Both ends are resolved to the lanes in service now. A message is addressed to whoever holds
     // the address at the moment it is sent, and it goes on naming that lane afterwards even once
-    // the address has moved on.
-    const senderId = this.requireLane(input.senderLane).id;
+    // the address has moved on. A sender that no lane is — `user:<origin>` — is stored as a label
+    // with no lane behind it, and the schema refuses a row that names both or neither.
+    const fromOutside = isSenderLabel(input.senderLane);
+    const senderId = fromOutside ? null : this.requireLane(input.senderLane).id;
     const targetId = this.requireLane(input.targetLane).id;
     this.database.prepare(`
       INSERT INTO message(
-        id,request_key,sender_lane_id,target_lane_id,kind,reply_to,relative_path,
+        id,request_key,sender_lane_id,sender_label,target_lane_id,kind,reply_to,relative_path,
         content_sha256,state,created_at,resolved_at,ack_lane_id,ack_generation,notification_state
-      ) VALUES(?,?,?,?,?,?,?,?,'pending',?,NULL,NULL,NULL,'pending')
+      ) VALUES(?,?,?,?,?,?,?,?,?,'pending',?,NULL,NULL,NULL,'pending')
     `).run(
       input.id,
       input.requestKey,
       senderId,
+      fromOutside ? input.senderLane : null,
       targetId,
       input.kind,
       input.replyTo,
@@ -373,6 +377,20 @@ export class RouterStateStore {
     return (this.database.prepare(`${MESSAGE_SELECT}
       WHERE t.address=? AND t.archived_at IS NULL AND m.state='pending' ORDER BY m.created_at,m.id
     `).all(laneAddress) as MessageRow[]).map(mapMessage);
+  }
+
+  /**
+   * The most recently recorded working directory of any lane in the project, archived lanes
+   * included: a caller about to create a lane for this project wants where it was last worked on,
+   * whichever lane did the work. Null when nobody in the project ever reported one.
+   */
+  latestProjectCwd(project: string): string | null {
+    const row = this.database.prepare(`
+      SELECT b.cwd FROM binding b JOIN lane l ON l.id=b.lane_id
+      WHERE l.project=? AND b.cwd IS NOT NULL AND b.cwd <> ''
+      ORDER BY b.active_at DESC,b.id DESC LIMIT 1
+    `).get(project) as { cwd: string } | undefined;
+    return row?.cwd ?? null;
   }
 
   /** By identity, so the precondition still answers for a lane its address no longer names. */
@@ -411,9 +429,9 @@ export class RouterStateStore {
       const moving = (this.database.prepare(`${MESSAGE_SELECT} WHERE m.target_lane_id=? ORDER BY m.created_at,m.id`)
         .all(laneId) as MessageRow[]).map(mapMessage);
       this.database.prepare(`
-        INSERT INTO message_archive(id,request_key,sender_lane_id,target_lane_id,kind,reply_to,relative_path,
+        INSERT INTO message_archive(id,request_key,sender_lane_id,sender_label,target_lane_id,kind,reply_to,relative_path,
           content_sha256,state,created_at,resolved_at,ack_lane_id,ack_generation,notification_state,archived_at)
-        SELECT id,request_key,sender_lane_id,target_lane_id,kind,reply_to,relative_path,
+        SELECT id,request_key,sender_lane_id,sender_label,target_lane_id,kind,reply_to,relative_path,
           content_sha256,state,created_at,resolved_at,ack_lane_id,ack_generation,notification_state,?
         FROM message WHERE target_lane_id=?
       `).run(now, laneId);
@@ -489,12 +507,18 @@ const BINDING_SELECT = `
   FROM binding b JOIN lane l ON l.id=b.lane_id
 `;
 
+/**
+ * The sender join is a LEFT join on purpose. A message sent from outside every lane has no lane
+ * behind its sender, and an inner join would not fail on it — it would drop the row, so the
+ * message would sit in the table while every read, the pump included, behaved as if it were not
+ * there. The label stands in for the address, so `senderLane` means the same thing to every reader.
+ */
 const MESSAGE_SELECT = `
-  SELECT m.id,m.request_key,s.address AS sender_lane,t.address AS target_lane,m.kind,m.reply_to,
-    m.relative_path,m.content_sha256,m.state,m.created_at,m.resolved_at,
+  SELECT m.id,m.request_key,COALESCE(s.address,m.sender_label) AS sender_lane,t.address AS target_lane,
+    m.kind,m.reply_to,m.relative_path,m.content_sha256,m.state,m.created_at,m.resolved_at,
     a.address AS ack_lane,m.ack_generation,m.notification_state
   FROM message m
-  JOIN lane s ON s.id=m.sender_lane_id
+  LEFT JOIN lane s ON s.id=m.sender_lane_id
   JOIN lane t ON t.id=m.target_lane_id
   LEFT JOIN lane a ON a.id=m.ack_lane_id
 `;

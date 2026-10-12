@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type Database from "better-sqlite3";
 
-export const ROUTER_SCHEMA_VERSION = 6;
+export const ROUTER_SCHEMA_VERSION = 7;
 
 /**
  * The version 2 message table, kept verbatim because the version 1 migration has to build exactly
@@ -78,8 +78,10 @@ CREATE TABLE message (
  * Where a lane's own mail goes when it is archived: the same columns, no foreign keys at all, plus
  * when it was archived. No keys because this table is out of the working set — nothing live reads
  * it, and constraints pointing back into live tables would drag it back in.
+ *
+ * The version 6 shape, kept verbatim for the version 5 migration, which has to produce exactly it.
  */
-const MESSAGE_ARCHIVE_TABLE_SQL = `
+const MESSAGE_ARCHIVE_TABLE_V6_SQL = `
 CREATE TABLE message_archive (
   id TEXT PRIMARY KEY,
   request_key TEXT NOT NULL,
@@ -103,7 +105,67 @@ const MESSAGE_INDEX_V6_SQL = `
 CREATE INDEX message_target_state_idx ON message(target_lane_id,state,created_at,id);
 `;
 
-export const ROUTER_SCHEMA_SQL = `
+/**
+ * Version 7: a message is sent either by a lane or from outside every lane, and the sender columns
+ * say which. `sender_lane_id` stays a foreign key for lane-sent mail; `sender_label` carries
+ * `user:<origin>` for mail a local program delivered on the user's behalf. There is no lane row
+ * behind such a sender, deliberately — inventing one would make it read like a lane, and an
+ * archived lane address can be attached to again and turned into a real lane.
+ *
+ * The CHECK is what keeps the two from blurring: neither column alone says who sent a message,
+ * only the pair does, so exactly one of them is set on every row.
+ */
+const MESSAGE_TABLE_V7_SQL = `
+CREATE TABLE message (
+  id TEXT PRIMARY KEY,
+  request_key TEXT NOT NULL UNIQUE,
+  sender_lane_id TEXT REFERENCES lane(id) ON DELETE RESTRICT,
+  sender_label TEXT,
+  target_lane_id TEXT NOT NULL REFERENCES lane(id) ON DELETE RESTRICT,
+  kind TEXT NOT NULL CHECK (kind IN ('normal','correction')),
+  reply_to TEXT,
+  relative_path TEXT NOT NULL UNIQUE,
+  content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','resolved')),
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER,
+  ack_lane_id TEXT REFERENCES lane(id) ON DELETE RESTRICT,
+  ack_generation INTEGER,
+  notification_state TEXT NOT NULL DEFAULT 'pending'
+    CHECK (notification_state IN ('pending','sent','deferred','no_channel','send_failed')),
+  CHECK ((sender_lane_id IS NULL) <> (sender_label IS NULL)),
+  CHECK (
+    (state='pending' AND resolved_at IS NULL AND ack_lane_id IS NULL AND ack_generation IS NULL) OR
+    (state='resolved' AND resolved_at IS NOT NULL AND ack_lane_id IS NOT NULL AND ack_generation > 0)
+  )
+);
+`;
+
+/** The version 7 archive: the same sender pair as the live table, because archiving copies rows. */
+const MESSAGE_ARCHIVE_TABLE_V7_SQL = `
+CREATE TABLE message_archive (
+  id TEXT PRIMARY KEY,
+  request_key TEXT NOT NULL,
+  sender_lane_id TEXT,
+  sender_label TEXT,
+  target_lane_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  reply_to TEXT,
+  relative_path TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  state TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER,
+  ack_lane_id TEXT,
+  ack_generation INTEGER,
+  notification_state TEXT NOT NULL,
+  archived_at INTEGER NOT NULL,
+  CHECK ((sender_lane_id IS NULL) <> (sender_label IS NULL))
+);
+`;
+
+/** Lanes and bindings, which versions 6 and 7 share; only the message tables differ between them. */
+const LANE_AND_BINDING_SQL = `
 CREATE TABLE lane (
   id TEXT PRIMARY KEY,
   address TEXT NOT NULL,
@@ -140,7 +202,16 @@ CREATE UNIQUE INDEX binding_active_conversation_idx
   ON binding(backend,conversation_id) WHERE inactive_at IS NULL;
 CREATE UNIQUE INDEX binding_lane_generation_idx
   ON binding(lane_id,generation);
-${MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_SQL}`;
+`;
+
+/**
+ * Exactly the version 6 shape, for the version 5 migration. It used to build "whatever the current
+ * schema is", which was right only while the current schema was version 6; from version 7 on it
+ * would have built version 7 tables and stamped them version 6.
+ */
+const ROUTER_SCHEMA_V6_SQL = `${LANE_AND_BINDING_SQL}${MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V6_SQL}`;
+
+export const ROUTER_SCHEMA_SQL = `${LANE_AND_BINDING_SQL}${MESSAGE_TABLE_V7_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V7_SQL}`;
 
 export function initializeRouterSchema(database: Database.Database): void {
   let version = database.pragma("user_version", { simple: true }) as number;
@@ -159,7 +230,59 @@ export function initializeRouterSchema(database: Database.Database): void {
   if (version === 3) { addLaneModelColumn(database); version = 4; }
   if (version === 4) { addLaneRetiredAtColumn(database); version = 5; }
   if (version === 5) { rebuildWithLaneIdentity(database); version = 6; }
+  if (version === 6) { addMessageSenderLabel(database); version = 7; }
   if (version !== ROUTER_SCHEMA_VERSION) throw new Error(`Router database version ${version} is not supported`);
+}
+
+/**
+ * Version 7 lets a message be sent from outside every lane. SQLite can neither drop a NOT NULL nor
+ * add a CHECK to an existing table, so both message tables are rebuilt; lanes and bindings are
+ * untouched. Every existing row was sent by a lane, so each arrives with its lane id and no label.
+ *
+ * 流程：
+ *   1. 关外键（重建期间新表的引用对着改了名的旧表），并在事务外切换
+ *   2. 两张消息表改名让出位置，索引一并让出
+ *   3. 建 version 7 的两张消息表与索引
+ *   4. 逐表拷数据，sender_label 一律为空 —— 关联不涉及，但仍逐表核对行数
+ *   5. 删旧表、置 user_version = 7
+ *   6. 复查外键完整性后恢复外键开关
+ */
+function addMessageSenderLabel(database: Database.Database): void {
+  const foreignKeysWereOn = database.pragma("foreign_keys", { simple: true }) === 1;
+  database.pragma("foreign_keys = OFF");
+  try {
+    database.transaction(() => {
+      const before = { message: count(database, "message"), message_archive: count(database, "message_archive") };
+      database.exec("ALTER TABLE message RENAME TO message_legacy;");
+      database.exec("ALTER TABLE message_archive RENAME TO message_archive_legacy;");
+      database.exec("DROP INDEX IF EXISTS message_target_state_idx;");
+      database.exec(MESSAGE_TABLE_V7_SQL);
+      database.exec(MESSAGE_INDEX_V6_SQL);
+      database.exec(MESSAGE_ARCHIVE_TABLE_V7_SQL);
+
+      const live = `id,request_key,sender_lane_id,target_lane_id,kind,reply_to,relative_path,
+        content_sha256,state,created_at,resolved_at,ack_lane_id,ack_generation,notification_state`;
+      database.exec(`INSERT INTO message(${live},sender_label) SELECT ${live},NULL FROM message_legacy;`);
+      database.exec(`INSERT INTO message_archive(${live},archived_at,sender_label) SELECT ${live},archived_at,NULL FROM message_archive_legacy;`);
+
+      const after = { message: count(database, "message"), message_archive: count(database, "message_archive") };
+      for (const table of ["message", "message_archive"] as const) {
+        if (after[table] !== before[table]) {
+          throw new Error(`Router database migration lost rows in ${table}: ${before[table]} before, ${after[table]} after`);
+        }
+      }
+
+      database.exec("DROP TABLE message_legacy;");
+      database.exec("DROP TABLE message_archive_legacy;");
+      database.pragma("user_version = 7");
+    })();
+    const violations = database.pragma("foreign_key_check") as unknown[];
+    if (violations.length > 0) {
+      throw new Error("Router database migration left dangling references; the database was not changed safely");
+    }
+  } finally {
+    if (foreignKeysWereOn) database.pragma("foreign_keys = ON");
+  }
 }
 
 /**
@@ -194,7 +317,7 @@ function rebuildWithLaneIdentity(database: Database.Database): void {
       for (const index of ["lane_project_address_idx", "binding_active_lane_idx", "binding_active_conversation_idx", "binding_lane_generation_idx", "message_target_state_idx"]) {
         database.exec(`DROP INDEX IF EXISTS ${index};`);
       }
-      database.exec(ROUTER_SCHEMA_SQL);
+      database.exec(ROUTER_SCHEMA_V6_SQL);
 
       // One id per lane, minted here rather than in SQL so the value has the same shape as every
       // other id in this database. `retired_at` carries across untouched: those lanes left service

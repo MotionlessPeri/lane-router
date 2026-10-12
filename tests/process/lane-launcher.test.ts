@@ -320,3 +320,82 @@ test("prints the Router's refusal instead of turning it into a bare failure", as
   // value of the refusal and has to survive the trip to the terminal.
   await expect(launchLane(["archive", "alpha/busy"], deps)).rejects.toThrow(/2 unread message/u);
 });
+
+// --- tell -------------------------------------------------------------------------------------
+
+const tellArgs = ["tell", "alpha/one", "--origin", "vikunja", "--subject", "讨论任务 #37", "--link", "http://localhost:3456/tasks/37"];
+const delivered = {
+  delivered: true, messageId: "message-1",
+  target: { address: "alpha/one", state: "online" as const }, project: { cwdHint: "E:\\projects\\alpha" },
+};
+
+// Acceptance 1. Refused before anything reaches the Router — the injected `tell` never runs — so a
+// refused invocation cannot have written a message.
+test("tell refuses arguments outside their shape without contacting the Router", async () => {
+  const tell = vi.fn(async () => delivered);
+  const deps = fakes({ tell });
+  // Each refused for its own reason, not swept up by a generic usage error: "it throws" alone was
+  // already true before `tell` existed, when every one of these was an unknown verb.
+  for (const [args, reason] of [
+    [["tell", "alpha/one", "--origin", "Vikunja", "--subject", "s"], /origin/iu],
+    [["tell", "alpha/one", "--origin", "vikunja", "--subject", "two\nlines"], /subject/iu],
+    [["tell", "alpha/one", "--origin", "vikunja", "--subject", "a".repeat(201)], /subject/iu],
+    [["tell", "alpha/one", "--origin", "vikunja", "--subject", "s", "--link", "file:///x"], /link/iu],
+    [["tell", "alpha/one", "--origin", "vikunja", "--subject", "s", "--link", "javascript:alert(1)"], /link/iu],
+    [["tell", "alpha/one", "--subject", "s"], /origin/iu],
+    [["tell", "alpha/one", "--origin", "vikunja"], /subject/iu],
+    [["tell", "not-an-address", "--origin", "vikunja", "--subject", "s"], /lane address/iu],
+    // An argument `tell` does not take is a usage error — there is deliberately no way to pass a body.
+    [["tell", "alpha/one", "--origin", "vikunja", "--subject", "s", "--body", "anything"], /Usage/u],
+    [["tell"], /Usage/u],
+  ] as const) {
+    await expect(launchLane([...args], deps), JSON.stringify(args)).rejects.toThrow(reason);
+  }
+  expect(tell).not.toHaveBeenCalled();
+});
+
+// Acceptance 4 + the exit code. One line of JSON is the whole contract with the caller, so it is
+// parsed back rather than matched as text, and checked to be exactly one line.
+test("tell prints one line of JSON and exits 0 when the message was delivered", async () => {
+  const written: string[] = [];
+  const tell = vi.fn(async () => delivered);
+  const code = await launchLane(tellArgs, fakes({ tell, write: (text: string) => { written.push(text); } }));
+  expect(code).toBe(0);
+  expect(tell).toHaveBeenCalledExactlyOnceWith({
+    address: "alpha/one", origin: "vikunja", subject: "讨论任务 #37", link: "http://localhost:3456/tasks/37",
+  });
+  const output = written.join("");
+  expect(output.endsWith("\n")).toBe(true);
+  expect(output.trimEnd().split("\n")).toHaveLength(1);
+  expect(JSON.parse(output)).toEqual(delivered);
+});
+
+// Acceptance 3 at the command line: nothing to deliver to is its own exit code, so a caller can
+// branch on it without parsing — and the JSON still says which of the two it was.
+test("tell exits 2 when there is no lane to deliver to, and still prints the JSON", async () => {
+  for (const state of ["archived", "missing"] as const) {
+    const written: string[] = [];
+    const result = { delivered: false, messageId: null, target: { address: "alpha/one", state }, project: { cwdHint: null } };
+    const code = await launchLane(tellArgs, fakes({ tell: vi.fn(async () => result), write: (text: string) => { written.push(text); } }));
+    expect(code, state).toBe(2);
+    expect(JSON.parse(written.join(""))).toEqual(result);
+  }
+});
+
+// Acceptance 10, against a real Router server built without the tell surface: it answers 404 on
+// /lanes/tell, which is exactly what a Router still running an older build looks like from the
+// command line.
+test("tell says the Router needs restarting when the running one has no tell endpoint", async () => {
+  const { LocalRouterServer } = await import("../../src/process/local-server.js");
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "old-build" });
+  const discovery = await server.start();
+  const deps = fakes();
+  writeFileSync(join(deps.dataRoot, "discovery.json"), JSON.stringify(discovery));
+  const written: string[] = [];
+  try {
+    await expect(launchLane(tellArgs, { ...deps, write: (text: string) => { written.push(text); } }))
+      .rejects.toThrow(/restart/iu);
+    // No JSON on this path: a caller that parses stdout must not mistake an error for an answer.
+    expect(written).toEqual([]);
+  } finally { await server.close(); }
+});

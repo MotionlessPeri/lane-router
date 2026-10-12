@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { parseLaneAddress, type LaneAddress } from "../router/address.js";
 import type { ResumeInfo } from "../router/router-core.js";
+import { parseTellInput, type TellInput, type TellResult } from "../router/tell.js";
 import { ensureRouter } from "./ensure-router.js";
 import {
   awaitChildStart, childEnvironment, newStatusPath, parseTerminalChoice, resolveTerminal,
@@ -19,6 +20,7 @@ const USAGE = [
   "  lane-router-lane open <project>/<lane> [--cwd <dir>] [--terminal <wt|powershell|cmd>]",
   "  lane-router-lane archive <project>/<lane>",
   "  lane-router-lane list-archived [<project>]",
+  "  lane-router-lane tell <project>/<lane> --origin <origin> --subject \"<one line>\" [--link <http(s) url>]",
 ].join("\n");
 
 export interface LaneLaunchDependencies {
@@ -31,6 +33,7 @@ export interface LaneLaunchDependencies {
   readonly queryResumeInfo?: (address: string) => Promise<ResumeInfo>;
   readonly archiveLane?: (address: string) => Promise<unknown>;
   readonly listArchivedLanes?: (project: string | undefined) => Promise<ReadonlyArray<{ address: string; archivedAt: number | null }>>;
+  readonly tell?: (input: TellInput) => Promise<TellResult>;
   readonly write?: (text: string) => void;
 }
 
@@ -49,10 +52,14 @@ export interface LaneLaunchDependencies {
  * @param args CLI arguments after the executable name.
  * @param dependencies Optional process and Router boundaries used by tests and embedded callers.
  */
-export async function launchLane(args: readonly string[], dependencies: LaneLaunchDependencies = {}): Promise<void> {
+export async function launchLane(args: readonly string[], dependencies: LaneLaunchDependencies = {}): Promise<number | void> {
+  const dataRoot = dependencies.dataRoot ?? process.env.LANE_ROUTER_DATA_ROOT ?? join(homedir(), ".lane-router");
+  // `tell` is called by programs rather than people, so it keeps its own contract — flags only, one
+  // line of JSON on stdout, and an exit code of its own when there was nothing to deliver to.
+  if (args[0] === "tell") return tell(args.slice(1), dependencies, dataRoot);
+
   // Step 1: Parse the invocation before touching Router or terminal state.
   const invocation = parseInvocation(args);
-  const dataRoot = dependencies.dataRoot ?? process.env.LANE_ROUTER_DATA_ROOT ?? join(homedir(), ".lane-router");
 
   // Step 2: The state verbs answer before any window logic, and open no window at all.
   if (invocation.verb === "list-archived") {
@@ -184,6 +191,34 @@ function parseInvocation(args: readonly string[]): ParsedInvocation {
   return { verb, address, project: undefined, role, backend, model: flags.get("--model"), profile, cwd: flags.get("--cwd"), terminal };
 }
 
+/**
+ * Tell a lane something from outside every lane, for a local program acting on the user's behalf.
+ * The arguments are validated here before the Router is contacted, so a refused call writes nothing;
+ * the Router validates them again, because its endpoint is a boundary of its own.
+ *
+ * Exit codes: 0 delivered, 2 nothing to deliver to (archived or missing), anything thrown is 1. The
+ * JSON goes to stdout only when the Router answered — an error must never look like an answer to a
+ * caller that parses what it prints.
+ */
+async function tell(args: readonly string[], dependencies: LaneLaunchDependencies, dataRoot: string): Promise<number> {
+  const [rawAddress, ...rest] = args;
+  if (rawAddress === undefined || rawAddress.startsWith("--")) throw new Error(USAGE);
+  const flags = new Map<string, string>();
+  for (let index = 0; index < rest.length; index += 2) {
+    const key = rest[index];
+    const value = rest[index + 1];
+    if (key === undefined || value === undefined || !["--origin", "--subject", "--link"].includes(key) || flags.has(key)) throw new Error(USAGE);
+    flags.set(key, value);
+  }
+  const input = parseTellInput({
+    address: rawAddress, origin: flags.get("--origin"), subject: flags.get("--subject"), link: flags.get("--link"),
+  });
+  const result = await (dependencies.tell ?? (async (current: TellInput) => tellDefault(await routerUrl(dataRoot), current)))(input);
+  const write = dependencies.write ?? ((text: string) => { process.stdout.write(text); });
+  write(`${JSON.stringify(result)}\n`);
+  return result.delivered ? 0 : 2;
+}
+
 function creationPrompt(address: string, role: string, model: string | undefined): string {
   // The model is named in the attach instruction rather than left to this window alone: what the
   // lane declares is what every later incarnation runs on, and this window is only the first one.
@@ -220,6 +255,23 @@ async function archiveLaneDefault(dataRoot: string, address: string): Promise<un
   return body.result;
 }
 
+/**
+ * A Router that answers 404 here is older than this command: the endpoint lives in the Router
+ * process, so a rebuilt command line is not enough on its own. Said in so many words, because the
+ * fix — a controlled restart of the shared Router — is not something a caller would guess from a 404.
+ */
+async function tellDefault(url: string, input: TellInput): Promise<TellResult> {
+  const response = await fetch(`${url}/lanes/tell`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
+  });
+  if (response.status === 404) {
+    throw new Error("The running Router has no tell endpoint; it needs a controlled restart onto the current build. Nothing was delivered.");
+  }
+  const body = await response.json() as { result?: TellResult; error?: string };
+  if (!response.ok || body.result === undefined) throw new Error(body.error ?? `Router request failed (${response.status})`);
+  return body.result;
+}
+
 async function listArchivedDefault(dataRoot: string, project: string | undefined): Promise<ReadonlyArray<{ address: string; archivedAt: number | null }>> {
   const query = project === undefined ? "" : `?project=${encodeURIComponent(project)}`;
   const response = await fetch(`${await routerUrl(dataRoot)}/lanes/archived${query}`);
@@ -249,7 +301,9 @@ async function queryResumeInfoDefault(dataRoot: string, address: string): Promis
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
-  launchLane(process.argv.slice(2)).catch((error) => {
+  launchLane(process.argv.slice(2)).then((code) => {
+    if (typeof code === "number") process.exitCode = code;
+  }, (error) => {
     process.stderr.write(`${error instanceof Error ? error.message : "lane-router-lane failed"}\n`);
     process.exitCode = 1;
   });

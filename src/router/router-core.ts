@@ -1,6 +1,7 @@
 import type { BackendRegistry, RestorePresence } from "./backend.js";
-import { parseLaneAddress } from "./address.js";
+import { parseLaneAddress, senderLabel } from "./address.js";
 import type { MailboxStore } from "./mailbox-store.js";
+import { tellBody, type TellInput, type TellResult, type TellTargetState } from "./tell.js";
 import type { NotificationPump } from "./notification-pump.js";
 import type { RouterStateStore } from "./state-store.js";
 import type { CallerContext, LaneRecord, MessageKind, MessageRecord, ReachSnapshot, ResolvedIdentity } from "./types.js";
@@ -352,6 +353,47 @@ export class RouterCore {
     // notificationState is the initial `pending` — which is how a delivery that reached nobody
     // used to look exactly like one that arrived.
     return ids.map((id) => state.requireMessage(id));
+  }
+
+  /**
+   * Put one message into a lane's mailbox on the user's behalf, from a local program that is not a
+   * conversation. Everything after the write is an ordinary message — notified the same way, held
+   * while the lane is offline, read and acked like any other — so this only adds a way in.
+   *
+   * 流程：
+   *   1. 用重开 lane 时已有的那套事实判目标状态，不另造判断
+   *   2. 归档 / 不存在 ⇒ 不写：没有收件箱可放，也不为一条消息造一条 lane
+   *   3. 否则按固定模板写 pending 文件与 message 行，发送方记成 `user:<origin>`
+   *   4. 走现有通知泵；回报目标状态与项目的工作目录提示
+   */
+  async tell(input: TellInput): Promise<TellResult> {
+    const state = this.dependencies.state;
+    const address = parseLaneAddress(input.address);
+
+    // 步骤 1: the same facts `open` decides from, so a caller is told exactly what `open` would see.
+    const info = await this.resumeInfo(address.address);
+    const targetState: TellTargetState =
+      info.state === "bound" ? (info.restorePresence === "online" ? "online" : "offline") : info.state;
+    const project = { cwdHint: state.latestProjectCwd(address.project) };
+
+    // 步骤 2
+    if (targetState === "archived" || targetState === "missing") {
+      return { delivered: false, messageId: null, target: { address: address.address, state: targetState }, project };
+    }
+
+    // 步骤 3: a fresh request key per call. Each call is one deliberate act by the user; there is no
+    // retrying transport between the command and the Router to dedupe against.
+    const id = this.dependencies.newId("message");
+    const message = {
+      id, requestKey: `tell:${id}`, senderLane: senderLabel(input.origin), targetLane: address.address,
+      kind: "normal" as const, replyTo: null, createdAt: this.dependencies.now(), body: tellBody(input),
+    };
+    const file = this.dependencies.mailbox.writePending(message);
+    state.insertMessage({ ...message, relativePath: file.relativePath, contentSha256: file.contentSha256 });
+
+    // 步骤 4
+    await this.dependencies.pump.notifyLane(address.address);
+    return { delivered: true, messageId: id, target: { address: address.address, state: targetState }, project };
   }
 
   async ack(context: CallerContext, input: { messageIds: readonly string[] }): Promise<{ resolved: string[] }> {
