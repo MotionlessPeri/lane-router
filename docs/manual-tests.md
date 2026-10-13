@@ -548,11 +548,11 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 ## 从 lane 之外捎话：`lane-router-lane tell`
 
-自动测试覆盖五种目标状态（文件与 `message` 行两边都数）、正文逐字等于模板（有无链接各一）、参数边界（含 URL 解析器吞换行那一例）、通知的 `sender` 与 `summary`、ack 与归档拒绝句、孤儿收养、v6 → v7 迁移（含空库）、`cwdHint`、旧 Router 的 404、三个 POST 入口与 `/claude` 握手的来源守卫，以及一条不注入任何东西的「命令行 → 真实 Router 服务 → mailbox」端到端；变异检验结果见设计稿第六节与 impl 的回报。下面两条不能自动化：**lane 读到之后会不会照模板末句等用户开口**，只有真实模型能答；**真实生产库的迁移**，只有重启那一次能验。
+自动测试覆盖五种目标状态（文件与 `message` 行两边都数）、绑在 `dsh` / `zcode` 后端的 lane、正文逐字等于模板（有无链接各一）、参数边界（含 URL 解析器吞换行那一例）、通知的 `sender` 与 `summary`、ack 与归档拒绝句、孤儿收养、`sender_label` 的迁移（v6、v7（DSH）、v8、v7（tell）、v9 五种起点各一条，另有空库和「消息那步失败时 binding 那步一起回滚」）、`cwdHint`、旧 Router 的 404、套用网页守卫的六个 POST 入口与 `/claude` 握手（DSH 通道只认 Bearer、不看来源，也有一条测试钉住），以及一条不注入任何东西的「命令行 → 真实 Router 服务 → mailbox」端到端；变异检验结果见设计稿第六节与 impl 的回报。下面两条不能自动化：**lane 读到之后会不会照模板末句等用户开口**，只有真实模型能答；**真实生产库的迁移**，只有重启那一次能验。
 
-**前提：** 已构建 `dist/` 且 `npm link` 已刷新；**共享 Router 已受控重启到本构建**——新端点与 v7 迁移都在 Router 进程里，旧 Router 上命令以退出 1、stderr 含 `restart` 失败，不落任何文件。**接收方会话不必是新起的**：Claude 侧 MCP server 拼通知载荷时对 `sender` 原样透传、不做地址校验（`local-client.ts` 的 `toNotificationMessages`），旧会话也能收到 `user:<来源>`。
+**前提：** 已构建 `dist/` 且 `npm link` 已刷新；**共享 Router 已受控重启到带 tell 的构建**——新端点与 `sender_label` 迁移都在 Router 进程里，旧 Router 上命令以退出 1、stderr 含 `restart` 失败，不落任何文件。**接收方会话不必是新起的**：Claude 侧 MCP server 拼通知载荷时对 `sender` 原样透传、不做地址校验（`local-client.ts` 的 `toNotificationMessages`），旧会话也能收到 `user:<来源>`。
 
-⚠️ **这次重启会把生产库从 v6 迁到 v7**（`message` / `message_archive` 两张表重建）。迁移在事务里、带逐表行数校验，但重启前仍建议先复制一份 `~/.lane-router/router.sqlite`。
+**版本号：** tell 最初把 `sender_label` 编为 v7，2026-10-12 的重启已按这个编号把生产库从 v6 迁到 v7；DSH / ZCode 那条线也用了 v7、v8。两边合并后 `sender_label` 改编为 v9，下一次重启把库从 v7（tell）迁到 v9，见 TC-MERGE-1。
 
 ### TC-TELL-1：在线 lane 收到捎话、准备好、但不动手
 
@@ -584,6 +584,37 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 - **TC-TELL-1 只验了一半。** `vikunja/main` 把自己当目标跑了在线一例：文件头是 `sender: user:vikunja`，`request_key` 形如 `tell:<id>`，正文是固定模板，channel 通知确实唤醒了它。已归档与不存在两例都没有写入任何消息，并且拿到了 `cwdHint`。
   - **「准备好但不动手」没有验到**：目标就是发起联调的 lane 自己，它知道这是测试，读到的不是一次真实的讨论请求。
   - 离线、未绑定、真正新建临时 lane 这三种，留给用户在真实任务上点按钮时验证。
+
+### TC-MERGE-1：合并 DSH / ZCode 之后的重启：在用库从 v7（tell）到 v9
+
+合并后的迁移不看版本号，看表结构：`binding` 的 CHECK 里没有 `'zcode'` 就按 v8 的表重建（`'dsh'` 一并补上），`message` 没有 `sender_label` 列就重建两张消息表，全部在一个事务里做完后才置 `user_version = 9`。本机在用库是 tell 的 v7，所以这次只重建 `binding`，不碰两张消息表。
+
+**前提：** 共享 Router 受控重启到 `6c3eb64` 或之后的构建，重启时机由用户决定。
+
+⚠️ `dist/` 现在已经是合并后的构建。Router 若意外退出，被 `ensure-router` 自动拉起时同样会迁移在用库，而且没有事先备份那一步。
+
+1. 重启前，用只读方式记下 `lane` / `binding` / `message` / `message_archive` 四张表的行数、`PRAGMA user_version`（应为 7）、`binding` 建表语句里的后端列表（应为 `'claude','codex'`），以及 `SELECT COUNT(*) FROM message WHERE sender_label IS NOT NULL`。
+2. 备份 `~/.lane-router/router.sqlite`，并核实备份是 v7。
+3. 受控重启共享 Router。
+4. 重启后再查同样几项，另跑 `PRAGMA foreign_key_check`。
+5. 任选一条在线 lane 用 `lane_send` 发一封普通信，再对一条在线 lane 跑一次 `lane-router-lane tell`，两封都照常送达。
+
+**预期：** `user_version = 9`；后端列表为 `'claude','codex','dsh','zcode'`；两张消息表仍有 `sender_label` 与「恰好一个发送方」的约束；四张表行数和带 label 的行数与重启前相同（按第 1 步的时刻截止，之后新写入的不算）；`foreign_key_check` 为空；第 5 步与重启前无差别。
+
+**副本预演（2026-10-13，未重启）：** 用 SQLite 的 backup API 从在用库（只读打开）拷出一份副本，用 `429b396` 的 `dist/` 打开副本触发迁移；在用库本身和共享 Router 都没有动。
+
+| | 在用库 | 副本，迁移前 | 副本，迁移后 |
+|---|---|---|---|
+| `user_version` | 7 | 7 | 9 |
+| `binding` 后端列表 | `'claude','codex'` | 同左 | `'claude','codex','dsh','zcode'` |
+| `lane` / `binding` / `message` / `message_archive` | 74 / 138 / 10912 / 3048 | 同左 | 74 / 138 / 10912 / 3048 |
+| 带 label 的消息 | 7 | 7 | 7 |
+| 两张消息表的发送方约束 | 在 | 在 | 在 |
+| `foreign_key_check` | — | — | 空 |
+
+迁移后副本与在用库逐行比对：四张表按两边共有的列逐字段取摘要，全部一致。参照：2026-10-12 迁到 v7 之前是 73 / 137 / 10837 / 3048，多出的是此后正常新增的 lane、binding 与消息。
+
+**最后验证：** 尚未真机执行，等用户决定重启时机。
 
 ## 当前记录
 
