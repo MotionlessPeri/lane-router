@@ -1,6 +1,6 @@
 # 合并远端 DSH / ZCode 与本地 tell
 
-**背景：** `master` 在 `99dc497` 分叉。远端 16 个提交（2026-09-20 至 10-08，用户本人在另一台机器上）加了 DSH Host API、ZCode 后端和 dashboard 开窗按钮；本地 4 个提交（2026-10-12）加了 `tell`，并给五个有副作用的 POST 入口加了网页守卫。两边功能互不重叠，不需要取舍；要设计的只有两处：数据库迁移的编号，以及守卫覆盖远端新入口的方式。两边都改过的文件有 11 个：`schema.ts`、`local-server.ts`、`state-store.ts`、`router-core.ts`、`mailbox-store.ts`、`main.ts`、`lane-launcher.ts`、`docs/manual-tests.md` 及三份测试。
+**背景：** `master` 在 `99dc497` 分叉。远端 16 个提交（2026-09-20 至 10-08，用户本人在另一台机器上）加了 DSH Host API 和 ZCode 后端（dashboard 开窗按钮在分叉前就有，不是这批带来的）；本地 4 个提交（2026-10-12）加了 `tell`，并给五个有副作用的 POST 入口加了网页守卫。两边功能互不重叠，不需要取舍；要设计的只有两处：数据库迁移的编号，以及守卫覆盖远端新入口的方式。两边都改过的文件有 11 个：`schema.ts`、`local-server.ts`、`state-store.ts`、`router-core.ts`、`mailbox-store.ts`、`main.ts`、`lane-launcher.ts`、`docs/manual-tests.md` 及三份测试。
 
 ## 结论
 

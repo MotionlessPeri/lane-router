@@ -114,6 +114,19 @@ sequenceDiagram
 
 两道都在读 body **之前**做，不合规的请求不进 `readJson`。实现成一个共用的守卫函数，**套到 Router 上所有有副作用的入口**（用户 2026-10-12 裁定一起修）：`POST /lanes/tell`、`POST /lanes/archive`、`POST /rpc`、`POST /claude/lifecycle`、`POST /codex/provider-endpoint`，以及 `/claude` 的 WebSocket 升级——后者只有第二道（拒 `Origin`），因为握手没有 content-type。后两个 POST 是 impl 实现时补报的：`/claude/lifecycle` 没守卫时，网页伪造一个 `Stop` 就能提前放行正在等待的接替。合法来访者一个都不受影响：CLI、lane MCP server、lifecycle hook（`lifecycle-hook.ts:21-23`）、Codex launcher（`codex-launcher.ts:71-73`）都用 Node 的 `fetch`，带 `application/json`、不带 `Origin`；channel 用 `ws` 库连 WebSocket，默认不带 `Origin`；dashboard 页面只调 `/dashboard/state` 与自带三道检查的 `/dashboard/lanes/open`，碰不到这六处。
 
+**合并 DSH / ZCode 之后（2026-10-13，`6c3eb64` 起）的入口清单。** 合并带进来 `POST /zcode/spawn` 和 DSH Host API，按同一条规则归位：
+
+| 入口 | 守卫 |
+|---|---|
+| `POST /lanes/tell`、`/lanes/archive`、`/rpc`、`/claude/lifecycle`、`/codex/provider-endpoint`、`/zcode/spawn` | 本节的共用守卫：非 JSON 返回 400，带 `Origin` 返回 403，都在读 body 之前。`/zcode/spawn` 配置了 `zcode.driver` 时会起一个会话，工作目录和第一条指令都由调用方给，网页能打到就等于能指挥一个 agent |
+| `POST /dashboard/lanes/open` | 自带守卫（分叉前就有）：`Origin` 必须等于 Router 自己的 URL，另要 `x-lane-router-action: open`、JSON 正文和 action token。**不套**共用守卫——按钮从 Router 自己的页面发出，必带 `Origin`，套了就 403 |
+| `POST /dsh/v1/handoff`、`/dsh/v1/call`、`/dsh/v1/read`，`GET /dsh/v1/health` | `Authorization: Bearer <token>`，在读 body 之前检查。网页设这个头必须先过预检，且拿不到 token，所以不套共用守卫 |
+| WebSocket `/claude` | 拒绝任何带 `Origin` 的握手 |
+| WebSocket `/dsh/v1/channel` | 只认 Bearer；`Origin` 检查只在 `/claude` 分支里，合并时一度挡住了这里，已收回并有测试钉住 |
+| 其他路径的升级请求 | 一律断开 |
+
+Codex TUI bridge 和 provider bridge 各自监听别的端口，不在这张表里。以后新加任何有副作用的入口，先在这张表里给它找一行。
+
 ### 3.5 新建 lane 的两个问题
 
 **工作目录从哪来。** 命令输出里带 `project.cwdHint`：同一项目所有 lane 的 binding 里，`cwd` 非空且 `active_at` 最新的那一条的值；活着的和已归档的都算，没有就是 `null`。调用方拿它传给 `new --cwd`。`new` 本身的行为不改——它没给 `--cwd` 时仍用当前目录，那是给人在终端里用的默认。
@@ -175,7 +188,7 @@ Router 太旧（正在跑的构建没有 `/lanes/tell`，返回 404）时 stderr
 9. `project.cwdHint` 取同项目 binding 里 `cwd` 非空且 `active_at` 最新的值；项目里没有任何记录过 cwd 的 binding 时为 `null`。
 10. 对没有 `/lanes/tell` 的 Router，命令退出 1，stderr 指明需要重启 Router；不落任何文件。
 11. 对话工具数量、名称、参数不变；`/rpc` 无新增方法；除 `/lanes/tell` 外无新增 HTTP 端点。
-12. 对 `/lanes/tell`、`/lanes/archive`、`/rpc`、`/claude/lifecycle`、`/codex/provider-endpoint` 五个 POST：`Content-Type` 不是 `application/json` 的返回 400，带任意 `Origin` 头的返回 403，两者都**不读 body、不写任何东西**；对这些路径的 `OPTIONS` 预检不回任何 `Access-Control-Allow-*` 头。
+12. 对 `/lanes/tell`、`/lanes/archive`、`/rpc`、`/claude/lifecycle`、`/codex/provider-endpoint` 五个 POST：`Content-Type` 不是 `application/json` 的返回 400，带任意 `Origin` 头的返回 403，两者都**不读 body、不写任何东西**；对这些路径的 `OPTIONS` 预检不回任何 `Access-Control-Allow-*` 头。合并 DSH / ZCode 之后（2026-10-13）`POST /zcode/spawn` 按同一条判据纳入，共六个，见 3.4 末尾的入口清单。
 13. 对 `/claude` 的 WebSocket 升级：握手带 `Origin` 头时拒绝升级（socket 关闭，hub 里不出现连接）；不带时行为与改造前逐字一致。
 14. 现有 CLI（`lane-router-lane` 各动词）、lane MCP server 的工具调用、channel 连接在守卫加上后全部照常——这条靠跑既有测试套件证明，不另写。
 
