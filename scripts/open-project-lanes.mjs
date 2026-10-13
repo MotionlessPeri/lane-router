@@ -31,15 +31,6 @@ const dataRoot = process.env.LANE_ROUTER_DATA_ROOT ?? join(homedir(), ".lane-rou
 const launcher = join(repo, "dist", "process", "lane-launcher.js");
 const batchRunner = join(repo, "dist", "process", "open-project-lanes.js");
 
-// A Router will not start without a usable codex, and on some machines it is installed without
-// being on PATH - which surfaces as `Unable to fingerprint Codex executable/version`, naming
-// neither the cause nor the fix. Filling in that one known location is a default only: an
-// explicit CODEX_EXE still wins, and a codex already on PATH is left to be found normally.
-if (!process.env.CODEX_EXE) {
-  const bundled = join(homedir(), ".codex", ".sandbox-bin", "codex.exe");
-  if (existsSync(bundled)) process.env.CODEX_EXE = bundled;
-}
-
 // Read-only on purpose: this is a peek at a database a running Router owns, so it must neither
 // migrate it nor hold a write lock. The query itself lives in src/ where it can be tested — it is
 // the one lane read here that goes to the database rather than through the Router.

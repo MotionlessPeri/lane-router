@@ -169,6 +169,16 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 **顺带一条环境限制：** Router 启动时无条件要求一个能用的 `codex`（`main.ts` 的 `await codex.start()` 在服务器启动之前）。在拿不到 `codex` 的 shell 里起不了 Router；2026-08-12 与 08-25 两次都以 `Unable to fingerprint Codex executable/version` 退出。**2026-08-25 找到了它**：`C:\Users\xiedong\.codex\.sandbox-bin\codex.exe`（`codex-cli 0.144.2`），不在 PATH 上。⇒ 要从这类 shell 起 Router，设 `CODEX_EXE` 指向它即可（`main.ts` 读 `CODEX_EXE ?? "codex"`），已实测可起。
 
+**2026-09-15 更正：`CODEX_EXE` 该设，但值要对，且必须是绝对路径。** 分两步说。
+
+其一，别钉 `.sandbox-bin`。那个副本是 Codex 沙箱留下、不随升级走的文件；`CODEX_EXE` 钉在它上面，Router 的 App Server 就停在 0.144.2，`gpt-6-astra` 这类新模型一律被 400 拒掉——TUI 自己可以是新版，但 `--remote` 模式下真正说话的是 App Server，所以窗口标题里的版本号证明不了任何事。这个值还会自我延续：Router 把自己的环境原样传给每个 lane 窗口（`terminal-spawn.ts` 的 `childEnvironment`），窗口里的会话继承它，从这种会话里重启 Router 又带回去；9 月 8 日那次重启就是这样把 0.144.2 带过来的。
+
+其二，也别以为「codex 在 PATH 上就不用设了」——这条我 09-15 先判错、实测推翻了。Router 走 Node 的 `execFile("codex")` 拉起 App Server（`codex-capability.ts` 先 `--version` 取指纹）。本机 PATH 上没有 `codex.exe`，只有 `%APPDATA%\npm` 里的 `codex` / `codex.cmd` / `codex.ps1` 三个壳；Node 的 `execFile` 不经 shell，`.cmd`/`.ps1`/bash 壳都拉不起来，于是 `execFile("codex")` 直接 `spawn codex ENOENT` → `Unable to fingerprint Codex executable/version`。PowerShell 里 `codex --version` 正常（它跑的是 `.ps1`），Router 不是 PowerShell，别拿它当证据。真正的 `codex.exe`（0.154.0）只有绝对路径能到：`C:\Users\xiedong\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe`（OpenAI 安装目录，就地升级）。
+
+⇒ 现行做法（A 方案）：把 `CODEX_EXE` 设成上面那个绝对路径，放在**用户级环境变量**里作单一来源——Router 的每条启动路径（桌面「Restart Lane Router」快捷方式、Claude 会话的 lane MCP server、终端）都继承它。已实测用 Explorer 启动的进程能读到它，所以桌面快捷方式可用。原先散在 `~/.claude.json` lane MCP `env` 和 `scripts/open-project-lanes.mjs` 里的两处 pin 都已拆掉，收敛到这一个变量。⚠️ 用户级变量只对**新起**的进程生效；改了之后已经在跑的 Router / 窗口不会自动拿到，要靠下次重启。
+
+⇒ 待办（B 方案，归 impl lane）：让 Router 自己解析 `codex.exe`——PATH 上优先挑真 `.exe`/`.com` 而不是 `.cmd`/`.ps1` 壳，找不到再去标准安装目录兜底。落地后就能撤掉 `CODEX_EXE` 这个 pin，彻底不受安装位置变动影响。
+
 > 这条也是「找不到有两种成因」的一个实例：08-12 那次只搜了三个根、深度 2，当时**没有**据此断言机器上没装 codex——那个克制是对的，东西确实在，只是在没搜到的地方。
 
 ### Router 被换掉之后，`reach` 会在下一次 lifecycle 之前低报
