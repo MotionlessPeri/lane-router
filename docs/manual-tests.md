@@ -212,6 +212,25 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 **限制（不是缺陷，是这个形态的边界）：** 隧道挂在 Windows 某个进程里，进程没了就断；Router 重启换端口，隧道和 VM 的 `discovery.json` 都要重做——`start-vm-bridge.ps1` 现在每 5 秒比对 `discovery.json` 的 `instanceId`，变了就杀掉旧 ssh、按新端口重开并重拷 `discovery.json`。⚠️ 只等 ssh 退出是不够的：2026-10-12 实测 Router 换到新端口后，转发旧端口的 ssh 会话照样活着，远端 lane 一直指着死端口，直到这个比对加上；dashboard「恢复 lane」对这条 lane 无意义（Router 开不了 VM 的窗口）；`joinKey` 是 pid，跨机可能撞。要去掉这些边界是跨机设计稿（可配绑定地址 + 认证 + 消息经 HTTP 拉取 + 远端 lane 的开窗语义）的事。
 
+### Claude Code 的后台会话（`claude --bg`）当前不能当 lane 用（2026-10-12，2.1.284）
+
+**问题：** Windows 上 lane 的生命周期绑在 Windows Terminal 窗口上，关窗即死（消息不丢，只是没人醒来处理）。Claude Code 自带的 `claude --bg` / `claude attach` / `claude agents` 是 daemon 托管的后台会话，形态上就是 Windows 版的 tmux。实测它能不能带 channel。
+
+**实测（同一台机、同一仓目录起两条丢弃型后台会话，看各自 MCP 日志）：**
+
+| 启动参数 | MCP 日志里的 channel 行 |
+|---|---|
+| `--bg --dangerously-load-development-channels server:lane` | `Channel notifications skipped: server lane not in --channels list for this session` |
+| `--bg --channels server:lane --dangerously-load-development-channels server:lane` | `Channel notifications skipped: server lane is not on the approved channels allowlist (use --dangerously-load-development-channels for local dev)` |
+
+两种组合各卡一半：daemon 派生的会话收到了 `--channels` 清单，但**没有收到** development-channels 的放行。⇒ 2.1.284 的后台会话里 lane channel 注册不上，消息不会唤醒它。这是 Claude Code 的 `--bg` 派生路径没转发那个 flag，不是 lane-router 的事，也不是 `channelsEnabled` 托管设置的事（本机那份在）。
+
+**反证它曾经可用：** 2026-08-31 一条 `mocap/hub gen8` 的后台会话（`claude agents --json` 里 `kind: background`）的 MCP 日志里有 `Channel notifications registered` 和一条 `notifications/claude/channel`——当时的版本能。所以这条要**按版本复验**：Claude Code 升级后在一个丢弃型 `--bg` 会话里看一眼 MCP 日志那行，变成 `registered` 就可以把 lane 搬进后台。
+
+**另两条跟后台会话有关的约束，搬之前要处理：** 后台会话默认 `worktree.bgIsolation = worktree`，在主检出里 Edit / Write 会被挡，要在设置里改成 `none`；daemon 是按登录会话起的（`daemonColdStart` 默认 transient），注销就没，关窗口不影响。
+
+**替代方向（设计项，未做）：** Router 收到发给「无 channel」lane 的消息时自动把它的窗口开起来（`lane open` 的 `--resume` 路径），等于「关了窗也能被叫醒」，不依赖 Claude Code 的后台会话。
+
 ### Router 被换掉之后，`reach` 会在下一次 lifecycle 之前低报
 
 **结论（2026-08-25 实测，含一次被推翻的中途结论）：** 通道**会**自己回来，实测在新 Router 启动后 **6 秒**（`reach.connectedAt` 20:40:47，Router 起于 20:40:42）。但在该会话的**下一次 lifecycle 事件**到达之前，`lane_directory` 对它报 `reach.state = no_channel`——**连接是在的，只是 Router 查不到**。本次 lifecycle 到达时刻是 20:48:44，正是用户下一次输入触发 hook 的时候；这中间约 8 分钟里 `reach` 一直低报。
