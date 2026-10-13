@@ -415,6 +415,23 @@ test("new --backend zcode spawns headless through the Router and opens no termin
   await expect(launchLane(["new", "beta/glm", "--role", "r", "--backend", "zcode", "--profile", "p"], fakes())).rejects.toThrow(/profile.*codex/iu);
 });
 
+// The spawn entry refuses what a web page can send, so the command line's own request is checked
+// against a real Router server rather than an injected spawner: what `fetch` actually puts on the
+// wire is the thing that has to pass.
+test("new --backend zcode still reaches a real Router's spawn entry", async () => {
+  const zcodeSpawnLane = vi.fn(async (input: { address: string }) => ({ sessionId: "sess_real", address: input.address }));
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "spawn", zcodeSpawnLane });
+  const discovery = await server.start();
+  const deps = fakes();
+  writeFileSync(join(deps.dataRoot, "discovery.json"), JSON.stringify(discovery));
+  const written: string[] = [];
+  try {
+    await launchLane(["new", "alpha/glm", "--role", "GLM worker.", "--backend", "zcode", "--cwd", "D:\\w"], { ...deps, write: (text: string) => { written.push(text); } });
+    expect(zcodeSpawnLane).toHaveBeenCalledExactlyOnceWith({ address: "alpha/glm", role: "GLM worker.", cwd: "D:\\w" });
+    expect(written.join("")).toContain("sess_real");
+  } finally { await server.close(); }
+});
+
 test("new --backend zcode --terminal spawns headless with an intro and opens a TUI window on the session", async () => {
   const spawnZcodeLane = vi.fn(async (input: { address: string; role: string; cwd: string; model?: string; intro?: string }) => ({ address: input.address, sessionId: "sess_9" }));
   const deps = fakes({ spawnZcodeLane });

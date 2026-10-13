@@ -23,8 +23,9 @@ async function startServer() {
     delivered: true, messageId: "message-1", target: { address: input.address, state: "online" as const }, project: { cwdHint: null },
   }));
   const recordCwd = vi.fn();
+  const zcodeSpawnLane = vi.fn(async (input: { address: string }) => ({ sessionId: "sess_1", address: input.address }));
   const server = new LocalRouterServer({
-    tools: { call } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x", archiveLane, tell, recordCwd,
+    tools: { call } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x", archiveLane, tell, recordCwd, zcodeSpawnLane,
   });
   // Stand-ins for the two entries whose effect lands inside the server itself: a lifecycle report
   // changes what the channel hub believes, and a provider request starts a new Codex endpoint.
@@ -32,7 +33,7 @@ async function startServer() {
   const providerEndpoint = vi.spyOn(server, "codexEndpointForProvider").mockResolvedValue("ws://127.0.0.1:9/provider");
   servers.push(server);
   const discovery = await server.start();
-  return { server, discovery, archiveLane, call, tell, recordCwd, reportLifecycle, providerEndpoint };
+  return { server, discovery, archiveLane, call, tell, recordCwd, zcodeSpawnLane, reportLifecycle, providerEndpoint };
 }
 
 type Started = Awaited<ReturnType<typeof startServer>>;
@@ -40,7 +41,7 @@ type Started = Awaited<ReturnType<typeof startServer>>;
 /** Every way an entry could have acted, so a refusal is checked against all of them at once. */
 function expectNothingActed(x: Started): void {
   for (const [name, spy] of Object.entries({
-    archiveLane: x.archiveLane, call: x.call, tell: x.tell, recordCwd: x.recordCwd,
+    archiveLane: x.archiveLane, call: x.call, tell: x.tell, recordCwd: x.recordCwd, zcodeSpawnLane: x.zcodeSpawnLane,
     reportLifecycle: x.reportLifecycle, providerEndpoint: x.providerEndpoint,
   })) expect(spy, name).not.toHaveBeenCalled();
 }
@@ -70,6 +71,9 @@ const ENTRIES = [
   { path: "/rpc", body: JSON.stringify({ method: "lane_send", params: { target: "alpha/victim", body: "x", kind: "normal" }, context: BOUND_CALLER }) },
   { path: "/claude/lifecycle", body: JSON.stringify({ conversationId: "session-1", event: "Stop", cwd: "C:/forged" }) },
   { path: "/codex/provider-endpoint", body: JSON.stringify({ modelProvider: "forged" }) },
+  // What a page would want from this one: a new lane in a directory it picks, whose first
+  // instruction it wrote.
+  { path: "/zcode/spawn", body: JSON.stringify({ address: "alpha/victim", role: "r", cwd: "C:/forged", intro: "forged first turn" }) },
 ] as const;
 
 describe("entries that change state refuse what a web page can send", () => {
@@ -143,6 +147,7 @@ describe("entries that change state refuse what a web page can send", () => {
     expect(x.recordCwd).toHaveBeenCalledExactlyOnceWith("session-1", "C:/forged");
     expect(x.reportLifecycle).toHaveBeenCalledExactlyOnceWith("session-1", "Stop", undefined);
     expect(x.providerEndpoint).toHaveBeenCalledExactlyOnceWith("forged", undefined, true);
+    expect(x.zcodeSpawnLane).toHaveBeenCalledExactlyOnceWith({ address: "alpha/victim", role: "r", cwd: "C:/forged", intro: "forged first turn" });
   });
 });
 

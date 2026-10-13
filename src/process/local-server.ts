@@ -570,6 +570,9 @@ export class LocalRouterServer {
       if (request.method === "POST" && request.url === "/zcode/spawn") {
         const spawn = this.options.zcodeSpawnLane;
         if (!spawn) return json(response, 503, { error: "The zcode driver is not enabled; configure zcode.driver in the Router config to spawn headless lanes" });
+        // This starts a session in a directory the caller names and hands it the caller's first
+        // instruction, so a web page must not be able to ask for one.
+        if (refuseWebPage(request, response)) return;
         const body = await readJson(request) as { address?: unknown; role?: unknown; cwd?: unknown; model?: unknown; intro?: unknown; waitForIntro?: unknown };
         if (body.intro !== undefined && typeof body.intro !== "string") return json(response, 400, { error: "intro must be a string" });
         if (body.waitForIntro !== undefined && typeof body.waitForIntro !== "boolean") return json(response, 400, { error: "waitForIntro must be a boolean" });
