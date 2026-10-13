@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import type { ClaudeChannelPort, ClaudeChannelOutcome } from "../backends/claude-backend.js";
+import type { DshChannelHub } from "../backends/dsh-backend.js";
 import { CodexTuiBridge, type CodexTuiBridgeHost } from "../adapters/codex/tui-bridge.js";
 import type { Notification } from "../router/backend.js";
+import { parseLaneAddress } from "../router/address.js";
 import type { DashboardRouter } from "../router/dashboard.js";
 import { parseTellInput, type TellInput, type TellResult } from "../router/tell.js";
 import type { CallerContext, BindingRecord, ReachSnapshot, ResolvedIdentity } from "../router/types.js";
@@ -32,6 +34,44 @@ interface ChannelConnection {
   lastNotifiedAt: number | null;
 }
 
+/**
+ * The moments the two halves of a join meet, or fail to. `at` is when this process saw the event;
+ * `deltaMs` is the gap to the other half whenever one exists, so a post-mortem of a first-turn
+ * attach failure can tell a channel that arrived slowly from a report that landed on a dead key.
+ */
+export type JoinEvent =
+  | {
+    readonly event: "join.lifecycle_received";
+    readonly joinKey: string;
+    readonly conversationId: string;
+    readonly lifecycle: "Stop" | "UserPromptSubmit";
+    readonly at: number;
+    /** held: no channel carried the key yet; adopted: a live channel was joined to the report; direct: the conversation already had a channel without the join's help. */
+    readonly outcome: "held" | "adopted" | "direct";
+    readonly deltaMs?: number;
+  }
+  | {
+    readonly event: "join.channel_connected";
+    readonly joinKey: string;
+    readonly conversationId: string;
+    readonly at: number;
+    /** awaiting_report: nothing was held for the key; placed: a held report was applied; expired: one was held but older than the window. */
+    readonly outcome: "awaiting_report" | "placed" | "expired";
+    readonly reportConversationId?: string;
+    readonly reportAt?: number;
+    readonly deltaMs?: number;
+  }
+  | {
+    readonly event: "join.unplaced_expired";
+    readonly joinKey: string;
+    readonly conversationId: string;
+    readonly at: number;
+    readonly reportAt: number;
+    readonly deltaMs: number;
+  };
+
+export type JoinEventSink = (event: JoinEvent) => void;
+
 export class ClaudeChannelHub implements ClaudeChannelPort {
   private readonly connections = new Map<string, ChannelConnection>();
   private readonly bindings = new Map<string, BindingRecord>();
@@ -39,13 +79,15 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
   private readonly waiters = new Map<string, Set<() => void>>();
 
   /**
-   * joinKey -> the identity a lifecycle report claimed for it. A channel only knows the id of the
-   * process that opened it, which is not the conversation's; the hook knows the conversation's id
-   * but not where the channel is. The key both of them can see is what puts the two together.
-   * It is never stored: it lives exactly as long as the session whose processes share it, which
-   * is why a reused pid cannot make two conversations look like one.
+   * joinKey -> the identity a lifecycle report claimed for it, and when the claim was made. A
+   * channel only knows the id of the process that opened it, which is not the conversation's; the
+   * hook knows the conversation's id but not where the channel is. The key both of them can see
+   * is what puts the two together. It is never stored beyond the session whose processes share
+   * it: `forgetJoinKey` ends it when the carrying channel closes, and the recorded moment lets
+   * `liveIdentityByJoinKey` expire a claim no close will ever name — which is why a reused pid
+   * cannot make two conversations look like one.
    */
-  private readonly identityByJoinKey = new Map<string, string>();
+  private readonly identityByJoinKey = new Map<string, { conversationId: string; at: number }>();
 
   /**
    * joinKey -> a lifecycle report that arrived before any channel carried that key. On a session
@@ -62,6 +104,7 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
   constructor(
     private readonly resolveBinding: (conversationId: string) => BindingRecord | undefined = () => undefined,
     private readonly now: () => number = Date.now,
+    private readonly observeJoin: JoinEventSink = defaultJoinEventSink,
   ) {}
 
   connect(conversationId: string, socket: WebSocket, joinKey?: string): void {
@@ -98,12 +141,24 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
    */
   private placeEarlierReport(key: string, joinKey: string | undefined): string | undefined {
     if (joinKey === undefined) return undefined;
+    const at = this.now();
     const report = this.unplacedReports.get(joinKey);
-    if (!report) return undefined;
+    if (!report) {
+      this.emitJoin({ event: "join.channel_connected", joinKey, conversationId: key, at, outcome: "awaiting_report" });
+      return undefined;
+    }
     this.unplacedReports.delete(joinKey);
-    if (this.now() - report.at > UNPLACED_REPORT_WINDOW_MS) return undefined;
+    const deltaMs = at - report.at;
+    if (deltaMs > UNPLACED_REPORT_WINDOW_MS) {
+      // Two records of one drop: the connect still happened and belongs on the timeline, while the
+      // expired event is the one a scan for window casualties can count on finding.
+      this.emitJoin({ event: "join.channel_connected", joinKey, conversationId: key, at, outcome: "expired", reportConversationId: report.conversationId, reportAt: report.at, deltaMs });
+      this.emitJoin({ event: "join.unplaced_expired", joinKey, conversationId: report.conversationId, at, reportAt: report.at, deltaMs });
+      return undefined;
+    }
     const connection = this.connections.get(key);
     if (!connection) return undefined;
+    this.emitJoin({ event: "join.channel_connected", joinKey, conversationId: key, at, outcome: "placed", reportConversationId: report.conversationId, reportAt: report.at, deltaMs });
     if (key !== report.conversationId) this.rekey(key, report.conversationId, connection);
     connection.busy = report.event === "UserPromptSubmit";
     connection.lastLifecycleAt = report.at;
@@ -112,10 +167,30 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
 
   /** The identity this caller's lane should be stored under, and whether a join established it. */
   resolveIdentity(context: { conversationId: string; joinKey?: string }): ResolvedIdentity {
-    const joined = context.joinKey === undefined ? undefined : this.identityByJoinKey.get(context.joinKey);
+    const joined = context.joinKey === undefined ? undefined : this.liveIdentityByJoinKey(context.joinKey);
     return joined === undefined
       ? { value: context.conversationId, source: "caller" }
       : { value: joined, source: "joined" };
+  }
+
+  /**
+   * A join key's identity is meant to live exactly as long as a channel carrying the key does —
+   * `forgetJoinKey` already ends it on that channel's close, and only that path sees a normal
+   * session out. This window is the backstop for claims no close will ever name: a report whose
+   * channel never arrived, or whose channel died before the report did. Liveness is anchored to
+   * the conversation the identity names rather than to the key, so a reused pid's brand-new
+   * channel cannot keep a dead session's identity alive — while a session mid-turn, which reports
+   * far less often than the window, keeps its mapping for as long as its own conversation's
+   * channel stays open.
+   */
+  private liveIdentityByJoinKey(joinKey: string): string | undefined {
+    const identity = this.identityByJoinKey.get(joinKey);
+    if (identity === undefined) return undefined;
+    if (this.now() - identity.at <= UNPLACED_REPORT_WINDOW_MS) return identity.conversationId;
+    const connection = this.connections.get(identity.conversationId);
+    if (connection !== undefined && connection.socket.readyState === connection.socket.OPEN) return identity.conversationId;
+    this.identityByJoinKey.delete(joinKey);
+    return undefined;
   }
 
   /** A channel is keyed by whatever identity it currently answers to, which a join can change. */
@@ -191,18 +266,27 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
   }
 
   reportLifecycle(conversationId: string, event: "Stop" | "UserPromptSubmit", joinKey?: string): boolean {
-    if (joinKey !== undefined) this.identityByJoinKey.set(joinKey, conversationId);
+    const at = this.now();
+    if (joinKey !== undefined) this.identityByJoinKey.set(joinKey, { conversationId, at });
     // The join key names the session that is reporting right now, so a channel carrying it wins
     // over whatever is filed under the conversation — which, just after a restart, is the dead
     // predecessor whose socket has not finished closing.
-    const connection = this.adoptByJoinKey(conversationId, joinKey) ?? this.connections.get(conversationId);
+    const adopted = joinKey === undefined ? undefined : this.adoptByJoinKey(conversationId, joinKey);
+    const connection = adopted ?? this.connections.get(conversationId);
     if (!connection) {
       // Not accepted — nothing carried it — but kept, so the channel that arrives next can take it.
-      if (joinKey !== undefined) this.unplacedReports.set(joinKey, { conversationId, event, at: this.now() });
+      if (joinKey !== undefined) {
+        this.unplacedReports.set(joinKey, { conversationId, event, at });
+        this.emitJoin({ event: "join.lifecycle_received", joinKey, conversationId, lifecycle: event, at, outcome: "held" });
+      }
       return false;
     }
+    if (joinKey !== undefined) this.emitJoin(adopted === undefined
+      ? { event: "join.lifecycle_received", joinKey, conversationId, lifecycle: event, at, outcome: "direct" }
+      // connectedAt is the other half of this pairing: how long the channel sat unjoined.
+      : { event: "join.lifecycle_received", joinKey, conversationId, lifecycle: event, at, outcome: "adopted", deltaMs: at - adopted.connectedAt });
     connection.busy = event === "UserPromptSubmit";
-    connection.lastLifecycleAt = this.now();
+    connection.lastLifecycleAt = at;
     if (event === "Stop") this.signal(conversationId);
     return true;
   }
@@ -258,6 +342,11 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     const binding = this.resolveBinding(conversationId) ?? this.bindings.get(conversationId);
     if (binding) for (const handler of this.attentionHandlers) handler(binding);
   }
+
+  // An observer must not be able to take routing down with it, so its failures stop here.
+  private emitJoin(event: JoinEvent): void {
+    try { this.observeJoin(event); } catch { /* an observer's failure is not the Router's */ }
+  }
 }
 
 export class LocalRouterServer {
@@ -277,8 +366,25 @@ export class LocalRouterServer {
     readonly host?: string;
     readonly port?: number;
     readonly claude?: ClaudeChannelHub;
+    /** Authenticated loopback API used only by the trusted DSH Host. */
+    readonly dsh?: {
+      readonly token: string;
+      readonly channel: DshChannelHub;
+      readonly read: (context: CallerContext, messageIds: readonly string[]) => unknown | Promise<unknown>;
+      /** Host-only transfer, not a model-visible Router tool. */
+      readonly handoff?: (context: CallerContext, input: {
+        address: string; expectedBindingId: string; expectedGeneration: number; successorSessionId: string;
+      }) => Promise<unknown>;
+    };
     /** Receives the working directory a lifecycle report carries for a conversation. */
     readonly recordCwd?: (conversationId: string, cwd: string) => void;
+    /**
+     * The backlog one conversation owes, for hooks that surface it at the next turn: ZCode has no
+     * channel that could start a turn on its own, so the fact this answers is the only wake its
+     * sessions get. Read-only by the same reasoning as `resumeInfo` — this HTTP face has no
+     * authentication, so nothing on it may act.
+     */
+    readonly pendingSummary?: (conversationId: string) => { readonly laneAddress: string; readonly pendingCount: number } | undefined;
     /** Answers what a lane needs to be resumed; serves the lane launcher, not conversation tools. */
     readonly resumeInfo?: (address: string) => unknown;
     /**
@@ -296,6 +402,13 @@ export class LocalRouterServer {
      */
     readonly tell?: (input: TellInput) => Promise<TellResult>;
     /**
+     * Creates a headless zcode lane (Router-owned app-server session + attach) for the spawn CLI.
+     * Absent means this Router runs without the zcode driver, and the endpoint says so instead of
+     * pretending. Act-able like archiving, and exposed on the same unauthenticated loopback face
+     * every other lane-lifecycle verb lives on.
+     */
+    readonly zcodeSpawnLane?: (input: { readonly address: string; readonly role: string; readonly cwd: string; readonly model?: string }) => Promise<{ readonly sessionId: string; readonly address: string }>;
+    /**
      * One snapshot for the observation board, given the facts only this server holds. Optional for
      * the same reason as the surfaces above — the board is a face a Router may be built without —
      * and read-only for a reason of its own: this HTTP face has no authentication, so anything on
@@ -310,19 +423,28 @@ export class LocalRouterServer {
     this.codexBridge = new CodexTuiBridge(options.codex);
     this.claude = options.claude ?? new ClaudeChannelHub();
     this.http.on("upgrade", (request, socket, head) => {
-      // A browser always sends Origin on a WebSocket handshake and the channel client sends none, so
-      // any Origin means a web page is trying to become a lane's channel. There is no content type to
-      // check on a handshake, so this is the only one of the two guards that applies here.
-      if (request.headers.origin !== undefined) {
-        socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
-        return;
-      }
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       const conversationId = url.searchParams.get("conversationId");
       const joinKey = url.searchParams.get("joinKey") ?? undefined;
       if (url.pathname === "/claude" && conversationId) {
+        // A browser always sends Origin on a WebSocket handshake and the channel client sends none,
+        // so any Origin means a web page is trying to become a lane's channel. There is no content
+        // type to check on a handshake, so this is the only one of the two guards that applies here.
+        if (request.headers.origin !== undefined) {
+          socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+          return;
+        }
         this.websocket.handleUpgrade(request, socket, head, (client) => this.claude.connect(conversationId, client, joinKey));
         return;
+      }
+      // The Bearer token guards this one instead: a page can neither set Authorization on a
+      // handshake nor know the token, so Origin adds nothing here.
+      if (url.pathname === "/dsh/v1/channel" && this.options.dsh && this.dshAuthorized(request)) {
+        const sessionId = dshSessionId(request);
+        if (sessionId) {
+          this.websocket.handleUpgrade(request, socket, head, (client) => this.options.dsh!.channel.connect(sessionId, client));
+          return;
+        }
       }
       socket.destroy();
     });
@@ -343,6 +465,7 @@ export class LocalRouterServer {
 
   async close(): Promise<void> {
     this.claude.close();
+    this.options.dsh?.channel.close();
     await this.codexBridge.close();
     const providerBridges = [...this.providerBridges.values()].map(({ bridge }) => bridge);
     this.providerBridges.clear();
@@ -352,7 +475,9 @@ export class LocalRouterServer {
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
     try {
+      if (pathname.startsWith("/dsh/v1/")) return await this.handleDsh(request, response, pathname);
       if (request.method === "GET" && request.url === "/health") return json(response, 200, this.discovery());
       if (request.method === "GET" && request.url !== undefined) {
         const url = new URL(request.url, "http://127.0.0.1");
@@ -378,6 +503,16 @@ export class LocalRouterServer {
           // Awaited, not passed through: the resolver is async (it may consult the session
           // locator), and serializing the pending promise answered `{}` on the real machine.
           return json(response, 200, { result: await this.options.resumeInfo(address) });
+        }
+        if (url.pathname === "/claude/pending-summary" && this.options.pendingSummary) {
+          const conversationId = url.searchParams.get("conversationId");
+          if (!conversationId) return json(response, 400, { error: "conversationId is required" });
+          const summary = this.options.pendingSummary(conversationId);
+          // 404, not a zero-count 200: "this conversation owns no lane" and "its lane owes
+          // nothing" are different facts, and a hook that cannot tell them apart would nudge
+          // sessions that were never attached.
+          if (summary === undefined) return json(response, 404, { error: "no attached lane for this conversation" });
+          return json(response, 200, { result: summary });
         }
       }
       if (request.method === "POST" && request.url === "/lanes/tell") {
@@ -432,6 +567,28 @@ export class LocalRouterServer {
           return json(response, 400, { error: error instanceof Error ? error.message : "dashboard open request failed" });
         }
       }
+      if (request.method === "POST" && request.url === "/zcode/spawn") {
+        const spawn = this.options.zcodeSpawnLane;
+        if (!spawn) return json(response, 503, { error: "The zcode driver is not enabled; configure zcode.driver in the Router config to spawn headless lanes" });
+        const body = await readJson(request) as { address?: unknown; role?: unknown; cwd?: unknown; model?: unknown; intro?: unknown; waitForIntro?: unknown };
+        if (body.intro !== undefined && typeof body.intro !== "string") return json(response, 400, { error: "intro must be a string" });
+        if (body.waitForIntro !== undefined && typeof body.waitForIntro !== "boolean") return json(response, 400, { error: "waitForIntro must be a boolean" });
+        if (typeof body.address !== "string" || body.address.trim() === "") return json(response, 400, { error: "address is required" });
+        try { parseLaneAddress(body.address); } catch { return json(response, 400, { error: "Invalid lane address" }); }
+        if (typeof body.role !== "string" || body.role.trim() === "") return json(response, 400, { error: "role is required" });
+        if (typeof body.cwd !== "string" || body.cwd.trim() === "") return json(response, 400, { error: "cwd is required" });
+        if (body.model !== undefined && typeof body.model !== "string") return json(response, 400, { error: "model must be a string" });
+        try {
+          return json(response, 200, { result: await spawn({
+            address: body.address, role: body.role, cwd: body.cwd,
+            ...(body.model === undefined ? {} : { model: body.model as string }),
+            ...(body.intro === undefined ? {} : { intro: body.intro as string }),
+            ...(body.waitForIntro === undefined ? {} : { waitForIntro: body.waitForIntro }),
+          }) });
+        } catch (error) {
+          return json(response, 409, { error: error instanceof Error ? error.message : "zcode spawn failed" });
+        }
+      }
       if (request.method === "POST" && request.url === "/claude/lifecycle") {
         // A forged Stop would tell the hub a busy conversation went idle and release a takeover
         // waiting for it, so a web page is kept out here exactly as on the entries that write.
@@ -471,7 +628,86 @@ export class LocalRouterServer {
         return json(response, 200, { result });
       }
       return json(response, 400, { error: "unknown method" });
-    } catch (error) { return json(response, 400, { error: error instanceof Error ? error.message : "request failed" }); }
+    } catch (error) {
+      if (pathname.startsWith("/dsh/v1/")) return dshError(response, 400, "INVALID_REQUEST", error instanceof Error ? error.message : "request failed");
+      return json(response, 400, { error: error instanceof Error ? error.message : "request failed" });
+    }
+  }
+
+  private async handleDsh(request: IncomingMessage, response: ServerResponse, pathname: string): Promise<void> {
+    if (!this.options.dsh) return dshError(response, 404, "NOT_FOUND", "not found");
+    if (!this.dshAuthorized(request)) return dshError(response, 401, "UNAUTHORIZED", "Bearer token is missing or invalid");
+    if (request.method === "GET" && pathname === "/dsh/v1/health") {
+      return json(response, 200, { protocolVersion: 1, status: "ok" });
+    }
+    const sessionId = dshSessionId(request);
+    if (!sessionId) return dshError(response, 400, "SESSION_ID_REQUIRED", "X-DSH-Session-Id is required");
+    if (request.method !== "POST") return dshError(response, 404, "NOT_FOUND", "not found");
+    const body = await readJson(request);
+    if (!isRecord(body)) return dshError(response, 400, "INVALID_REQUEST", "Request body must be an object");
+    for (const forbidden of ["backend", "generation", "conversationId", "sessionId"]) {
+      if (forbidden in body) return dshError(response, 400, "IDENTITY_FIELD_FORBIDDEN", `${forbidden} is supplied by the Router Host`);
+    }
+    if (pathname === "/dsh/v1/handoff") {
+      const handoff = this.options.dsh.handoff;
+      if (!handoff) return dshError(response, 404, "NOT_FOUND", "not found");
+      const fields = ["address", "expectedBindingId", "expectedGeneration", "successorSessionId"];
+      if (Object.keys(body).some((key) => !fields.includes(key)) || fields.some((key) => !(key in body))
+        || typeof body.address !== "string" || body.address.trim().length === 0
+        || typeof body.expectedBindingId !== "string" || body.expectedBindingId.trim().length === 0
+        || !Number.isSafeInteger(body.expectedGeneration) || (body.expectedGeneration as number) < 1
+        || typeof body.successorSessionId !== "string" || body.successorSessionId.trim().length === 0) {
+        return dshError(response, 400, "INVALID_REQUEST", "A lane address, expected binding id/generation, and successor Session id are required");
+      }
+      try { parseLaneAddress(body.address); }
+      catch { return dshError(response, 400, "INVALID_REQUEST", "Invalid lane address"); }
+      try {
+        const result = await handoff({ backend: "dsh", conversationId: sessionId, requestKey: `handoff:${randomUUID()}` }, {
+          address: body.address, expectedBindingId: body.expectedBindingId,
+          expectedGeneration: body.expectedGeneration as number, successorSessionId: body.successorSessionId,
+        });
+        return json(response, 200, { protocolVersion: 1, result });
+      } catch (error) {
+        const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : "HANDOFF_FAILED";
+        return dshError(response, 409, code, error instanceof Error ? error.message : "handoff failed");
+      }
+    }
+    if (pathname === "/dsh/v1/call") {
+      if (typeof body.method !== "string" || !DSH_TOOL_NAMES.includes(body.method as DshToolName)
+        || !isRecord(body.params) || typeof body.requestKey !== "string" || body.requestKey.length === 0) {
+        return dshError(response, 400, "INVALID_REQUEST", "method, params, and requestKey are required");
+      }
+      try {
+        const context: CallerContext = { backend: "dsh", conversationId: sessionId, requestKey: body.requestKey };
+        const result = await this.options.tools.call(body.method as DshToolName, body.params, context, callerLifetime(request), { rejectTakeover: true });
+        if (body.method === "lane_ack" && isRecord(result) && Array.isArray(result.resolved)
+          && result.resolved.every((id) => typeof id === "string")) {
+          this.options.dsh.channel.acknowledge(sessionId, result.resolved as string[]);
+        }
+        return json(response, 200, { protocolVersion: 1, result });
+      } catch (error) {
+        const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : "CALL_FAILED";
+        return dshError(response, 409, code, error instanceof Error ? error.message : "call failed");
+      }
+    }
+    if (pathname === "/dsh/v1/read") {
+      if (!Array.isArray(body.messageIds) || body.messageIds.length === 0 || body.messageIds.some((id) => typeof id !== "string")) {
+        return dshError(response, 400, "INVALID_REQUEST", "messageIds must be a non-empty string array");
+      }
+      try {
+        const context: CallerContext = { backend: "dsh", conversationId: sessionId, requestKey: `read:${randomUUID()}` };
+        const messages = await this.options.dsh.read(context, body.messageIds as string[]);
+        return json(response, 200, { protocolVersion: 1, messages });
+      } catch (error) {
+        const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : "READ_FAILED";
+        return dshError(response, 409, code, error instanceof Error ? error.message : "read failed");
+      }
+    }
+    return dshError(response, 404, "NOT_FOUND", "not found");
+  }
+
+  private dshAuthorized(request: IncomingMessage): boolean {
+    return this.options.dsh !== undefined && request.headers.authorization === `Bearer ${this.options.dsh.token}`;
   }
 
   private discovery(): RouterDiscovery {
@@ -502,6 +738,9 @@ export class LocalRouterServer {
  * deliberately shorter than the transport's own give-up so the caller receives a sentence it can
  * act on instead of a bare `fetch failed`.
  */
+const DSH_TOOL_NAMES = ["lane_directory", "lane_attach_current", "lane_send", "lane_ack"] as const;
+type DshToolName = (typeof DSH_TOOL_NAMES)[number];
+
 const ATTACH_WAIT_MS = 60_000;
 
 /**
@@ -512,16 +751,38 @@ const ATTACH_WAIT_MS = 60_000;
  */
 const UNPLACED_REPORT_WINDOW_MS = 30_000;
 
+/**
+ * The detached Router has no console of its own: detach-router.ts hands router-start.log to the
+ * child as its stderr, so stderr is the one channel a join post-mortem can count on finding after
+ * the fact. One JSON object per line keeps that file greppable without a parser, and nothing is
+ * buffered in this process — the log line is the record, so retention needs no bound of its own.
+ */
+function defaultJoinEventSink(event: JoinEvent): void {
+  process.stderr.write(`${JSON.stringify(event)}\n`);
+}
+
 function callerLifetime(request: IncomingMessage): AbortSignal {
   const abandoned = new AbortController();
   request.once("close", () => abandoned.abort(new Error("the caller disconnected")));
   return AbortSignal.any([abandoned.signal, AbortSignal.timeout(ATTACH_WAIT_MS)]);
 }
 
+function dshSessionId(request: IncomingMessage): string | undefined {
+  const value = request.headers["x-dsh-session-id"];
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function callerContext(value: unknown): CallerContext | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const context = value as Record<string, unknown>;
-  if ((context.backend !== "claude" && context.backend !== "codex") || typeof context.conversationId !== "string" || typeof context.requestKey !== "string") return undefined;
+  // ZCode rides this RPC face with its own backend name because its bindings are stored under it;
+  // "dsh" stays absent because the Host path supplies its context server-side, never over /rpc.
+  if ((context.backend !== "claude" && context.backend !== "codex" && context.backend !== "zcode")
+    || typeof context.conversationId !== "string" || typeof context.requestKey !== "string") return undefined;
   return {
     backend: context.backend, conversationId: context.conversationId, requestKey: context.requestKey,
     ...(typeof context.joinKey === "string" ? { joinKey: context.joinKey } : {}),
@@ -577,6 +838,10 @@ function readDashboardPage(): string {
 
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value));
+}
+
+function dshError(response: ServerResponse, status: number, code: string, message: string): void {
+  json(response, status, { protocolVersion: 1, error: { code, message } });
 }
 
 function sendWebSocket(socket: WebSocket, value: string): Promise<void> {

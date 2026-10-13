@@ -6,7 +6,13 @@ import { toolArgsSchemas } from "./tool-schema.js";
 export class ToolService {
   constructor(private readonly router: RouterCore) {}
 
-  async call(name: LaneToolName, args: Record<string, unknown>, context: CallerContext, signal?: AbortSignal): Promise<unknown> {
+  async call(
+    name: LaneToolName,
+    args: Record<string, unknown>,
+    context: CallerContext,
+    signal?: AbortSignal,
+    options: { rejectTakeover?: boolean } = {},
+  ): Promise<unknown> {
     switch (name) {
       case "lane_directory": {
         const parsed = toolArgsSchemas.lane_directory.parse(args);
@@ -14,11 +20,14 @@ export class ToolService {
       }
       case "lane_attach_current": {
         const parsed = toolArgsSchemas.lane_attach_current.parse(args);
-        return this.router.attachCurrent(context, {
+        const input = {
           address: parsed.address,
           ...(parsed.role_description === undefined ? {} : { roleDescription: parsed.role_description }),
           ...(parsed.model === undefined ? {} : { model: parsed.model }),
-        }, signal);
+        };
+        return options.rejectTakeover === undefined
+          ? this.router.attachCurrent(context, input, signal)
+          : this.router.attachCurrent(context, input, signal, options);
       }
       case "lane_send": {
         const parsed = toolArgsSchemas.lane_send.parse(args);

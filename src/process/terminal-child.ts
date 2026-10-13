@@ -18,6 +18,22 @@ export function childCommand(
   environment: NodeJS.ProcessEnv,
   here: string,
 ): { executable: string; args: string[] } {
+  if (request.backend === "zcode") {
+    // The windowed face of a driver-created session: the community TUI resumes the session by id.
+    // It cannot take a first prompt (that is -p, headless-only), which is why windowed zcode lanes
+    // are born headless with an intro turn and only then handed a window; prompt mode is a caller
+    // bug, not a supported shape.
+    if (request.mode !== "resume") throw new Error("zcode windows resume a spawned session; prompt mode is headless-only");
+    const override = environment.ZCODE_TUI_COMMAND?.trim();
+    if (override) return { executable: override, args: ["--resume", request.conversationId] };
+    // "zcode" on PATH is an npm .cmd shim, and a freshly spawned terminal's PATH may not carry the
+    // npm global dir (observed: ENOENT in the child). The default therefore resolves the package
+    // bin absolutely and runs it on this same node; the override takes an executable path (an
+    // .exe or a script run by a shell-less spawn), never a .cmd shim.
+    const packaged = environment.APPDATA ? join(environment.APPDATA, "npm", "node_modules", "zcode-app-cli", "bin", "zcode.js") : null;
+    if (!packaged) throw new Error("zcode windows need APPDATA or ZCODE_TUI_COMMAND to locate the TUI");
+    return { executable: process.execPath, args: [packaged, "--resume", request.conversationId] };
+  }
   if (request.backend === "codex") {
     // Both codex modes go through the launcher, which owns Router discovery and TUI wiring.
     // codex has no session display-name flag, so the window keeps only the title escape below.

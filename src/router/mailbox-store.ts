@@ -56,6 +56,17 @@ export class MailboxStore {
     return join(mailboxLanePath(this.root, parseLaneAddress(address)), "pending");
   }
 
+  /**
+   * How many messages a lane's pending directory holds. The files are the pending truth — the
+   * database is an index of them — so a summary that counts anything else could say zero while
+   * mail is waiting. A missing directory is an empty mailbox, not an error.
+   */
+  pendingCount(address: string): number {
+    const directory = this.pendingPath(address);
+    if (!existsSync(directory)) return 0;
+    return readdirSync(directory).filter((name) => name.endsWith(".md")).length;
+  }
+
   writePending(input: MailboxMessageInput): MailboxFile {
     validateToken("message ID", input.id);
     validateHeaderValue("request key", input.requestKey);
@@ -119,6 +130,17 @@ export class MailboxStore {
     // serializeMessage writes one blank line between the header and the body. Dropping it makes
     // this the inverse of that rather than a body carrying a newline nobody wrote.
     return lines.slice(lines[end + 1] === "" ? end + 2 : end + 1).join("\n");
+  }
+
+  /** Fails before database commit when neither the pending file nor its idempotent destination exists. */
+  assertResolvable(relativePath: string): void {
+    const source = this.absolute(relativePath);
+    const normalized = relativePath.replaceAll("\\", "/");
+    if (!normalized.includes("/pending/")) throw new Error("Message is not in a pending mailbox");
+    const destination = this.absolute(normalized.replace("/pending/", "/resolved/"));
+    if (!existsSync(source) && !existsSync(destination)) {
+      throw new MailboxCorruptionError(`Message file is missing: ${relativePath}`);
+    }
   }
 
   resolve(relativePath: string): MailboxFile {

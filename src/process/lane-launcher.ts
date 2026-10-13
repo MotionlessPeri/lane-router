@@ -34,6 +34,7 @@ export interface LaneLaunchDependencies {
   readonly archiveLane?: (address: string) => Promise<unknown>;
   readonly listArchivedLanes?: (project: string | undefined) => Promise<ReadonlyArray<{ address: string; archivedAt: number | null }>>;
   readonly tell?: (input: TellInput) => Promise<TellResult>;
+  readonly spawnZcodeLane?: (input: { address: string; role: string; cwd: string; model?: string }) => Promise<{ address: string; sessionId: string }>;
   readonly write?: (text: string) => void;
 }
 
@@ -86,12 +87,39 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     if (directory.some((entry) => entry.address === invocation.address!.address)) {
       throw new Error(`Lane ${invocation.address!.address} already exists; open it with: lane-router-lane open ${invocation.address!.address}`);
     }
+    if (invocation.backend === "zcode") {
+      // The zcode TUI cannot take a first prompt (that flag is headless-only), so a windowed lane
+      // is born headless — the spawner binds it and fires an intro turn — and then the window
+      // resumes the same session: the user lands in a TUI whose lane is already registered.
+      // With --terminal absent the session simply stays headless.
+      const spawned = await (dependencies.spawnZcodeLane ?? ((input: { address: string; role: string; cwd: string; model?: string; intro?: string; waitForIntro?: boolean }) => spawnZcodeLaneDefault(dataRoot, input)))({
+        address: invocation.address!.address,
+        role: invocation.role,
+        cwd: invocation.cwd ?? dependencies.cwd ?? process.cwd(),
+        ...(invocation.model === undefined ? {} : { model: invocation.model }),
+        ...(invocation.terminal === undefined ? {} : { intro: zcodeIntroPrompt(invocation.address!.address, invocation.role), waitForIntro: true }),
+      });
+      const write = dependencies.write ?? ((text: string) => { process.stdout.write(text); });
+      if (invocation.terminal === undefined) {
+        write(`  headless zcode lane ${spawned.address} created (session ${spawned.sessionId})
+`);
+        return;
+      }
+      await openTerminal(dependencies, invocation.terminal, {
+        mode: "resume", backend: "zcode", cwd: invocation.cwd ?? dependencies.cwd ?? process.cwd(),
+        conversationId: spawned.sessionId, statusPath: newStatusPath(dataRoot),
+      } satisfies TerminalChildRequest, invocation.address!.address, invocation.address!.project);
+      write(`  zcode TUI lane ${spawned.address} created (session ${spawned.sessionId}); the window resumes it
+  note: two engines now own one conversation — while the window is open, prefer talking there; wake-driven turns may not render live in it
+`);
+      return;
+    }
     const prompt = creationPrompt(invocation.address!.address, invocation.role, invocation.model);
     if (prompt.length > 24_000) throw new Error("The role description is too long; shorten it before creating the lane");
     // Both halves matter and they are not the same thing: the request starts this window on the
     // model, the prompt is what makes the lane declare it so every later generation inherits it.
     const request = {
-      mode: "prompt", backend: invocation.backend, cwd: invocation.cwd ?? dependencies.cwd ?? process.cwd(),
+      mode: "prompt", backend: invocation.backend as "claude" | "codex", cwd: invocation.cwd ?? dependencies.cwd ?? process.cwd(),
       prompt, statusPath: newStatusPath(dataRoot),
       ...(invocation.model === undefined ? {} : { model: invocation.model }),
       ...(invocation.profile === undefined ? {} : { profile: invocation.profile }),
@@ -112,6 +140,13 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     // A lane without an active binding has no conversation to reopen. Reattaching is a topology
     // change with its own confirmation loop, and must not happen as a side effect of "open".
     throw new Error(`Lane ${invocation.address!.address} has no active binding to resume; attach a conversation through the rotation flow instead`);
+  }
+  if (info.backend === "dsh") {
+    throw new Error(`The dsh backend is Host-managed and cannot be opened by lane-router-lane`);
+  }
+  // The guard is the scope, not a policy choice: no ZCode launcher exists to hand this to yet.
+  if (info.backend === "zcode") {
+    throw new Error(`The zcode backend cannot be opened by lane-router-lane yet`);
   }
   // Reach describes notification transport, not ownership by a visible client. Codex can keep a
   // thread loaded in the shared App Server after its TUI closes, so only the backend's restore
@@ -143,7 +178,7 @@ interface ParsedInvocation {
   readonly address: LaneAddress | undefined;
   readonly project: string | undefined;
   readonly role: string;
-  readonly backend: "claude" | "codex";
+  readonly backend: "claude" | "codex" | "zcode";
   readonly model: string | undefined;
   readonly profile: string | undefined;
   readonly cwd: string | undefined;
@@ -183,7 +218,7 @@ function parseInvocation(args: readonly string[]): ParsedInvocation {
   const terminalFlag = flags.get("--terminal");
   const terminal = terminalFlag === undefined ? undefined : parseTerminalChoice(terminalFlag);
   const backend = flags.get("--backend") ?? "claude";
-  if (backend !== "claude" && backend !== "codex") throw new Error(`--backend must be claude or codex, not ${JSON.stringify(backend)}`);
+  if (backend !== "claude" && backend !== "codex" && backend !== "zcode") throw new Error(`--backend must be claude, codex, or zcode, not ${JSON.stringify(backend)}`);
   const profile = flags.get("--profile");
   if (profile !== undefined && backend !== "codex") throw new Error("--profile is only valid with --backend codex");
   const role = flags.get("--role") ?? "";
@@ -217,6 +252,17 @@ async function tell(args: readonly string[], dependencies: LaneLaunchDependencie
   const write = dependencies.write ?? ((text: string) => { process.stdout.write(text); });
   write(`${JSON.stringify(result)}\n`);
   return result.delivered ? 0 : 2;
+}
+
+function zcodeIntroPrompt(address: string, role: string): string {
+  // The spawner binds the lane Router-side, so the intro must NOT instruct lane_attach_current
+  // (the session's own MCP identity is not the binding's): it only sets the scene for a session
+  // that will usually be opened in a TUI right after.
+  return `You are the lane ${address}. The Router has already registered this conversation as that lane; do not call lane_attach_current.
+
+Your role: ${role}
+
+Read the repository AGENTS.md if present, then confirm in one short line that you are ready and wait for direction.`;
 }
 
 function creationPrompt(address: string, role: string, model: string | undefined): string {
@@ -297,6 +343,17 @@ async function queryResumeInfoDefault(dataRoot: string, address: string): Promis
   const response = await fetch(`${await routerUrl(dataRoot)}/lanes/resume-info?address=${encodeURIComponent(address)}`);
   const body = await response.json() as { result?: ResumeInfo; error?: string };
   if (!response.ok || body.result === undefined) throw new Error(body.error ?? `Router request failed (${response.status})`);
+  return body.result;
+}
+
+async function spawnZcodeLaneDefault(dataRoot: string, input: { address: string; role: string; cwd: string; model?: string; intro?: string; waitForIntro?: boolean }): Promise<{ address: string; sessionId: string }> {
+  const response = await fetch(`${await routerUrl(dataRoot)}/zcode/spawn`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const body = await response.json() as { result?: { address: string; sessionId: string }; error?: string };
+  if (!response.ok || body.result === undefined) throw new Error(body.error ?? `zcode spawn failed (${response.status})`);
   return body.result;
 }
 

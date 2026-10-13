@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { launchLane } from "../../src/process/lane-launcher.js";
+import { LocalRouterServer } from "../../src/process/local-server.js";
 import type { TerminalChildRequest } from "../../src/process/terminal-spawn.js";
 
 const roots: string[] = [];
@@ -384,9 +385,9 @@ test("tell exits 2 when there is no lane to deliver to, and still prints the JSO
 
 // Acceptance 10, against a real Router server built without the tell surface: it answers 404 on
 // /lanes/tell, which is exactly what a Router still running an older build looks like from the
-// command line.
+// command line. The server is imported at the top of the file, not in here: under a loaded full
+// run, transforming its module graph inside the test alone can outlast the whole 5 s budget.
 test("tell says the Router needs restarting when the running one has no tell endpoint", async () => {
-  const { LocalRouterServer } = await import("../../src/process/local-server.js");
   const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "old-build" });
   const discovery = await server.start();
   const deps = fakes();
@@ -398,4 +399,32 @@ test("tell says the Router needs restarting when the running one has no tell end
     // No JSON on this path: a caller that parses stdout must not mistake an error for an answer.
     expect(written).toEqual([]);
   } finally { await server.close(); }
+});
+
+test("new --backend zcode spawns headless through the Router and opens no terminal", async () => {
+  const spawnZcodeLane = vi.fn(async (input: { address: string; role: string; cwd: string; model?: string }) => ({ address: input.address, sessionId: "sess_1" }));
+  const written: string[] = [];
+  const deps = fakes({ spawnZcodeLane, write: (text: string) => written.push(text) });
+  await launchLane(["new", "alpha/glm", "--role", "GLM worker.", "--backend", "zcode", "--cwd", "D:\w"], deps);
+  expect(spawnZcodeLane).toHaveBeenCalledWith({ address: "alpha/glm", role: "GLM worker.", cwd: "D:\w" });
+  expect(written.join("")).toContain("sess_1");
+  // A headless lane has no window; the terminal path must not even be consulted.
+  expect(deps.spawnTerminal).not.toHaveBeenCalled();
+  // --profile remains codex-only; --terminal now switches zcode to the windowed form instead of
+  // being rejected, which the windowed test below covers.
+  await expect(launchLane(["new", "beta/glm", "--role", "r", "--backend", "zcode", "--profile", "p"], fakes())).rejects.toThrow(/profile.*codex/iu);
+});
+
+test("new --backend zcode --terminal spawns headless with an intro and opens a TUI window on the session", async () => {
+  const spawnZcodeLane = vi.fn(async (input: { address: string; role: string; cwd: string; model?: string; intro?: string }) => ({ address: input.address, sessionId: "sess_9" }));
+  const deps = fakes({ spawnZcodeLane });
+  await launchLane(["new", "alpha/glm-tui", "--role", "Windowed GLM lane.", "--backend", "zcode", "--terminal", "wt"], deps);
+  // Windowed lanes get an intro turn (the TUI cannot take a first prompt); headless ones do not.
+  expect(spawnZcodeLane.mock.calls[0][0].intro).toContain("alpha/glm-tui");
+  // The window must not open on a still-running intro: the TUI would show an unanswered prompt.
+  expect(spawnZcodeLane.mock.calls[0][0].waitForIntro).toBe(true);
+  const request = deps.spawnTerminal.mock.calls[0][0];
+  expect(request.mode).toBe("resume");
+  expect(request.backend).toBe("zcode");
+  expect(request.conversationId).toBe("sess_9");
 });

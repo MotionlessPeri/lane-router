@@ -3,9 +3,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { openRouterDatabase } from "../../src/router/database.js";
+import { initializeRouterSchema, ROUTER_SCHEMA_VERSION } from "../../src/router/schema.js";
+import {
+  BINDING_BACKENDS, SCHEMA_V6_SQL, schemaSql, STARTING_SHAPES, type StartingShape,
+} from "../fixtures/router/schema-shapes.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -99,7 +103,7 @@ describe("router schema migration 1 to 2", () => {
     const database = openRouterDatabase(path);
     try {
       // Opening always lands on the current version; the subject here is the value mapping.
-      expect(database.pragma("user_version", { simple: true })).toBe(7);
+      expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
 
       const rows = database.prepare("SELECT id,notification_state FROM message ORDER BY id").all() as Array<{ id: string; notification_state: string }>;
       expect(rows).toEqual([
@@ -210,7 +214,7 @@ describe("router schema migration 2 to 3", () => {
   it("adds a nullable cwd column and keeps the existing binding row untouched", () => {
     const database = openRouterDatabase(writeVersion2Database());
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(7);
+      expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
       const columns = database.pragma("table_info(binding)") as Array<{ name: string; notnull: number }>;
       expect(columns.find((column) => column.name === "cwd")).toMatchObject({ notnull: 0 });
       // The binding names its lane by id from version 6 on, so the address is read through the join.
@@ -229,7 +233,7 @@ describe("router schema migration 2 to 3", () => {
   it("migrates a version 1 database through every intermediate shape to the current one", () => {
     const database = openRouterDatabase(writeVersion1Database());
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(7);
+      expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
       const columns = database.pragma("table_info(binding)") as Array<{ name: string }>;
       expect(columns.map((column) => column.name)).toContain("cwd");
       // The version 1 mapping must still have happened on the way through.
@@ -261,7 +265,7 @@ describe("router schema migration 3 to 4", () => {
   it("adds a nullable model column and leaves every existing lane exactly as it was", () => {
     const database = openRouterDatabase(writeVersion3Database());
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(7);
+      expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
       const columns = database.pragma("table_info(lane)") as Array<{ name: string; notnull: number }>;
       expect(columns.find((column) => column.name === "model")).toMatchObject({ notnull: 0 });
 
@@ -312,7 +316,7 @@ describe("router schema migration 4 to 5", () => {
   it("adds a nullable out-of-service column and leaves every existing lane exactly as it was", () => {
     const database = openRouterDatabase(writeVersion4Database());
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(7);
+      expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
       const columns = database.pragma("table_info(lane)") as Array<{ name: string; notnull: number }>;
       expect(columns.find((column) => column.name === "archived_at")).toMatchObject({ notnull: 0 });
 
@@ -378,13 +382,32 @@ function writeVersion5Database(options: { populated: boolean }): string {
 }
 
 describe("router schema migration 5 to 6", () => {
+  it("commits the fixed version 6 binding table before a later step fails", () => {
+    const path = writeVersion5Database({ populated: true });
+    const database = new Database(path);
+    database.pragma("foreign_keys = ON");
+    const exec = database.exec.bind(database);
+    vi.spyOn(database, "exec").mockImplementation((sql) => {
+      if (sql.includes("'dsh'")) throw new Error("injected failure after version 6");
+      return exec(sql);
+    });
+    try {
+      expect(() => initializeRouterSchema(database)).toThrow(/injected failure after version 6/);
+      expect(database.pragma("user_version", { simple: true })).toBe(6);
+      const bindingSql = (database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='binding'").get() as { sql: string }).sql;
+      expect(bindingSql).toContain("backend IN ('claude','codex')");
+      expect(bindingSql).not.toContain("'dsh'");
+      expect(database.prepare("SELECT generation FROM binding WHERE id='binding-1'").get()).toEqual({ generation: 1 });
+    } finally { database.close(); }
+  });
+
   // Every row in every rebuilt table, because a rebuild is the one migration shape that can lose
   // them silently: nothing downstream reads a count, so a dropped row would first be noticed as a
   // lane whose history had simply gone.
   it("rebuilds all three tables without losing a row", () => {
     const database = openRouterDatabase(writeVersion5Database({ populated: true }));
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(7);
+      expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
       expect(database.prepare("SELECT COUNT(*) AS n FROM lane").get()).toEqual({ n: 3 });
       expect(database.prepare("SELECT COUNT(*) AS n FROM binding").get()).toEqual({ n: 1 });
       expect(database.prepare("SELECT COUNT(*) AS n FROM message").get()).toEqual({ n: 3 });
@@ -449,7 +472,7 @@ describe("router schema migration 5 to 6", () => {
   it("migrates an empty version 5 database too", () => {
     const database = openRouterDatabase(writeVersion5Database({ populated: false }));
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(7);
+      expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
       expect(database.prepare("SELECT COUNT(*) AS n FROM lane").get()).toEqual({ n: 0 });
       expect((database.pragma("table_info(lane)") as Array<{ name: string }>).map((column) => column.name)).toContain("id");
     } finally { database.close(); }
@@ -458,7 +481,7 @@ describe("router schema migration 5 to 6", () => {
   it("walks a version 1 database all the way to the current shape", () => {
     const database = openRouterDatabase(writeVersion1Database());
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(7);
+      expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
       expect(database.prepare("SELECT COUNT(*) AS n FROM message").get()).toEqual({ n: 3 });
       expect(database.prepare("SELECT notification_state FROM message WHERE id='m-notified'").get())
         .toEqual({ notification_state: "sent" });
@@ -466,64 +489,37 @@ describe("router schema migration 5 to 6", () => {
   });
 });
 
-// The version 6 shape, pinned. Version 6 rebuilt every table, so it cannot be derived from the
-// version 5 copy above by appending statements — and it must not be imported from schema.ts,
-// which now describes version 7.
-const SCHEMA_V6_SQL = `
-CREATE TABLE lane (
-  id TEXT PRIMARY KEY, address TEXT NOT NULL, project TEXT NOT NULL,
-  role_description TEXT NOT NULL CHECK (length(trim(role_description)) > 0),
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, model TEXT, archived_at INTEGER
-);
-CREATE UNIQUE INDEX lane_live_address_idx ON lane(address) WHERE archived_at IS NULL;
-CREATE INDEX lane_project_address_idx ON lane(project,address);
-CREATE TABLE binding (
-  id TEXT PRIMARY KEY, lane_id TEXT NOT NULL REFERENCES lane(id) ON DELETE RESTRICT,
-  backend TEXT NOT NULL CHECK (backend IN ('claude','codex')), conversation_id TEXT NOT NULL,
-  generation INTEGER NOT NULL CHECK (generation > 0), startup_json TEXT NOT NULL,
-  active_at INTEGER NOT NULL, inactive_at INTEGER, cwd TEXT
-);
-CREATE UNIQUE INDEX binding_active_lane_idx ON binding(lane_id) WHERE inactive_at IS NULL;
-CREATE UNIQUE INDEX binding_active_conversation_idx ON binding(backend,conversation_id) WHERE inactive_at IS NULL;
-CREATE UNIQUE INDEX binding_lane_generation_idx ON binding(lane_id,generation);
-CREATE TABLE message (
-  id TEXT PRIMARY KEY, request_key TEXT NOT NULL UNIQUE,
-  sender_lane_id TEXT NOT NULL REFERENCES lane(id) ON DELETE RESTRICT,
-  target_lane_id TEXT NOT NULL REFERENCES lane(id) ON DELETE RESTRICT,
-  kind TEXT NOT NULL CHECK (kind IN ('normal','correction')), reply_to TEXT,
-  relative_path TEXT NOT NULL UNIQUE, content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
-  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','resolved')),
-  created_at INTEGER NOT NULL, resolved_at INTEGER,
-  ack_lane_id TEXT REFERENCES lane(id) ON DELETE RESTRICT, ack_generation INTEGER,
-  notification_state TEXT NOT NULL DEFAULT 'pending'
-    CHECK (notification_state IN ('pending','sent','deferred','no_channel','send_failed')),
-  CHECK (
-    (state='pending' AND resolved_at IS NULL AND ack_lane_id IS NULL AND ack_generation IS NULL) OR
-    (state='resolved' AND resolved_at IS NOT NULL AND ack_lane_id IS NOT NULL AND ack_generation > 0)
-  )
-);
-CREATE INDEX message_target_state_idx ON message(target_lane_id,state,created_at,id);
-CREATE TABLE message_archive (
-  id TEXT PRIMARY KEY, request_key TEXT NOT NULL, sender_lane_id TEXT NOT NULL, target_lane_id TEXT NOT NULL,
-  kind TEXT NOT NULL, reply_to TEXT, relative_path TEXT NOT NULL, content_sha256 TEXT NOT NULL,
-  state TEXT NOT NULL, created_at INTEGER NOT NULL, resolved_at INTEGER, ack_lane_id TEXT,
-  ack_generation INTEGER, notification_state TEXT NOT NULL, archived_at INTEGER NOT NULL
-);
-`;
+const SENDER_CHECK = "CHECK ((sender_lane_id IS NULL) <> (sender_label IS NULL))";
 
-/** Live mail in both states and one archived message, because version 7 rebuilds both tables. */
-function writeVersion6Database(options: { populated: boolean }): string {
+function tableSql(database: Database.Database, table: string): string {
+  return (database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as { sql: string }).sql;
+}
+
+function rowCounts(database: Database.Database): Record<string, number> {
+  return Object.fromEntries(["lane", "binding", "message", "message_archive"].map((table) =>
+    [table, (database.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n]));
+}
+
+/**
+ * A database in one of the shapes it can be in from version 6 on, with something in every table:
+ * every step from here rebuilds a table, and an empty fixture would let "rebuild and lose the rows"
+ * pass. Mail in both states, an archived message, and — where the shape has the column — mail sent
+ * from outside every lane, so a step that wrongly runs again would have a labelled row to break on.
+ */
+function writeStartingShape(shape: (typeof STARTING_SHAPES)[StartingShape]): string {
   const root = mkdtempSync(join(tmpdir(), "lane-router-migration-"));
   roots.push(root);
   const path = join(root, "router.sqlite");
   const database = new Database(path);
-  database.exec(SCHEMA_V6_SQL);
-  database.pragma("user_version = 6");
-  if (!options.populated) { database.close(); return path; }
+  database.exec(schemaSql(shape));
+  database.pragma(`user_version = ${shape.version}`);
   const lane = database.prepare("INSERT INTO lane(id,address,project,role_description,created_at,updated_at,archived_at) VALUES(?,?,?,?,1,1,?)");
   lane.run("lane-a", "alpha/a", "alpha", "a", null);
   lane.run("lane-b", "alpha/b", "alpha", "b", null);
   lane.run("lane-gone", "alpha/gone", "alpha", "gone", 900);
+  const binding = database.prepare("INSERT INTO binding(id,lane_id,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd) VALUES(?,?,?,?,?,'{}',?,?,?)");
+  binding.run("binding-1", "lane-a", "claude", "session-a", 7, 2, null, "E:\\alpha");
+  if (shape.bindingBackends !== BINDING_BACKENDS.v6) binding.run("binding-2", "lane-b", "dsh", "host-session", 3, 4, 5, null);
   const message = database.prepare(`
     INSERT INTO message(id,request_key,sender_lane_id,target_lane_id,kind,reply_to,relative_path,
       content_sha256,state,created_at,resolved_at,ack_lane_id,ack_generation,notification_state)
@@ -536,29 +532,96 @@ function writeVersion6Database(options: { populated: boolean }): string {
       content_sha256,state,created_at,resolved_at,ack_lane_id,ack_generation,notification_state,archived_at)
     VALUES('m-archived','req-3','lane-a','lane-gone','normal',NULL,'archive/lane-gone/3.md',?,'resolved',5,6,'lane-gone',1,'sent',900)
   `).run(SHA);
+  if (shape.senderLabel) {
+    database.prepare(`
+      INSERT INTO message(id,request_key,sender_lane_id,sender_label,target_lane_id,kind,reply_to,relative_path,
+        content_sha256,state,created_at,resolved_at,ack_lane_id,ack_generation,notification_state)
+      VALUES('m-told','tell:m-told',NULL,'user:vikunja','lane-a','normal',NULL,'p/told.md',?,'pending',13,NULL,NULL,NULL,'sent')
+    `).run(SHA);
+    database.prepare(`
+      INSERT INTO message_archive(id,request_key,sender_lane_id,sender_label,target_lane_id,kind,reply_to,relative_path,
+        content_sha256,state,created_at,resolved_at,ack_lane_id,ack_generation,notification_state,archived_at)
+      VALUES('a-told','tell:a-told',NULL,'user:vikunja','lane-gone','normal',NULL,'archive/lane-gone/told.md',?,'resolved',7,8,'lane-gone',1,'sent',900)
+    `).run(SHA);
+  }
   database.close();
   return path;
 }
 
-describe("router schema migration 6 to 7", () => {
-  // A rebuild is the migration shape that can lose rows without saying so, and it rebuilds two
-  // tables here. Every existing message was sent by a lane, so every one must arrive naming that
-  // lane and with no label — a label on an old row would claim a user sent something a lane did.
-  it("keeps every live and archived message, each still naming the lane that sent it", () => {
-    const database = openRouterDatabase(writeVersion6Database({ populated: true }));
+describe("router schema from version 6 on", () => {
+  // The five shapes a database can be in from version 6 on. Two of them are stamped 7 and mean
+  // different things, which is why the steps are decided by shape: decided by number, the tell
+  // database would be read as "DSH done", skip the binding rebuild, and then add a column it has.
+  for (const [name, shape] of Object.entries(STARTING_SHAPES)) {
+    it(`brings a ${name} database to the current shape without losing or changing a row`, () => {
+      const path = writeStartingShape(shape);
+      const raw = new Database(path, { readonly: true });
+      const before = rowCounts(raw);
+      raw.close();
+
+      const database = openRouterDatabase(path);
+      try {
+        expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
+        expect(tableSql(database, "binding")).toContain("backend IN ('claude','codex','dsh','zcode')");
+        for (const table of ["message", "message_archive"]) {
+          expect((database.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name), table).toContain("sender_label");
+          expect(tableSql(database, table), table).toContain(SENDER_CHECK);
+        }
+        expect(rowCounts(database)).toEqual(before);
+
+        // Present is not enough: a rebuild that copied the wrong column would keep every count.
+        expect(database.prepare("SELECT id,backend,generation,cwd FROM binding ORDER BY id").all()).toEqual([
+          { id: "binding-1", backend: "claude", generation: 7, cwd: "E:\\alpha" },
+          ...(shape.bindingBackends === BINDING_BACKENDS.v6 ? [] : [{ id: "binding-2", backend: "dsh", generation: 3, cwd: null }]),
+        ]);
+        expect(database.prepare("SELECT id,sender_lane_id,sender_label FROM message ORDER BY id").all()).toEqual([
+          { id: "m-pending", sender_lane_id: "lane-a", sender_label: null },
+          { id: "m-resolved", sender_lane_id: "lane-b", sender_label: null },
+          ...(shape.senderLabel ? [{ id: "m-told", sender_lane_id: null, sender_label: "user:vikunja" }] : []),
+        ]);
+        expect(database.prepare("SELECT id,sender_lane_id,sender_label FROM message_archive ORDER BY id").all()).toEqual([
+          ...(shape.senderLabel ? [{ id: "a-told", sender_lane_id: null, sender_label: "user:vikunja" }] : []),
+          { id: "m-archived", sender_lane_id: "lane-a", sender_label: null },
+        ]);
+        expect(database.prepare("SELECT reply_to,state,ack_lane_id,ack_generation FROM message WHERE id='m-resolved'").get())
+          .toEqual({ reply_to: "m-pending", state: "resolved", ack_lane_id: "lane-a", ack_generation: 1 });
+        expect(database.pragma("foreign_key_check")).toEqual([]);
+        expect(database.pragma("foreign_keys", { simple: true })).toBe(1);
+        for (const leftover of ["binding_legacy", "message_legacy", "message_archive_legacy"]) {
+          expect(database.prepare("SELECT name FROM sqlite_master WHERE name=?").get(leftover), leftover).toBeUndefined();
+        }
+      } finally { database.close(); }
+    });
+  }
+
+  it("leaves a version 9 database exactly as it was", () => {
+    const path = writeStartingShape(STARTING_SHAPES.v9);
+    const schemaOf = (database: Database.Database) => database.prepare("SELECT type,name,sql FROM sqlite_master ORDER BY name").all();
+    const raw = new Database(path, { readonly: true });
+    const before = schemaOf(raw);
+    raw.close();
+    const database = openRouterDatabase(path);
+    try { expect(schemaOf(database)).toEqual(before); } finally { database.close(); }
+  });
+
+  // One transaction for every step: a failure in the last one must take the first one back too,
+  // or the next start would find a database whose number says 6 and whose binding table says 8.
+  it("rolls the binding step back when the message step fails", () => {
+    const path = writeStartingShape(STARTING_SHAPES.v6);
+    const database = new Database(path);
+    database.pragma("foreign_keys = ON");
+    const exec = database.exec.bind(database);
+    vi.spyOn(database, "exec").mockImplementation((sql) => {
+      if (sql.includes("RENAME TO message_legacy")) throw new Error("injected message step failure");
+      return exec(sql);
+    });
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(7);
-      expect(database.prepare("SELECT id,sender_lane_id,sender_label FROM message ORDER BY id").all()).toEqual([
-        { id: "m-pending", sender_lane_id: "lane-a", sender_label: null },
-        { id: "m-resolved", sender_lane_id: "lane-b", sender_label: null },
-      ]);
-      expect(database.prepare("SELECT id,sender_lane_id,sender_label,archived_at FROM message_archive").all()).toEqual([
-        { id: "m-archived", sender_lane_id: "lane-a", sender_label: null, archived_at: 900 },
-      ]);
-      // The columns that were not changed come through untouched, not merely present.
-      expect(database.prepare("SELECT reply_to,state,ack_lane_id,ack_generation FROM message WHERE id='m-resolved'").get())
-        .toEqual({ reply_to: "m-pending", state: "resolved", ack_lane_id: "lane-a", ack_generation: 1 });
-      expect(database.pragma("foreign_key_check")).toEqual([]);
+      expect(() => initializeRouterSchema(database)).toThrow(/injected message step failure/);
+      expect(database.pragma("user_version", { simple: true })).toBe(6);
+      expect(tableSql(database, "binding")).toContain(`backend IN ${BINDING_BACKENDS.v6}`);
+      expect((database.pragma("table_info(message)") as Array<{ name: string }>).map((column) => column.name)).not.toContain("sender_label");
+      expect(rowCounts(database)).toEqual({ lane: 3, binding: 1, message: 2, message_archive: 1 });
+      expect(database.prepare("SELECT name FROM sqlite_master WHERE name='binding_legacy'").get()).toBeUndefined();
       expect(database.pragma("foreign_keys", { simple: true })).toBe(1);
     } finally { database.close(); }
   });
@@ -567,7 +630,7 @@ describe("router schema migration 6 to 7", () => {
   // blurring: neither column alone says who sent a message, only the pair does. Both tables carry
   // it, because archiving copies a row from one to the other.
   it("allows exactly one kind of sender on a message, in both tables", () => {
-    const database = openRouterDatabase(writeVersion6Database({ populated: true }));
+    const database = openRouterDatabase(writeStartingShape(STARTING_SHAPES.v6));
     try {
       const live = database.prepare(`
         INSERT INTO message(id,request_key,sender_lane_id,sender_label,target_lane_id,kind,reply_to,relative_path,
@@ -591,12 +654,20 @@ describe("router schema migration 6 to 7", () => {
   });
 
   it("migrates an empty version 6 database too", () => {
-    const database = openRouterDatabase(writeVersion6Database({ populated: false }));
+    const root = mkdtempSync(join(tmpdir(), "lane-router-migration-"));
+    roots.push(root);
+    const path = join(root, "router.sqlite");
+    const raw = new Database(path);
+    raw.exec(SCHEMA_V6_SQL);
+    raw.pragma("user_version = 6");
+    raw.close();
+    const database = openRouterDatabase(path);
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(7);
+      expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
       const columns = (database.pragma("table_info(message)") as Array<{ name: string; notnull: number }>);
       expect(columns.find((column) => column.name === "sender_label")).toMatchObject({ notnull: 0 });
       expect(columns.find((column) => column.name === "sender_lane_id")).toMatchObject({ notnull: 0 });
+      expect(tableSql(database, "binding")).toContain("'zcode'");
     } finally { database.close(); }
   });
 });

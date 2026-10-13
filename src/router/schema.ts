@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type Database from "better-sqlite3";
 
-export const ROUTER_SCHEMA_VERSION = 7;
+export const ROUTER_SCHEMA_VERSION = 9;
 
 /**
  * The version 2 message table, kept verbatim because the version 1 migration has to build exactly
@@ -106,7 +106,7 @@ CREATE INDEX message_target_state_idx ON message(target_lane_id,state,created_at
 `;
 
 /**
- * Version 7: a message is sent either by a lane or from outside every lane, and the sender columns
+ * Version 9: a message is sent either by a lane or from outside every lane, and the sender columns
  * say which. `sender_lane_id` stays a foreign key for lane-sent mail; `sender_label` carries
  * `user:<origin>` for mail a local program delivered on the user's behalf. There is no lane row
  * behind such a sender, deliberately — inventing one would make it read like a lane, and an
@@ -115,7 +115,7 @@ CREATE INDEX message_target_state_idx ON message(target_lane_id,state,created_at
  * The CHECK is what keeps the two from blurring: neither column alone says who sent a message,
  * only the pair does, so exactly one of them is set on every row.
  */
-const MESSAGE_TABLE_V7_SQL = `
+const MESSAGE_TABLE_V9_SQL = `
 CREATE TABLE message (
   id TEXT PRIMARY KEY,
   request_key TEXT NOT NULL UNIQUE,
@@ -141,8 +141,8 @@ CREATE TABLE message (
 );
 `;
 
-/** The version 7 archive: the same sender pair as the live table, because archiving copies rows. */
-const MESSAGE_ARCHIVE_TABLE_V7_SQL = `
+/** The version 9 archive: the same sender pair as the live table, because archiving copies rows. */
+const MESSAGE_ARCHIVE_TABLE_V9_SQL = `
 CREATE TABLE message_archive (
   id TEXT PRIMARY KEY,
   request_key TEXT NOT NULL,
@@ -164,8 +164,48 @@ CREATE TABLE message_archive (
 );
 `;
 
-/** Lanes and bindings, which versions 6 and 7 share; only the message tables differ between them. */
-const LANE_AND_BINDING_SQL = `
+const BINDING_TABLE_V6_SQL = `
+CREATE TABLE binding (
+  id TEXT PRIMARY KEY,
+  lane_id TEXT NOT NULL REFERENCES lane(id) ON DELETE RESTRICT,
+  backend TEXT NOT NULL CHECK (backend IN ('claude','codex')),
+  conversation_id TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK (generation > 0),
+  startup_json TEXT NOT NULL,
+  active_at INTEGER NOT NULL,
+  inactive_at INTEGER,
+  cwd TEXT
+);
+CREATE UNIQUE INDEX binding_active_lane_idx
+  ON binding(lane_id) WHERE inactive_at IS NULL;
+CREATE UNIQUE INDEX binding_active_conversation_idx
+  ON binding(backend,conversation_id) WHERE inactive_at IS NULL;
+CREATE UNIQUE INDEX binding_lane_generation_idx
+  ON binding(lane_id,generation);
+`;
+
+/** The binding table versions 7 and 8 end in: version 7 added `dsh`, version 8 `zcode`. */
+const BINDING_TABLE_V8_SQL = `
+CREATE TABLE binding (
+  id TEXT PRIMARY KEY,
+  lane_id TEXT NOT NULL REFERENCES lane(id) ON DELETE RESTRICT,
+  backend TEXT NOT NULL CHECK (backend IN ('claude','codex','dsh','zcode')),
+  conversation_id TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK (generation > 0),
+  startup_json TEXT NOT NULL,
+  active_at INTEGER NOT NULL,
+  inactive_at INTEGER,
+  cwd TEXT
+);
+CREATE UNIQUE INDEX binding_active_lane_idx
+  ON binding(lane_id) WHERE inactive_at IS NULL;
+CREATE UNIQUE INDEX binding_active_conversation_idx
+  ON binding(backend,conversation_id) WHERE inactive_at IS NULL;
+CREATE UNIQUE INDEX binding_lane_generation_idx
+  ON binding(lane_id,generation);
+`;
+
+const ROUTER_SCHEMA_PREFIX = `
 CREATE TABLE lane (
   id TEXT PRIMARY KEY,
   address TEXT NOT NULL,
@@ -183,106 +223,153 @@ CREATE TABLE lane (
 -- since version 1.
 CREATE UNIQUE INDEX lane_live_address_idx ON lane(address) WHERE archived_at IS NULL;
 CREATE INDEX lane_project_address_idx ON lane(project,address);
-
-CREATE TABLE binding (
-  id TEXT PRIMARY KEY,
-  lane_id TEXT NOT NULL REFERENCES lane(id) ON DELETE RESTRICT,
-  backend TEXT NOT NULL CHECK (backend IN ('claude','codex')),
-  conversation_id TEXT NOT NULL,
-  generation INTEGER NOT NULL CHECK (generation > 0),
-  startup_json TEXT NOT NULL,
-  active_at INTEGER NOT NULL,
-  inactive_at INTEGER,
-  cwd TEXT
-);
-
-CREATE UNIQUE INDEX binding_active_lane_idx
-  ON binding(lane_id) WHERE inactive_at IS NULL;
-CREATE UNIQUE INDEX binding_active_conversation_idx
-  ON binding(backend,conversation_id) WHERE inactive_at IS NULL;
-CREATE UNIQUE INDEX binding_lane_generation_idx
-  ON binding(lane_id,generation);
 `;
 
 /**
  * Exactly the version 6 shape, for the version 5 migration. It used to build "whatever the current
  * schema is", which was right only while the current schema was version 6; from version 7 on it
- * would have built version 7 tables and stamped them version 6.
+ * would have built later tables and stamped them version 6.
  */
-const ROUTER_SCHEMA_V6_SQL = `${LANE_AND_BINDING_SQL}${MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V6_SQL}`;
+const ROUTER_SCHEMA_V6_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V6_SQL}${MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V6_SQL}`;
 
-export const ROUTER_SCHEMA_SQL = `${LANE_AND_BINDING_SQL}${MESSAGE_TABLE_V7_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V7_SQL}`;
+/** Schema for newly created databases at the current version. */
+export const ROUTER_SCHEMA_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V8_SQL}${MESSAGE_TABLE_V9_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V9_SQL}`;
 
 export function initializeRouterSchema(database: Database.Database): void {
   let version = database.pragma("user_version", { simple: true }) as number;
-  if (version === ROUTER_SCHEMA_VERSION) return;
+  if (version === ROUTER_SCHEMA_VERSION) {
+    assertForeignKeys(database);
+    return;
+  }
   if (version === 0) {
     database.transaction(() => {
       database.exec(ROUTER_SCHEMA_SQL);
       database.pragma(`user_version = ${ROUTER_SCHEMA_VERSION}`);
     })();
+    assertForeignKeys(database);
     return;
   }
-  // Migrations chain: each one lifts the database exactly one version, so an old database walks
-  // through every intermediate shape instead of every migration knowing every starting point.
+  // Up to version 6 migrations chain: each one lifts the database exactly one version, so an old
+  // database walks through every intermediate shape instead of every migration knowing every
+  // starting point. Past version 6 the number stops saying what is done; see completeFromVersion6.
   if (version === 1) { migrateNotificationStateVocabulary(database); version = 2; }
   if (version === 2) { addBindingCwdColumn(database); version = 3; }
   if (version === 3) { addLaneModelColumn(database); version = 4; }
   if (version === 4) { addLaneRetiredAtColumn(database); version = 5; }
   if (version === 5) { rebuildWithLaneIdentity(database); version = 6; }
-  if (version === 6) { addMessageSenderLabel(database); version = 7; }
+  if (version >= 6 && version < ROUTER_SCHEMA_VERSION) { completeFromVersion6(database); version = ROUTER_SCHEMA_VERSION; }
   if (version !== ROUTER_SCHEMA_VERSION) throw new Error(`Router database version ${version} is not supported`);
+  assertForeignKeys(database);
+}
+
+function assertForeignKeys(database: Database.Database): void {
+  if ((database.pragma("foreign_key_check") as unknown[]).length > 0) {
+    throw new Error("Router database migration left dangling references; the database was not changed safely");
+  }
 }
 
 /**
- * Version 7 lets a message be sent from outside every lane. SQLite can neither drop a NOT NULL nor
- * add a CHECK to an existing table, so both message tables are rebuilt; lanes and bindings are
- * untouched. Every existing row was sent by a lane, so each arrives with its lane id and no label.
+ * Versions 7 to 9 were numbered on two machines at once, so from version 6 on the number does not
+ * say what a database already has. One line of work used 7 and 8 for two new binding backends;
+ * the other used 7 for the message sender label, which is version 9 now. A version 7 database is
+ * therefore either one. Each step is decided by the shape it produces, and the number is written
+ * once, when every step is in place.
+ *
+ * One transaction for all of it: a failure anywhere leaves the database exactly as it was opened,
+ * so the next start decides again from the same shape.
  *
  * 流程：
  *   1. 关外键（重建期间新表的引用对着改了名的旧表），并在事务外切换
- *   2. 两张消息表改名让出位置，索引一并让出
- *   3. 建 version 7 的两张消息表与索引
- *   4. 逐表拷数据，sender_label 一律为空 —— 关联不涉及，但仍逐表核对行数
- *   5. 删旧表、置 user_version = 7
- *   6. 复查外键完整性后恢复外键开关
+ *   2. binding 的 CHECK 不含 'zcode' 就按 version 8 的表重建，'dsh' 随之补上
+ *   3. message 没有 sender_label 列就重建两张消息表
+ *   4. 置 user_version = 9 并复查外键完整性 —— 与 2、3 同一个事务，任何一步失败整体回滚
+ *   5. 恢复外键开关
  */
-function addMessageSenderLabel(database: Database.Database): void {
+function completeFromVersion6(database: Database.Database): void {
   const foreignKeysWereOn = database.pragma("foreign_keys", { simple: true }) === 1;
   database.pragma("foreign_keys = OFF");
   try {
     database.transaction(() => {
-      const before = { message: count(database, "message"), message_archive: count(database, "message_archive") };
-      database.exec("ALTER TABLE message RENAME TO message_legacy;");
-      database.exec("ALTER TABLE message_archive RENAME TO message_archive_legacy;");
-      database.exec("DROP INDEX IF EXISTS message_target_state_idx;");
-      database.exec(MESSAGE_TABLE_V7_SQL);
-      database.exec(MESSAGE_INDEX_V6_SQL);
-      database.exec(MESSAGE_ARCHIVE_TABLE_V7_SQL);
-
-      const live = `id,request_key,sender_lane_id,target_lane_id,kind,reply_to,relative_path,
-        content_sha256,state,created_at,resolved_at,ack_lane_id,ack_generation,notification_state`;
-      database.exec(`INSERT INTO message(${live},sender_label) SELECT ${live},NULL FROM message_legacy;`);
-      database.exec(`INSERT INTO message_archive(${live},archived_at,sender_label) SELECT ${live},archived_at,NULL FROM message_archive_legacy;`);
-
-      const after = { message: count(database, "message"), message_archive: count(database, "message_archive") };
-      for (const table of ["message", "message_archive"] as const) {
-        if (after[table] !== before[table]) {
-          throw new Error(`Router database migration lost rows in ${table}: ${before[table]} before, ${after[table]} after`);
-        }
-      }
-
-      database.exec("DROP TABLE message_legacy;");
-      database.exec("DROP TABLE message_archive_legacy;");
-      database.pragma("user_version = 7");
+      if (!bindingAllowsZcode(database)) rebuildBindingWithEveryBackend(database);
+      if (!messageHasSenderLabel(database)) addMessageSenderLabel(database);
+      database.pragma(`user_version = ${ROUTER_SCHEMA_VERSION}`);
+      assertForeignKeys(database);
     })();
-    const violations = database.pragma("foreign_key_check") as unknown[];
-    if (violations.length > 0) {
-      throw new Error("Router database migration left dangling references; the database was not changed safely");
-    }
   } finally {
     if (foreignKeysWereOn) database.pragma("foreign_keys = ON");
   }
+}
+
+function bindingAllowsZcode(database: Database.Database): boolean {
+  const table = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='binding'").get() as { sql: string } | undefined;
+  return table?.sql.includes("'zcode'") ?? false;
+}
+
+function messageHasSenderLabel(database: Database.Database): boolean {
+  return (database.pragma("table_info(message)") as Array<{ name: string }>).some((column) => column.name === "sender_label");
+}
+
+/**
+ * Versions 7 and 8 widen the binding backend vocabulary, first with `dsh` and then with `zcode`.
+ * ZCode sessions ride the Claude channel, but a binding stored under "zcode" keeps the two
+ * conversations distinguishable everywhere a (backend, conversation) pair is the key. SQLite cannot
+ * alter a CHECK, so the table is rebuilt, straight to the version 8 shape whichever of the two
+ * names is missing; no generation changes. The rows are counted rather than trusted, because a
+ * copy that drops rows silently is the one failure nothing downstream could detect.
+ *
+ * Runs inside the caller's transaction, with foreign keys already off.
+ */
+function rebuildBindingWithEveryBackend(database: Database.Database): void {
+  const before = count(database, "binding");
+  database.exec("ALTER TABLE binding RENAME TO binding_legacy;");
+  for (const index of ["binding_active_lane_idx", "binding_active_conversation_idx", "binding_lane_generation_idx"]) {
+    database.exec(`DROP INDEX IF EXISTS ${index};`);
+  }
+  database.exec(BINDING_TABLE_V8_SQL);
+  database.exec(`
+    INSERT INTO binding(id,lane_id,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd)
+    SELECT id,lane_id,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd FROM binding_legacy;
+  `);
+  if (count(database, "binding") !== before) throw new Error("Router database migration lost binding rows");
+  database.exec("DROP TABLE binding_legacy;");
+}
+
+/**
+ * Version 9 lets a message be sent from outside every lane. SQLite can neither drop a NOT NULL nor
+ * add a CHECK to an existing table, so both message tables are rebuilt; lanes and bindings are
+ * untouched. Every existing row was sent by a lane, so each arrives with its lane id and no label.
+ *
+ * Runs inside the caller's transaction, with foreign keys already off.
+ *
+ * 流程：
+ *   1. 两张消息表改名让出位置，索引一并让出
+ *   2. 建 version 9 的两张消息表与索引
+ *   3. 逐表拷数据，sender_label 一律为空 —— 关联不涉及，但仍逐表核对行数
+ *   4. 删旧表
+ */
+function addMessageSenderLabel(database: Database.Database): void {
+  const before = { message: count(database, "message"), message_archive: count(database, "message_archive") };
+  database.exec("ALTER TABLE message RENAME TO message_legacy;");
+  database.exec("ALTER TABLE message_archive RENAME TO message_archive_legacy;");
+  database.exec("DROP INDEX IF EXISTS message_target_state_idx;");
+  database.exec(MESSAGE_TABLE_V9_SQL);
+  database.exec(MESSAGE_INDEX_V6_SQL);
+  database.exec(MESSAGE_ARCHIVE_TABLE_V9_SQL);
+
+  const live = `id,request_key,sender_lane_id,target_lane_id,kind,reply_to,relative_path,
+    content_sha256,state,created_at,resolved_at,ack_lane_id,ack_generation,notification_state`;
+  database.exec(`INSERT INTO message(${live},sender_label) SELECT ${live},NULL FROM message_legacy;`);
+  database.exec(`INSERT INTO message_archive(${live},archived_at,sender_label) SELECT ${live},archived_at,NULL FROM message_archive_legacy;`);
+
+  const after = { message: count(database, "message"), message_archive: count(database, "message_archive") };
+  for (const table of ["message", "message_archive"] as const) {
+    if (after[table] !== before[table]) {
+      throw new Error(`Router database migration lost rows in ${table}: ${before[table]} before, ${after[table]} after`);
+    }
+  }
+
+  database.exec("DROP TABLE message_legacy;");
+  database.exec("DROP TABLE message_archive_legacy;");
 }
 
 /**

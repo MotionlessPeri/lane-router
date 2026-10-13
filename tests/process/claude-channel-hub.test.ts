@@ -2,7 +2,7 @@ import type { WebSocket } from "ws";
 import { expect, test, vi } from "vitest";
 
 import { ClaudeBackend } from "../../src/backends/claude-backend.js";
-import { ClaudeChannelHub } from "../../src/process/local-server.js";
+import { ClaudeChannelHub, type JoinEvent } from "../../src/process/local-server.js";
 import type { BindingRecord } from "../../src/router/types.js";
 
 function binding(conversationId: string): BindingRecord {
@@ -40,6 +40,12 @@ const notification = {
 function clock(start = 1_000) {
   let value = start;
   return { now: () => value, advance(by: number) { value += by; return value; } };
+}
+
+/** Stands in for the stderr line the Router itself would write, so a pairing is asserted by sequence. */
+function joinRecorder(): { events: JoinEvent[]; sink: (event: JoinEvent) => void } {
+  const events: JoinEvent[] = [];
+  return { events, sink: (event) => { events.push(event); } };
 }
 
 test("a Stop reaches attention handlers for a lane attached after the channel connected", () => {
@@ -320,4 +326,115 @@ test("an already-abandoned caller never joins the queue at all", async () => {
   hub.reportLifecycle("busy-conv", "UserPromptSubmit");
   await expect(hub.waitUntilReplaceable(binding("busy-conv"), AbortSignal.abort(new Error("gone"))))
     .rejects.toThrow(/gone/u);
+});
+
+// The join record is what turns "first turn attach failed, next turn worked" from an anecdote
+// into a timeline: each test below asserts the exact sequence a post-mortem would read back.
+test("a held report paired with a later channel is recorded from both sides", () => {
+  const time = clock();
+  const { events, sink } = joinRecorder();
+  const hub = new ClaudeChannelHub(() => undefined, time.now, sink);
+
+  expect(hub.reportLifecycle("conversation-id", "UserPromptSubmit", "session-key")).toBe(false);
+  time.advance(3_000);
+  hub.connect("mcp-server-id", sendableSocket(), "session-key");
+
+  // reportAt and at are the two halves; deltaMs is their gap, already computed.
+  expect(events).toEqual([
+    { event: "join.lifecycle_received", joinKey: "session-key", conversationId: "conversation-id", lifecycle: "UserPromptSubmit", at: 1_000, outcome: "held" },
+    { event: "join.channel_connected", joinKey: "session-key", conversationId: "mcp-server-id", at: 4_000, outcome: "placed", reportConversationId: "conversation-id", reportAt: 1_000, deltaMs: 3_000 },
+  ]);
+});
+
+test("a held report dropped at the window is recorded as expired", () => {
+  const time = clock();
+  const { events, sink } = joinRecorder();
+  const hub = new ClaudeChannelHub(() => undefined, time.now, sink);
+
+  hub.reportLifecycle("conversation-id", "UserPromptSubmit", "session-key");
+  time.advance(31_000);
+  hub.connect("mcp-server-id", sendableSocket(), "session-key");
+
+  expect(events).toEqual([
+    { event: "join.lifecycle_received", joinKey: "session-key", conversationId: "conversation-id", lifecycle: "UserPromptSubmit", at: 1_000, outcome: "held" },
+    { event: "join.channel_connected", joinKey: "session-key", conversationId: "mcp-server-id", at: 32_000, outcome: "expired", reportConversationId: "conversation-id", reportAt: 1_000, deltaMs: 31_000 },
+    { event: "join.unplaced_expired", joinKey: "session-key", conversationId: "conversation-id", at: 32_000, reportAt: 1_000, deltaMs: 31_000 },
+  ]);
+});
+
+test("a report that adopts a connected channel is recorded with the gap since connect", () => {
+  const time = clock();
+  const { events, sink } = joinRecorder();
+  const hub = new ClaudeChannelHub(() => undefined, time.now, sink);
+
+  hub.connect("mcp-server-id", sendableSocket(), "session-key");
+  time.advance(100);
+  expect(hub.reportLifecycle("conversation-id", "Stop", "session-key")).toBe(true);
+
+  expect(events).toEqual([
+    { event: "join.channel_connected", joinKey: "session-key", conversationId: "mcp-server-id", at: 1_000, outcome: "awaiting_report" },
+    { event: "join.lifecycle_received", joinKey: "session-key", conversationId: "conversation-id", lifecycle: "Stop", at: 1_100, outcome: "adopted", deltaMs: 100 },
+  ]);
+});
+
+test("traffic that carries no join key is not a join and is not recorded", () => {
+  const time = clock();
+  const { events, sink } = joinRecorder();
+  const hub = new ClaudeChannelHub(() => undefined, time.now, sink);
+
+  hub.connect("conv-1", sendableSocket());
+  hub.reportLifecycle("conv-1", "Stop");
+
+  expect(events).toEqual([]);
+});
+
+// The residual the window exists for: the session that claimed an identity died without a channel
+// close ever naming its key (the channel never came, or died before the report did). Nothing but
+// the window can retire that claim, and afterwards a caller presenting the key is taken at its
+// own word again instead of being filed under a dead conversation.
+test("an identity whose channel never came expires with the unplaced-report window", () => {
+  const time = clock();
+  const hub = new ClaudeChannelHub(() => undefined, time.now);
+  hub.reportLifecycle("conversation-id", "UserPromptSubmit", "session-key");
+
+  expect(hub.resolveIdentity({ conversationId: "mcp-server-id", joinKey: "session-key" }))
+    .toEqual({ value: "conversation-id", source: "joined" });
+  // The boundary is the same inclusive one the unplaced report itself lives by: alive at exactly
+  // the window, dead one tick past it.
+  time.advance(30_000);
+  expect(hub.resolveIdentity({ conversationId: "mcp-server-id", joinKey: "session-key" }))
+    .toEqual({ value: "conversation-id", source: "joined" });
+
+  time.advance(1);
+  expect(hub.resolveIdentity({ conversationId: "mcp-server-id", joinKey: "session-key" }))
+    .toEqual({ value: "mcp-server-id", source: "caller" });
+});
+
+// A session mid-turn reports nothing for far longer than the window; its identity is as alive as
+// its conversation's channel, so the backstop must not retire it underneath a live session.
+test("an identity does not expire while its conversation's channel is open", () => {
+  const time = clock();
+  const hub = new ClaudeChannelHub(() => undefined, time.now);
+  hub.connect("mcp-server-id", sendableSocket(), "session-key");
+  hub.reportLifecycle("conversation-id", "Stop", "session-key");
+
+  time.advance(3_600_000);
+  expect(hub.resolveIdentity({ conversationId: "mcp-server-id", joinKey: "session-key" }))
+    .toEqual({ value: "conversation-id", source: "joined" });
+});
+
+// The pid-reuse shape: the key was claimed by a session that died, and a new session's channel
+// now carries the same key. Liveness is anchored to the mapped conversation, not to the key, so
+// the new channel cannot keep the dead identity alive — the new session's first caller resolves
+// to itself rather than inheriting the stranger's conversation.
+test("a reused join key does not inherit the dead session's identity", () => {
+  const time = clock();
+  const hub = new ClaudeChannelHub(() => undefined, time.now);
+  hub.reportLifecycle("old-conversation", "UserPromptSubmit", "session-key");
+
+  time.advance(31_000);
+  hub.connect("new-mcp-server-id", sendableSocket(), "session-key");
+
+  expect(hub.resolveIdentity({ conversationId: "new-mcp-server-id", joinKey: "session-key" }))
+    .toEqual({ value: "new-mcp-server-id", source: "caller" });
 });

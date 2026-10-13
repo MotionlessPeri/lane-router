@@ -4,7 +4,7 @@ import type { MailboxStore } from "./mailbox-store.js";
 import { tellBody, type TellInput, type TellResult, type TellTargetState } from "./tell.js";
 import type { NotificationPump } from "./notification-pump.js";
 import type { RouterStateStore } from "./state-store.js";
-import type { CallerContext, LaneRecord, MessageKind, MessageRecord, ReachSnapshot, ResolvedIdentity } from "./types.js";
+import type { CallerContext, BackendName, LaneRecord, MessageKind, MessageRecord, ReachSnapshot, ResolvedIdentity } from "./types.js";
 import type { BindingRecord } from "./types.js";
 
 export interface LaneRestoreResult {
@@ -43,7 +43,7 @@ export interface DirectoryEntry {
   readonly roleDescription: string;
   /** The model this lane declares, or null when it declares none and the client decides. */
   readonly model: string | null;
-  readonly backend: "claude" | "codex" | null;
+  readonly backend: BackendName | null;
   readonly binding: DirectoryBinding | null;
   readonly reach: ReachSnapshot | null;
 }
@@ -62,7 +62,7 @@ export type ResumeInfo =
   | { readonly state: "archived" }
   | {
       readonly state: "bound";
-      readonly backend: "claude" | "codex";
+      readonly backend: BackendName;
       readonly conversationId: string;
       readonly cwd: string | null;
       readonly generation: number;
@@ -154,7 +154,12 @@ export class RouterCore {
     return await this.dependencies.restore?.resolveCwd?.(binding) ?? null;
   }
 
-  async attachCurrent(context: CallerContext, input: { address: string; roleDescription?: string; model?: string }, signal?: AbortSignal) {
+  async attachCurrent(
+    context: CallerContext,
+    input: { address: string; roleDescription?: string; model?: string },
+    signal?: AbortSignal,
+    options: { rejectTakeover?: boolean } = {},
+  ) {
     const parsed = parseLaneAddress(input.address);
     const state = this.dependencies.state;
     const precondition = this.dependencies.backends.require(context.backend).validateAttach?.(context);
@@ -190,6 +195,9 @@ export class RouterCore {
     }
     const observed = state.activeBindingForLane(parsed.address) ?? null;
     if (observed) {
+      if (options.rejectTakeover) {
+        throw new RouterError("LANE_ALREADY_BOUND", "The lane is actively bound to another conversation");
+      }
       try { await this.dependencies.backends.require(observed.backend).waitUntilReplaceable(observed, signal); }
       catch (error) {
         // Without this the wait was unbounded on one side and bounded on the other: the caller's
@@ -234,6 +242,82 @@ export class RouterCore {
     // otherwise wait for the next incoming message before anything offers it a turn.
     await this.dependencies.pump.notifyLane(parsed.address);
     return this.bootstrap(state.requireLane(parsed.address), binding, identity);
+  }
+
+  /**
+   * Transfer one DSH lane from its current Host Session to an explicitly prepared successor.
+   * The caller must be the current binding owner; an exact replay confirms the binding and
+   * retries pending notifications. The Host obtains Owner consent before invoking this method.
+   * @param context Authenticated old DSH Session identity supplied by the Host header.
+   * @param input Existing binding CAS identity and exact successor Session.
+   * @returns Authoritative binding identity and whether this call committed it.
+   */
+  async handoffDsh(context: CallerContext, input: {
+    address: string; expectedBindingId: string; expectedGeneration: number; successorSessionId: string;
+  }): Promise<{ status: "committed" | "already_committed"; address: string; laneId: string; bindingId: string; generation: number; successorSessionId: string }> {
+    if (context.backend !== "dsh") throw new RouterError("NOT_BINDING_OWNER", "Only a DSH binding owner can hand off a DSH lane");
+    const address = parseLaneAddress(input.address).address;
+    const state = this.dependencies.state;
+    const lane = state.lane(address);
+    const current = lane && state.activeBindingForLane(address);
+    if (!lane || !current) throw new RouterError("LANE_NOT_BOUND", "The lane has no current binding");
+    if (input.successorSessionId === context.conversationId) throw new RouterError("SAME_SESSION", "The successor must be another DSH Session");
+
+    // An uncertain HTTP result is confirmed from binding history, not from a second mutation.
+    // Check the old row's lane id: an archived address can name a different lane later.
+    const old = state.binding(input.expectedBindingId);
+    if (old?.backend === "dsh" && old.conversationId === context.conversationId
+      && old.generation === input.expectedGeneration && old.inactiveAt !== null
+      && state.bindingLaneId(old.id) === lane.id && current.backend === "dsh"
+      && current.conversationId === input.successorSessionId && current.generation === old.generation + 1) {
+      // A lost response can follow a failed notification after the binding has committed.
+      // Repeating the pending index neither changes the binding nor acknowledges mail.
+      try { await this.dependencies.pump.notifyLane(address); }
+      catch { /* the committed binding remains authoritative; the same tuple may retry */ }
+      return { status: "already_committed", address, laneId: lane.id, bindingId: current.id,
+        generation: current.generation, successorSessionId: input.successorSessionId };
+    }
+    if (current.backend !== "dsh" || current.conversationId !== context.conversationId) {
+      // A former owner may retry an exact operation, but may never begin a new one.
+      if (old?.backend === "dsh" && old.conversationId === context.conversationId
+        && state.bindingLaneId(old.id) === lane.id) {
+        throw new RouterError("BINDING_CHANGED", "The expected binding is no longer current");
+      }
+      throw new RouterError("NOT_BINDING_OWNER", "The caller does not own this lane's current DSH binding");
+    }
+    if (current.id !== input.expectedBindingId || current.generation !== input.expectedGeneration) {
+      throw new RouterError("BINDING_CHANGED", "The expected binding is no longer current");
+    }
+    const backend = this.dependencies.backends.require("dsh");
+    const oldReach = backend.reach(current);
+    if (oldReach.state !== "no_channel" && (oldReach.state !== "live" || oldReach.believedBusy !== false)) {
+      throw new RouterError("CURRENT_BUSY", "The current Session needs a confirmed idle channel with no unfinished deliveries");
+    }
+    if (state.activeBindingForConversation("dsh", input.successorSessionId)) {
+      throw new RouterError("SUCCESSOR_ALREADY_BOUND", "The successor Session already owns a lane");
+    }
+    const successorReach = backend.reach({ ...current, conversationId: input.successorSessionId });
+    if (successorReach.state !== "live" || successorReach.believedBusy !== false) {
+      throw new RouterError("SUCCESSOR_NOT_READY", "The successor Session needs a connected idle DSH channel");
+    }
+    let binding: BindingRecord | undefined;
+    try {
+      binding = state.replaceBinding({ expected: current, id: this.dependencies.newId("binding"), laneAddress: address,
+        backend: "dsh", conversationId: input.successorSessionId, generation: current.generation + 1,
+        startup: {}, now: this.dependencies.now() });
+    } catch (error) {
+      if (error instanceof Error && /active binding already exists/iu.test(error.message)) {
+        throw new RouterError("BINDING_CHANGED", "The binding or successor changed during handoff");
+      }
+      throw error;
+    }
+    if (!binding) throw new RouterError("BINDING_CHANGED", "The lane binding changed during handoff");
+    // The binding commit is authoritative even when a notification attempt fails. Startup and
+    // channel attention and exact HTTP retries can repeat the pending index without another commit.
+    try { await this.dependencies.pump.notifyLane(address); }
+    catch { /* pending mail remains in the same lane for startup/channel retry */ }
+    return { status: "committed", address, laneId: lane.id, bindingId: binding.id,
+      generation: binding.generation, successorSessionId: input.successorSessionId };
   }
 
   /**
@@ -396,16 +480,46 @@ export class RouterCore {
     return { delivered: true, messageId: id, target: { address: address.address, state: targetState }, project };
   }
 
-  async ack(context: CallerContext, input: { messageIds: readonly string[] }): Promise<{ resolved: string[] }> {
+  /**
+   * Reads structured pending messages owned by the caller. Every id is checked before any mailbox
+   * file is opened, so a mixed-owned batch returns nothing rather than leaking a partial batch.
+   */
+  read(context: CallerContext, input: { messageIds: readonly string[] }): Array<{
+    id: string; sender: string; target: string; kind: MessageKind; replyTo: string | null; createdAt: number; body: string;
+  }> {
     const binding = this.requireCallerBinding(context);
     if (input.messageIds.length === 0) throw new RouterError("MESSAGE_IDS_REQUIRED", "At least one message ID is required");
     const uniqueIds = [...new Set(input.messageIds)];
-    for (const id of uniqueIds) {
+    const messages = uniqueIds.map((id) => {
       const message = this.dependencies.state.message(id);
       if (!message || message.targetLane !== binding.laneAddress || message.state !== "pending") {
         throw new RouterError("MESSAGE_NOT_OWNED", `Message is not pending for the current lane: ${id}`);
       }
-    }
+      return message;
+    });
+    return messages.map((message) => ({
+      id: message.id,
+      sender: message.senderLane,
+      target: message.targetLane,
+      kind: message.kind,
+      replyTo: message.replyTo,
+      createdAt: message.createdAt,
+      body: this.dependencies.mailbox.readBody(message.relativePath),
+    }));
+  }
+
+  async ack(context: CallerContext, input: { messageIds: readonly string[] }): Promise<{ resolved: string[] }> {
+    const binding = this.requireCallerBinding(context);
+    if (input.messageIds.length === 0) throw new RouterError("MESSAGE_IDS_REQUIRED", "At least one message ID is required");
+    const uniqueIds = [...new Set(input.messageIds)];
+    const pending = uniqueIds.map((id) => {
+      const message = this.dependencies.state.message(id);
+      if (!message || message.targetLane !== binding.laneAddress || message.state !== "pending") {
+        throw new RouterError("MESSAGE_NOT_OWNED", `Message is not pending for the current lane: ${id}`);
+      }
+      return message;
+    });
+    for (const message of pending) this.dependencies.mailbox.assertResolvable(message.relativePath);
     this.dependencies.state.markMessagesResolved(uniqueIds, {
       laneAddress: binding.laneAddress, generation: binding.generation, now: this.dependencies.now(),
     });

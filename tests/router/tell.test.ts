@@ -14,7 +14,7 @@ import { NotificationPump } from "../../src/router/notification-pump.js";
 import { RouterCore } from "../../src/router/router-core.js";
 import { RouterStateStore } from "../../src/router/state-store.js";
 import { parseTellInput, tellBody, TellInputError } from "../../src/router/tell.js";
-import type { BindingRecord, CallerContext } from "../../src/router/types.js";
+import type { BackendName, BindingRecord, CallerContext } from "../../src/router/types.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -23,7 +23,7 @@ afterEach(() => {
 
 /** Records what the pump hands it, so the notification a told lane receives can be inspected. */
 class FakeBackend implements PlatformBackend {
-  readonly name = "codex" as const;
+  constructor(readonly name: BackendName = "codex") {}
   readonly notifications: Notification[] = [];
   restoreState: RestorePresence = "online";
   async notifyNormal(_binding: BindingRecord, notification: Notification): Promise<NotificationOutcome> {
@@ -38,13 +38,13 @@ class FakeBackend implements PlatformBackend {
   async waitUntilReplaceable(): Promise<void> {}
 }
 
-function setup() {
+function setup(backendName: BackendName = "codex") {
   const root = mkdtempSync(join(tmpdir(), "lane-router-tell-"));
   roots.push(root);
   const database = openRouterDatabase(":memory:");
   const state = new RouterStateStore(database);
   const mailbox = new MailboxStore(root);
-  const backend = new FakeBackend();
+  const backend = new FakeBackend(backendName);
   const backends = new BackendRegistry([backend]);
   let sequence = 0;
   let now = 1_000;
@@ -63,10 +63,10 @@ function bindLane(x: Setup, address: string, options: { cwd?: string; activeAt?:
   if (!x.state.lane(address)) x.state.createLane({ address, project: address.split("/")[0]!, roleDescription: address, now: 1 });
   const conversationId = `conversation-${address}`;
   x.state.createBinding({
-    id: `binding-${address}`, laneAddress: address, backend: "codex", conversationId,
+    id: `binding-${address}`, laneAddress: address, backend: x.backend.name, conversationId,
     generation: 1, startup: {}, now: options.activeAt ?? 5,
   });
-  if (options.cwd) x.state.updateBindingCwd("codex", conversationId, options.cwd);
+  if (options.cwd) x.state.updateBindingCwd(x.backend.name, conversationId, options.cwd);
 }
 
 const pendingFiles = (x: Setup) => {
@@ -138,6 +138,29 @@ describe("telling a lane from outside", () => {
         expect(x.state.lane("alpha/one")).toBeUndefined();
       } finally { x.database.close(); }
     });
+  }
+
+  // DSH and ZCode lanes are told the same way: the state comes from whichever backend holds the
+  // binding, never from its name. A DSH session whose channel dropped answers "unavailable", which
+  // the caller sees as offline while the message waits for the session to come back.
+  for (const backendName of ["dsh", "zcode"] as const) {
+    for (const [presence, expected] of [["online", "online"], ["unavailable", "offline"]] as const) {
+      it(`delivers to a ${backendName} lane that is ${presence} and reports it as ${expected}`, async () => {
+        const x = setup(backendName);
+        try {
+          bindLane(x, "alpha/one");
+          x.backend.restoreState = presence;
+          const result = await x.core.tell({ address: "alpha/one", ...told });
+
+          expect(result.target).toEqual({ address: "alpha/one", state: expected });
+          expect(result.delivered).toBe(true);
+          expect(pendingFiles(x)).toBe(1);
+          expect(x.database.prepare("SELECT sender_lane_id,sender_label FROM message").all())
+            .toEqual([{ sender_lane_id: null, sender_label: "user:vikunja" }]);
+          expect(x.backend.notifications).toHaveLength(1);
+        } finally { x.database.close(); }
+      });
+    }
   }
 
   // Acceptance 5. The lane learns who sent it and what about, and is woken the same way as for any
