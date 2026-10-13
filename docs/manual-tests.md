@@ -181,6 +181,37 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 > 这条也是「找不到有两种成因」的一个实例：08-12 那次只搜了三个根、深度 2，当时**没有**据此断言机器上没装 codex——那个克制是对的，东西确实在，只是在没搜到的地方。
 
+### 跨机 lane 试验：Router 留 Windows，Linux VM 经 ssh 反向隧道接入（2026-09-21）
+
+**目标：** 不改代码，让一条跑在另一台机器上的 Claude 会话当 lane 用，跟本机 lane 互发消息。试验对象 `mayacustomnodes/linux-deploy`，VM `dev@192.168.0.174`（Ubuntu 24.04，node 22.23.2，claude 2.1.278，跟本机同账号同组织）。
+
+**为什么是这个形态：** Router 只绑 loopback（`local-server.ts:301-302` 绑别的地址直接 throw），本机没有 sshd，所以隧道只能从 Windows 主动 `ssh -R` 出去；消息按本机绝对路径投递（`notification-pump.ts:41` 的 `pendingPath`），远端读不到，所以另转一个只读静态服务。把 Router 留在 lane 最多的机器上，两个硬伤只落在一条远端 lane 上。
+
+**搭法（全部可复现，无代码改动）：**
+
+1. VM 上 `git clone https://github.com/MotionlessPeri/lane-router.git && git checkout master`（⚠️ 仓库默认分支是 `feat/lane-router-v1`，落后 master 45 个 commit，`clone` 默认拿到的是它——第一次就踩了，症状是 `npm run build` 只跑 `tsc` 没有 `copy-assets`）；`npm ci`（`better-sqlite3` 要现场编，需 `build-essential`）；`npm run build`。
+2. VM 上 `claude mcp add --scope user lane -- node /home/dev/lane-router/dist/mcp/lane-mcp-server.js`；`~/.claude/settings.json` 加 `UserPromptSubmit` / `Stop` 两个 hook 指向 `dist/adapters/claude/lifecycle-hook.js`；`mkdir -p ~/.lane-router`。
+3. **VM 上以 root 建 `/etc/claude-code/managed-settings.json`，内容 `{ "channelsEnabled": true }`**。本机是 `C:\Program Files\ClaudeCode\managed-settings.json` 同样一行——没有它，lane 工具全能用、`lane_send` 也报 `sent`，但 Claude 客户端把 channel 通知**静默丢弃**，MCP 日志（`~/.cache/claude-cli-nodejs/<cwd>/mcp-logs-lane/*.jsonl`）里那行是 `Channel notifications skipped: channels not enabled by org policy`；有了它变成 `Channel notifications registered`。这是本次试验最贵的一课：账号、组织、版本、flag 全一样，就差这个文件。
+4. Windows 侧：`scp ~/.lane-router/discovery.json dev@vm:~/.lane-router/`（VM 的 MCP 靠它按 `instanceId` 认 Router）；`python -m http.server 57880 --bind 127.0.0.1 --directory ~/.lane-router/mailboxes`（只读）；`ssh -N -R <router-port>:127.0.0.1:<router-port> -R 57880:127.0.0.1:57880 dev@vm`。这三步已收进 `scripts/start-vm-bridge.ps1 -VmHost <ip> -VmUser <user>`，**在自己的终端窗口里跑**，窗口活着桥就活着——2026-09-22 实测：挂在 Claude 会话后台任务里的桥随会话退出一起死，远端 lane 变 `no_channel`，且远端此时新开的 Claude 会话里 lane MCP 会启动失败（`ensureRouter` 够不到 Router 就试图本地起一个）。
+5. VM 上在项目目录 `claude --dangerously-load-development-channels server:lane`，先说一句话让 hook 报一次，再 `lane_attach_current` 带 `roleDescription`——lane 不存在时 attach 直接建（`router-core.ts` 的 `createLane`），不需要在 Windows 开窗口。role 里写清读法：通知里的 Windows 路径把 `mailboxes\` 之前的前缀换成 `http://127.0.0.1:57880/`、反斜杠换斜杠，`curl` 列目录和读正文。
+
+**验证结果（均有证据）：**
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| VM → Router HTTP / channel | 通 | VM 上 `curl 127.0.0.1:57871/health` 返回本机 `instanceId`；`lane_directory` 里该 lane `reach.state = live` |
+| 本机发消息 → 文件落盘 → VM 读正文 | 通 | 文件在 `mailboxes/mayacustomnodes/linux-deploy/pending/`，VM `curl` 到同一文件的 frontmatter |
+| VM `lane_ack` / `lane_send` 回程 | 通 | 文件移到 `resolved/`；回信到达 `lane-router/design`，`reply_to` 正确 |
+| 空闲时被新消息唤醒 | 通 | VM MCP 日志出现 `notifications/claude/channel` 行，21 s 后自行 `lane_ack` |
+| 首条消息唤醒 | **不通 → 修好** | 见第 3 步；修前日志 `skipped`，修后 `registered` |
+
+**两条留给 impl 的观察：**
+
+- **channel 重连瞬间补发的那一次唤醒会丢；消息本身不丢。** `--resume` 重开后，Router 在 `connectedAt` 之后 2 ms 就把积压通知推进了新 channel（`lastNotifiedAt = connectedAt + 2 ms`），但客户端日志里没有对应的 `notifications/claude/channel` 行，lane 没醒；100 s 后发的新消息正常唤醒，**且那次唤醒的 payload 把积压的旧消息 id 一并带出**（`messageIds` 两条都在）——远端 lane 的回执原文核过。机制推测：MCP server 先连 channel WebSocket、后完成 stdio 握手（`lane-mcp-server.ts` 的顺序），通知在 `initialized` 之前到，`protocol.notification` 无处可去。修法方向：MCP server 在握手完成前缓冲 channel 通知，或 Router 在首次 lifecycle 之后再补发。单次观察，未在本机 `lane open` 路径上复测。
+- **lane 刚建、还没收过消息时 `pending/` 目录不存在**，静态服务返回 404 而不是空列表；远端 lane 分不清「没消息」和「隧道断了」。建 lane 时把空的 `pending/` 建出来即可。
+
+**限制（不是缺陷，是这个形态的边界）：** 隧道挂在 Windows 某个进程里，进程没了就断；Router 重启换端口，隧道和 VM 的 `discovery.json` 都要重做——`start-vm-bridge.ps1` 现在每 5 秒比对 `discovery.json` 的 `instanceId`，变了就杀掉旧 ssh、按新端口重开并重拷 `discovery.json`。⚠️ 只等 ssh 退出是不够的：2026-10-12 实测 Router 换到新端口后，转发旧端口的 ssh 会话照样活着，远端 lane 一直指着死端口，直到这个比对加上；dashboard「恢复 lane」对这条 lane 无意义（Router 开不了 VM 的窗口）；`joinKey` 是 pid，跨机可能撞。要去掉这些边界是跨机设计稿（可配绑定地址 + 认证 + 消息经 HTTP 拉取 + 远端 lane 的开窗语义）的事。
+
 ### Router 被换掉之后，`reach` 会在下一次 lifecycle 之前低报
 
 **结论（2026-08-25 实测，含一次被推翻的中途结论）：** 通道**会**自己回来，实测在新 Router 启动后 **6 秒**（`reach.connectedAt` 20:40:47，Router 起于 20:40:42）。但在该会话的**下一次 lifecycle 事件**到达之前，`lane_directory` 对它报 `reach.state = no_channel`——**连接是在的，只是 Router 查不到**。本次 lifecycle 到达时刻是 20:48:44，正是用户下一次输入触发 hook 的时候；这中间约 8 分钟里 `reach` 一直低报。
