@@ -13,6 +13,13 @@ import { CodexAppServerProcess, CodexCapabilityError, CodexCapabilityGate } from
 // the 5 s default just to come up. Scoped to this file so a genuine hang elsewhere still fails fast.
 vi.setConfig({ testTimeout: 30_000 });
 
+/**
+ * How long a fake App Server child gets to come up, or to come back after a restart, in the tests
+ * where it is expected to. A bound on a loaded machine, not a property under test: the readiness
+ * limit itself is tested with its own short values. Two of these in a row still fit the timeout.
+ */
+const READY_UNDER_LOAD_MS = 10_000;
+
 const servers: WebSocketServer[] = [];
 const dirs: string[] = [];
 afterEach(async () => {
@@ -388,7 +395,7 @@ test("capability gate rejects excessive schema files and a symlink cache entry",
 
 test("process manager selects loopback, waits for readiness, and shuts down cleanly", async () => {
   const cacheDir = await mkdtemp(join(tmpdir(), "lane-router-process-")); dirs.push(cacheDir);
-  const manager = new CodexAppServerProcess({ command: fakeCommand(), gate: new CodexCapabilityGate({ cacheDir }), readinessTimeoutMs: 3_000 });
+  const manager = new CodexAppServerProcess({ command: fakeCommand(), gate: new CodexCapabilityGate({ cacheDir }), readinessTimeoutMs: READY_UNDER_LOAD_MS });
   const endpoint = await manager.start();
   expect(endpoint).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/);
   expect(manager.client.isConnected()).toBe(true);
@@ -473,7 +480,7 @@ test("process manager coalesces sequential starts and can start again after shut
     children.push(child);
     return child;
   }) as typeof spawn;
-  const manager = new CodexAppServerProcess({ command: fakeCommand(), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, spawnProcess });
+  const manager = new CodexAppServerProcess({ command: fakeCommand(), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: READY_UNDER_LOAD_MS, spawnProcess });
   try {
     const first = await manager.start();
     const second = await manager.start();
@@ -498,7 +505,7 @@ test("process manager coalesces concurrent starts without leaking children", asy
     children.push(child);
     return child;
   }) as typeof spawn;
-  const manager = new CodexAppServerProcess({ command: fakeCommand(), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, spawnProcess });
+  const manager = new CodexAppServerProcess({ command: fakeCommand(), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: READY_UNDER_LOAD_MS, spawnProcess });
   try {
     const endpoints = await Promise.all([manager.start(), manager.start(), manager.start()]);
     expect(new Set(endpoints).size).toBe(1);
@@ -514,10 +521,10 @@ test("process manager restarts an unexpected exit with bounded backoff", async (
   const root = await mkdtemp(join(tmpdir(), "lane-router-process-restart-")); dirs.push(root);
   const marker = join(root, "exited-once");
   let reconnected = 0;
-  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_EXIT_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, restartBackoffMs: 5, onReconnect: () => { reconnected += 1; } });
+  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_EXIT_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: READY_UNDER_LOAD_MS, restartBackoffMs: 5, onReconnect: () => { reconnected += 1; } });
   await manager.start();
   const originalClient = manager.client;
-  await vi.waitFor(() => expect(reconnected).toBe(1), { timeout: 5_000 });
+  await vi.waitFor(() => expect(reconnected).toBe(1), { timeout: READY_UNDER_LOAD_MS });
   expect(manager.client).toBe(originalClient);
   expect(manager.client.isConnected()).toBe(true);
   await manager.shutdown();
@@ -529,12 +536,12 @@ test("live-child transport loss reconnects the stable client without spawning", 
   let spawned = 0;
   let recovered = 0;
   const spawnProcess = ((...args: Parameters<typeof spawn>) => { spawned += 1; return spawn(...args); }) as typeof spawn;
-  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_DROP_CONNECTION_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, restartBackoffMs: 5, spawnProcess, onReconnect: () => { recovered += 1; } });
+  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_DROP_CONNECTION_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: READY_UNDER_LOAD_MS, restartBackoffMs: 5, spawnProcess, onReconnect: () => { recovered += 1; } });
   const client = manager.client;
   try {
     await manager.start();
     await vi.waitFor(() => expect(existsSync(marker)).toBe(true));
-    await vi.waitFor(() => expect(recovered).toBe(1), { timeout: 5_000 });
+    await vi.waitFor(() => expect(recovered).toBe(1), { timeout: READY_UNDER_LOAD_MS });
     expect(manager.client.isConnected()).toBe(true);
     expect(manager.client).toBe(client);
     expect(spawned).toBe(1);
@@ -546,10 +553,10 @@ test("throwing reconnect observers cannot turn a ready replacement into an orpha
   const marker = join(root, "exited-once");
   const children: ReturnType<typeof spawn>[] = [];
   const spawnProcess = ((...args: Parameters<typeof spawn>) => { const child = spawn(...args); children.push(child); return child; }) as typeof spawn;
-  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_EXIT_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, restartBackoffMs: 5, restartLimit: 2, spawnProcess, onReconnect: () => { throw new Error("observer failed"); } });
+  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_EXIT_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: READY_UNDER_LOAD_MS, restartBackoffMs: 5, restartLimit: 2, spawnProcess, onReconnect: () => { throw new Error("observer failed"); } });
   try {
     await manager.start();
-    await vi.waitFor(() => expect(manager.client.isConnected()).toBe(true), { timeout: 5_000 });
+    await vi.waitFor(() => expect(manager.client.isConnected()).toBe(true), { timeout: READY_UNDER_LOAD_MS });
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(children).toHaveLength(2);
   } finally {
@@ -569,10 +576,10 @@ test("recovery exhaustion fails closed and the next start is fresh", async () =>
     return spawn(...args);
   }) as typeof spawn;
   const delays: number[] = [];
-  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_EXIT_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, restartBackoffMs: 100, restartBackoffCapMs: 150, restartLimit: 2, random: () => 0.5, sleep: async (ms) => { delays.push(ms); }, spawnProcess });
+  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_EXIT_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: READY_UNDER_LOAD_MS, restartBackoffMs: 100, restartBackoffCapMs: 150, restartLimit: 2, random: () => 0.5, sleep: async (ms) => { delays.push(ms); }, spawnProcess });
   try {
     await manager.start();
-    await vi.waitFor(() => expect(manager.state).toBe("failed"), { timeout: 5_000 });
+    await vi.waitFor(() => expect(manager.state).toBe("failed"), { timeout: READY_UNDER_LOAD_MS });
     expect(delays).toEqual([50, 50, 75]);
     await manager.start();
     expect(spawnAttempt).toBe(4);
@@ -591,7 +598,7 @@ test("shutdown during restart backoff cannot spawn an orphan", async () => {
     children.push(child);
     return child;
   }) as typeof spawn;
-  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_EXIT_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: 3_000, restartBackoffMs: 250, spawnProcess });
+  const manager = new CodexAppServerProcess({ command: fakeCommand({ FAKE_CODEX_EXIT_ONCE_FILE: marker }), gate: new CodexCapabilityGate({ cacheDir: join(root, "cache") }), readinessTimeoutMs: READY_UNDER_LOAD_MS, restartBackoffMs: 250, spawnProcess });
   try {
     await manager.start();
     await vi.waitFor(() => expect(existsSync(marker)).toBe(true));

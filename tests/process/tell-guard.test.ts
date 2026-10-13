@@ -13,6 +13,11 @@ import type { TellInput } from "../../src/router/tell.js";
  * effect did not happen, rather than asserting a status code alone.
  */
 
+// The oversized-body tests push 2 MiB through a real server for every entry, which on a loaded
+// Windows machine has come within a second of the 5 s default. Scoped to this file so a genuine
+// hang elsewhere still fails fast.
+vi.setConfig({ testTimeout: 30_000 });
+
 const servers: LocalRouterServer[] = [];
 afterEach(async () => { for (const server of servers.splice(0)) await server.close(); });
 

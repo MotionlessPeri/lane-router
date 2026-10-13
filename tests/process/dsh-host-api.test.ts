@@ -15,6 +15,11 @@ import { RuntimeLock } from "../../src/process/runtime-lock.js";
 import { ROUTER_SCHEMA_SQL, ROUTER_SCHEMA_VERSION } from "../../src/router/schema.js";
 import type { BindingRecord } from "../../src/router/types.js";
 
+// Some of these tests start real child processes (the token's Windows ACL is set through
+// PowerShell), and on a loaded Windows machine one can take longer than the 5 s default just to
+// finish. Scoped to this file so a genuine hang elsewhere still fails fast.
+vi.setConfig({ testTimeout: 30_000 });
+
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
