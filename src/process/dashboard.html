@@ -306,7 +306,12 @@
       if (!projects.has(lane.project)) projects.set(lane.project, []);
       projects.get(lane.project).push(lane);
     });
-    projects.forEach((lanes, project) => {
+    // By name, not in snapshot order: the snapshot lists lanes as they were created, and nobody
+    // looks a project up by when it was created. Case-insensitive so "MobuLiveLink" sits among
+    // the m's rather than ahead of every lower-case name.
+    const byName = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" });
+    [...projects.keys()].sort(byName).forEach((project) => {
+      const lanes = projects.get(project).slice().sort((a, b) => byName(a.address, b.address));
       const group = el("section", "project");
       group.setAttribute("data-project", project);
       const projectChoice = el("label", null);

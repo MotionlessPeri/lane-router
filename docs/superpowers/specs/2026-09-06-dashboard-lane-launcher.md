@@ -38,7 +38,7 @@
 
 `/dashboard` 保留现有只读快照，并在其上增加一个“恢复 lane”区域：
 
-1. lane 按项目分组，组头提供全选；单条 lane 仍可单独勾选。
+1. lane 按项目分组，项目和组内的 lane 都按名字排序（不分大小写），不按创建顺序；组头提供全选；单条 lane 仍可单独勾选。
 2. 默认只勾选 `restorePresence=offline` 且有 active binding 的 lane；在线 lane 显示为可跳过，不自动勾选。
 3. 覆盖输入分为三栏：`model`、Codex `profile`、Codex `modelProvider`。三栏留空表示不覆盖，分别沿用 `lane.model` 与 binding startup 元数据。
 4. `profile` 与 `modelProvider` 可以只填一项：

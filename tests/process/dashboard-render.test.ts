@@ -436,3 +436,28 @@ test("the launcher stays read-only when the Router does not publish an action to
   (window.document.querySelector("button#open-selected") as HTMLButtonElement).click();
   expect(fetchStub).toHaveBeenCalledOnce();
 });
+
+test("the launcher lists projects and their lanes alphabetically, whatever order the snapshot has", async () => {
+  // Deliberately scrambled, with a capitalised project in the middle: the snapshot comes in
+  // creation order, and a person looking for a project reads by name, not by case.
+  const scrambled = {
+    ...launcherSnapshot,
+    lanes: [
+      { ...snapshot.lanes[0]!, address: "zeta/one", project: "zeta", restorePresence: "offline" },
+      { ...snapshot.lanes[0]!, address: "Beta/two", project: "Beta", restorePresence: "offline" },
+      { ...snapshot.lanes[0]!, address: "alpha/one", project: "alpha", restorePresence: "offline" },
+      { ...snapshot.lanes[0]!, address: "Beta/one", project: "Beta", restorePresence: "offline" },
+    ],
+  };
+  const window = new Window({ url: "http://127.0.0.1:52494/dashboard" });
+  window.document.write(pageSource);
+  const script = window.document.querySelector("script")?.textContent;
+  const fetchStub = vi.fn(async () => ({ ok: true, json: async () => scrambled }));
+  new Function("document", "fetch", "setInterval", script!)(window.document, fetchStub as never, () => 0);
+  await vi.waitFor(() => expect(window.document.body.textContent).toContain("zeta/one"));
+
+  const groups = [...window.document.querySelectorAll("section.project")];
+  expect(groups.map((group) => group.getAttribute("data-project"))).toEqual(["alpha", "Beta", "zeta"]);
+  const betaLanes = [...window.document.querySelectorAll("section.project[data-project='Beta'] input[data-lane-checkbox]")];
+  expect(betaLanes.map((checkbox) => (checkbox as HTMLInputElement).value)).toEqual(["Beta/one", "Beta/two"]);
+});
