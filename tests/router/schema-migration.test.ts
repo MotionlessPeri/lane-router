@@ -568,7 +568,7 @@ describe("router schema from version 6 on", () => {
       const database = openRouterDatabase(path);
       try {
         expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
-        expect(tableSql(database, "binding")).toContain("backend IN ('claude','codex','dsh','zcode')");
+        expect(tableSql(database, "binding")).toContain("backend IN ('claude','codex','dsh','zcode','native-codex')");
         for (const table of ["message", "message_archive"]) {
           expect((database.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name), table).toContain("sender_label");
           expect(tableSql(database, table), table).toContain(SENDER_CHECK);
@@ -605,15 +605,16 @@ describe("router schema from version 6 on", () => {
     });
   }
 
-  it("leaves a version 10 database exactly as it was", () => {
+  it("upgrades version 10 without changing records or non-binding schema", () => {
     const path = writeStartingShape(STARTING_SHAPES.v10);
-    const schemaOf = (database: Database.Database) => database.prepare("SELECT type,name,sql FROM sqlite_master ORDER BY name").all();
+    const schemaOf = (database: Database.Database) => database.prepare("SELECT type,name,sql FROM sqlite_master WHERE name <> 'binding' ORDER BY name").all()
+      .map(row => { const item = row as { type: string; name: string; sql: string | null }; return { ...item, sql: item.sql?.replace(/\s+/g, " ") ?? null }; });
     const raw = new Database(path, { readonly: true });
     const before = { schema: schemaOf(raw), rows: rowCounts(raw, [...TABLES_BEFORE_SETS, "lane_set", "lane_set_member"]) };
     raw.close();
     const database = openRouterDatabase(path);
     try {
-      expect(database.pragma("user_version", { simple: true })).toBe(10);
+      expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
       expect({ schema: schemaOf(database), rows: rowCounts(database, [...TABLES_BEFORE_SETS, "lane_set", "lane_set_member"]) }).toEqual(before);
     } finally { database.close(); }
   });
@@ -718,11 +719,11 @@ describe("lane set tables", () => {
     return join(root, "router.sqlite");
   }
 
-  it("builds a new database straight to version 10 with both tables", () => {
+  it("builds a new database with native bindings and both lane set tables", () => {
     const database = openRouterDatabase(freshDatabasePath());
     try {
-      expect(ROUTER_SCHEMA_VERSION).toBe(10);
-      expect(database.pragma("user_version", { simple: true })).toBe(10);
+      expect(ROUTER_SCHEMA_VERSION).toBe(11);
+      expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
       expect(rowCounts(database, ["lane_set", "lane_set_member"])).toEqual({ lane_set: 0, lane_set_member: 0 });
     } finally { database.close(); }
   });

@@ -9,6 +9,14 @@ const VALID_DRIVER = {
 };
 
 describe("router config", () => {
+  it("accepts an optional private permit pointer alongside the existing ZCode section", async () => {
+    const config = await readRouterConfig({ dataRoot: "unused", readFile: async () => JSON.stringify({ nativeHostsFile: "D:/private/permits.json", zcode: { driver: VALID_DRIVER } }) });
+    expect(config).toMatchObject({ nativeHostsFile: "D:/private/permits.json", zcode: { driver: VALID_DRIVER } });
+  });
+
+  it("never echoes unknown configuration keys that might contain a secret", async () => {
+    await expect(readRouterConfig({ dataRoot: "unused", readFile: async () => JSON.stringify({ "fixture-secret-key": true }) })).rejects.toThrow("Router config has an invalid shape");
+  });
   it("locates the file under the data root unless the env points elsewhere", () => {
     expect(routerConfigFile("C:/data")).toBe(join("C:/data", "config.json"));
     expect(routerConfigFile("C:/data", { LANE_ROUTER_CONFIG: "C:/elsewhere.json" })).toBe("C:/elsewhere.json");

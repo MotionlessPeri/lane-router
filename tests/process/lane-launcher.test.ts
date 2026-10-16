@@ -50,6 +50,12 @@ test("rejects malformed invocations without spawning or querying", async () => {
   expect(deps.queryResumeInfo).not.toHaveBeenCalled();
 });
 
+test("open cannot launch a Host-owned native conversation", async () => {
+  const deps = fakes({ queryResumeInfo: async () => ({ state: "bound", backend: "native-codex", conversationId: "host-thread", cwd: "D:/fixture", generation: 1, roleDescription: "Lead", model: null, startup: {}, reach: reach("no_channel") }) });
+  await expect(launchLane(["open", "alpha/lead"], deps)).rejects.toThrow(/Host-managed/);
+  expect(deps.spawnTerminal).not.toHaveBeenCalled();
+});
+
 test("new opens a terminal whose first prompt creates the lane", async () => {
   const deps = fakes();
   await launchLane(["new", "alpha/worker", "--role", "Owns the worker seam."], deps);

@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 
-import type Database from "better-sqlite3";
+import Database from "better-sqlite3";
 
-export const ROUTER_SCHEMA_VERSION = 10;
+export const ROUTER_SCHEMA_VERSION = 11;
 
 /**
  * The version 2 message table, kept verbatim because the version 1 migration has to build exactly
@@ -255,12 +255,15 @@ CREATE INDEX lane_project_address_idx ON lane(project,address);
  */
 const ROUTER_SCHEMA_V6_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V6_SQL}${MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V6_SQL}`;
 
+const BINDING_TABLE_V11_SQL = BINDING_TABLE_V8_SQL.replace("'claude','codex','dsh','zcode'", "'claude','codex','dsh','zcode','native-codex'");
+
 /** Schema for newly created databases at the current version. */
-export const ROUTER_SCHEMA_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V8_SQL}${MESSAGE_TABLE_V9_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V9_SQL}${LANE_SET_TABLES_SQL}`;
+export const ROUTER_SCHEMA_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V11_SQL}${MESSAGE_TABLE_V9_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V9_SQL}${LANE_SET_TABLES_SQL}`;
 
 export function initializeRouterSchema(database: Database.Database): void {
   let version = database.pragma("user_version", { simple: true }) as number;
   if (version === ROUTER_SCHEMA_VERSION) {
+    assertSharedSchema(database, true);
     assertForeignKeys(database);
     return;
   }
@@ -291,33 +294,68 @@ function assertForeignKeys(database: Database.Database): void {
   }
 }
 
+/** SQL whitespace is not identity; quoted values and every structural token still are. */
+function normalizedSql(sql: string): string {
+  return sql.split(/('(?:''|[^'])*')/).map((part, index) => index % 2 ? part : part.replace(/\s+/g, "").toLowerCase()).join("");
+}
+
+function schemaShape(database: Database.Database): unknown {
+  const objects = database.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").all() as Array<{ type: string; name: string; tbl_name: string; sql: string }>;
+  return objects.map(row => ({ ...row, sql: normalizedSql(row.name === "binding" && row.type === "table"
+    ? row.sql.replace(/CHECK\s*\(\s*backend\s+IN\s*\([^)]*\)\s*\)/i, "CHECK (backend IN ('known'))") : row.sql) }));
+}
+
+/** Recognize the released branches by their structure, retaining the native migration's refusal of unknown schemas. */
+function assertSharedSchema(database: Database.Database, current = false): void {
+  const sql = bindingSql(database);
+  const match = sql.match(/CHECK\s*\(\s*backend\s+IN\s*\(([^)]*)\)\s*\)/i);
+  const values = match?.[1]?.split(",").map(value => value.trim()).sort().join(",");
+  const vocabulary = (names: string[]) => names.map(name => `'${name}'`).sort().join(",");
+  const base = ["claude", "codex"];
+  const known = [base, [...base, "dsh"], [...base, "dsh", "zcode"], [...base, "dsh", "native-codex"], [...base, "dsh", "zcode", "native-codex"]].map(vocabulary);
+  if (!values || !known.includes(values)) throw new Error("Router database schema shape is not supported");
+  const labeled = messageHasSenderLabel(database);
+  if (current && (!bindingAllowsEveryBackend(database) || !labeled || !hasTable(database, "lane_set"))) {
+    throw new Error("Router database schema shape is not supported");
+  }
+  const reference = new Database(":memory:");
+  try {
+    reference.exec(`${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V11_SQL}${labeled ? MESSAGE_TABLE_V9_SQL : MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${labeled ? MESSAGE_ARCHIVE_TABLE_V9_SQL : MESSAGE_ARCHIVE_TABLE_V6_SQL}${hasTable(database, "lane_set") ? LANE_SET_TABLES_SQL : ""}`);
+    if (JSON.stringify(schemaShape(database)) !== JSON.stringify(schemaShape(reference))) throw new Error("Router database schema shape is not supported");
+  } finally { reference.close(); }
+}
+
 /**
  * Versions 7 to 9 were numbered on two machines at once, so from version 6 on the number does not
  * say what a database already has. One line of work used 7 and 8 for two new binding backends;
  * the other used 7 for the message sender label, which is version 9 now. A version 7 database is
  * therefore either one. Each step is decided by the shape it produces, and the number is written
  * once, when every step is in place. Version 10's lane set tables are one more step of the same
- * kind, and the only one that adds rather than rebuilds.
+ * kind. Version 11 also admits the native Host backend from the Company branch without dropping
+ * either its bindings or the main branch's sender labels and lane sets.
  *
  * One transaction for all of it: a failure anywhere leaves the database exactly as it was opened,
  * so the next start decides again from the same shape.
  *
  * 流程：
  *   1. 关外键（重建期间新表的引用对着改了名的旧表），并在事务外切换
- *   2. binding 的 CHECK 不含 'zcode' 就按 version 8 的表重建，'dsh' 随之补上
+ *   2. binding 的 CHECK 缺任一后端就按 version 11 的表重建，逐记录核对
  *   3. message 没有 sender_label 列就重建两张消息表
  *   4. 没有 lane_set 表就建两张 set 表 —— 纯加法，不碰任何已有的行
- *   5. 置 user_version = 10 并复查外键完整性 —— 与 2、3、4 同一个事务，任何一步失败整体回滚
+ *   5. 置当前版本并复查结构与外键完整性 —— 与 2、3、4 同一个事务，任何一步失败整体回滚
  *   6. 恢复外键开关
  */
 function completeFromVersion6(database: Database.Database): void {
+  assertSharedSchema(database);
+  assertForeignKeys(database);
   const foreignKeysWereOn = database.pragma("foreign_keys", { simple: true }) === 1;
   database.pragma("foreign_keys = OFF");
   try {
     database.transaction(() => {
-      if (!bindingAllowsZcode(database)) rebuildBindingWithEveryBackend(database);
+      if (!bindingAllowsEveryBackend(database)) rebuildBindingWithEveryBackend(database);
       if (!messageHasSenderLabel(database)) addMessageSenderLabel(database);
       if (!hasTable(database, "lane_set")) database.exec(LANE_SET_TABLES_SQL);
+      assertSharedSchema(database, true);
       database.pragma(`user_version = ${ROUTER_SCHEMA_VERSION}`);
       assertForeignKeys(database);
     })();
@@ -326,9 +364,14 @@ function completeFromVersion6(database: Database.Database): void {
   }
 }
 
-function bindingAllowsZcode(database: Database.Database): boolean {
+function bindingSql(database: Database.Database): string {
   const table = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='binding'").get() as { sql: string } | undefined;
-  return table?.sql.includes("'zcode'") ?? false;
+  return table?.sql ?? "";
+}
+
+function bindingAllowsEveryBackend(database: Database.Database): boolean {
+  const sql = bindingSql(database);
+  return ["claude", "codex", "dsh", "zcode", "native-codex"].every(backend => sql.includes(`'${backend}'`));
 }
 
 function messageHasSenderLabel(database: Database.Database): boolean {
@@ -343,24 +386,25 @@ function hasTable(database: Database.Database, name: string): boolean {
  * Versions 7 and 8 widen the binding backend vocabulary, first with `dsh` and then with `zcode`.
  * ZCode sessions ride the Claude channel, but a binding stored under "zcode" keeps the two
  * conversations distinguishable everywhere a (backend, conversation) pair is the key. SQLite cannot
- * alter a CHECK, so the table is rebuilt, straight to the version 8 shape whichever of the two
- * names is missing; no generation changes. The rows are counted rather than trusted, because a
- * copy that drops rows silently is the one failure nothing downstream could detect.
+ * alter a CHECK, so the table is rebuilt with all supported backends, including native Host.
+ * Every row is compared before the old table is dropped: identity, generation and startup data
+ * must survive unchanged, and matching row counts alone would miss a corrupted value.
  *
  * Runs inside the caller's transaction, with foreign keys already off.
  */
 function rebuildBindingWithEveryBackend(database: Database.Database): void {
-  const before = count(database, "binding");
+  const snapshot = () => JSON.stringify(database.prepare("SELECT * FROM binding ORDER BY id").all());
+  const before = snapshot();
   database.exec("ALTER TABLE binding RENAME TO binding_legacy;");
   for (const index of ["binding_active_lane_idx", "binding_active_conversation_idx", "binding_lane_generation_idx"]) {
     database.exec(`DROP INDEX IF EXISTS ${index};`);
   }
-  database.exec(BINDING_TABLE_V8_SQL);
+  database.exec(BINDING_TABLE_V11_SQL);
   database.exec(`
     INSERT INTO binding(id,lane_id,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd)
     SELECT id,lane_id,backend,conversation_id,generation,startup_json,active_at,inactive_at,cwd FROM binding_legacy;
   `);
-  if (count(database, "binding") !== before) throw new Error("Router database migration lost binding rows");
+  if (snapshot() !== before) throw new Error("Router database migration changed records");
   database.exec("DROP TABLE binding_legacy;");
 }
 

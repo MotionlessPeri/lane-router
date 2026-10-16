@@ -15,6 +15,7 @@ import { parseTellInput, type TellInput, type TellResult } from "../router/tell.
 import type { CallerContext, BindingRecord, ReachSnapshot, ResolvedIdentity } from "../router/types.js";
 import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
 import type { ToolService } from "../tools/tool-service.js";
+import type { NativeHostService } from "./native-host-service.js";
 import type { DashboardOpenOverride } from "./dashboard-lane-opener.js";
 
 export interface RouterDiscovery {
@@ -366,6 +367,8 @@ export class LocalRouterServer {
     readonly host?: string;
     readonly port?: number;
     readonly claude?: ClaudeChannelHub;
+    /** Trusted startup permits, separate from ordinary RPC and DSH authentication. */
+    readonly nativeHost?: NativeHostService;
     /** Authenticated loopback API used only by the trusted DSH Host. */
     readonly dsh?: {
       readonly token: string;
@@ -426,6 +429,16 @@ export class LocalRouterServer {
     this.claude = options.claude ?? new ClaudeChannelHub();
     this.http.on("upgrade", (request, socket, head) => {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (url.pathname === "/native-host/v1/channel" && !url.search && this.options.nativeHost) {
+        const token = bearerToken(request), threadId = request.headers["x-native-thread-id"];
+        if (this.options.nativeHost.authorized(token) && typeof threadId === "string" && threadId.length > 0) {
+          this.websocket.handleUpgrade(request, socket, head, client => {
+            try { this.options.nativeHost!.connect(token, threadId, client); }
+            catch { client.close(1008, "registration denied"); }
+          });
+          return;
+        }
+      }
       const conversationId = url.searchParams.get("conversationId");
       const joinKey = url.searchParams.get("joinKey") ?? undefined;
       if (url.pathname === "/claude" && conversationId) {
@@ -468,6 +481,7 @@ export class LocalRouterServer {
   async close(): Promise<void> {
     this.claude.close();
     this.options.dsh?.channel.close();
+    this.options.nativeHost?.close();
     await this.codexBridge.close();
     const providerBridges = [...this.providerBridges.values()].map(({ bridge }) => bridge);
     this.providerBridges.clear();
@@ -480,6 +494,7 @@ export class LocalRouterServer {
     const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
     try {
       if (pathname.startsWith("/dsh/v1/")) return await this.handleDsh(request, response, pathname);
+      if (pathname.startsWith("/native-host/v1/")) return await this.handleNativeHost(request, response, pathname);
       if (request.method === "GET" && request.url === "/health") return json(response, 200, this.discovery());
       if (request.method === "GET" && request.url !== undefined) {
         const url = new URL(request.url, "http://127.0.0.1");
@@ -640,6 +655,10 @@ export class LocalRouterServer {
       return json(response, 400, { error: "unknown method" });
     } catch (error) {
       if (pathname.startsWith("/dsh/v1/")) return dshError(response, 400, "INVALID_REQUEST", error instanceof Error ? error.message : "request failed");
+      if (pathname.startsWith("/native-host/v1/")) {
+        const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "NATIVE_EXTERNAL_INVALID_REQUEST";
+        return json(response, 409, { protocolVersion: 1, error: { code, message: code } });
+      }
       return json(response, 400, { error: error instanceof Error ? error.message : "request failed" });
     }
   }
@@ -662,6 +681,17 @@ export class LocalRouterServer {
       return void json(response, 403, { error: "action token is invalid" });
     }
     return body as Record<string, unknown>;
+  }
+
+  private async handleNativeHost(request: IncomingMessage, response: ServerResponse, path: string): Promise<void> {
+    const service = this.options.nativeHost, token = bearerToken(request);
+    if (!service) return json(response, 404, { error: { code: "NATIVE_HOST_UNAVAILABLE" } });
+    if (!service.authorized(token)) return json(response, 401, { error: { code: "NATIVE_HOST_UNAUTHORIZED" } });
+    if (request.method !== "POST" || request.url !== path) return json(response, 404, { error: { code: "NATIVE_EXTERNAL_INVALID_REQUEST" } });
+    const body = await readJson(request);
+    if (path === "/native-host/v1/register") return json(response, 200, { protocolVersion: 1, result: await service.register(token, body) });
+    if (path === "/native-host/v1/call") return json(response, 200, { protocolVersion: 1, result: await service.call(token, body) });
+    return json(response, 404, { error: { code: "NATIVE_EXTERNAL_INVALID_REQUEST" } });
   }
 
   private async handleDsh(request: IncomingMessage, response: ServerResponse, pathname: string): Promise<void> {
@@ -864,6 +894,11 @@ function parseLaneSetsInput(body: Record<string, unknown>): DashboardLaneSetsInp
   // Null is an answer here, not a missing value: it moves the lanes back to their projects.
   if (body.setId !== null && typeof body.setId !== "string") return "setId must be a string, or null for the lanes' projects";
   return { action: "assign", addresses: body.addresses as string[], setId: body.setId };
+}
+
+function bearerToken(request: IncomingMessage): string {
+  const authorization = request.headers.authorization;
+  return typeof authorization === "string" && authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {

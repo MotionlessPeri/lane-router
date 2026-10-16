@@ -141,8 +141,8 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     // change with its own confirmation loop, and must not happen as a side effect of "open".
     throw new Error(`Lane ${invocation.address!.address} has no active binding to resume; attach a conversation through the rotation flow instead`);
   }
-  if (info.backend === "dsh") {
-    throw new Error(`The dsh backend is Host-managed and cannot be opened by lane-router-lane`);
+  if (info.backend === "dsh" || info.backend === "native-codex") {
+    throw new Error(`The ${info.backend} backend is Host-managed and cannot be opened by lane-router-lane`);
   }
   // The guard is the scope, not a policy choice: no ZCode launcher exists to hand this to yet.
   if (info.backend === "zcode") {

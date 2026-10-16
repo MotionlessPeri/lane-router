@@ -7,21 +7,16 @@ import { expect, test, vi } from "vitest";
 
 import { openRouterDatabase } from "../../src/router/database.js";
 import { initializeRouterSchema, ROUTER_SCHEMA_VERSION } from "../../src/router/schema.js";
-import { LANE_SET_TABLES_SQL, MESSAGE_TABLES_V6_SQL, MESSAGE_TABLES_WITH_SENDER_LABEL_SQL } from "../fixtures/router/schema-shapes.js";
+import { schemaSql, STARTING_SHAPES } from "../fixtures/router/schema-shapes.js";
 
-/** Version 7 here is the DSH one; version 10 is the current shape, with zcode, the sender label and lane sets. */
+/** Version 7 here is the DSH one; version 10 is the main branch shape, with zcode, the sender label and lane sets. */
 function writeDatabase(version: 7 | 10, dangling: boolean): { root: string; path: string } {
   const root = mkdtempSync(join(tmpdir(), "lane-router-zcode-migration-"));
   const path = join(root, "router.sqlite");
   const raw = new Database(path);
   raw.pragma("foreign_keys = OFF");
+  raw.exec(schemaSql(version === 7 ? STARTING_SHAPES["v7 (DSH)"] : STARTING_SHAPES.v10));
   raw.exec(`
-    CREATE TABLE lane (id TEXT PRIMARY KEY,address TEXT NOT NULL,project TEXT NOT NULL,role_description TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,model TEXT,archived_at INTEGER);
-    CREATE TABLE binding (id TEXT PRIMARY KEY,lane_id TEXT NOT NULL REFERENCES lane(id),backend TEXT NOT NULL CHECK (backend IN ('claude','codex','dsh'${version === 10 ? ",'zcode'" : ""})),conversation_id TEXT NOT NULL,generation INTEGER NOT NULL CHECK (generation > 0),startup_json TEXT NOT NULL,active_at INTEGER NOT NULL,inactive_at INTEGER,cwd TEXT);
-    CREATE UNIQUE INDEX binding_active_lane_idx ON binding(lane_id) WHERE inactive_at IS NULL;
-    CREATE UNIQUE INDEX binding_active_conversation_idx ON binding(backend,conversation_id) WHERE inactive_at IS NULL;
-    CREATE UNIQUE INDEX binding_lane_generation_idx ON binding(lane_id,generation);
-    ${version === 10 ? `${MESSAGE_TABLES_WITH_SENDER_LABEL_SQL}${LANE_SET_TABLES_SQL}` : MESSAGE_TABLES_V6_SQL}
     INSERT INTO lane VALUES('lane-1','alpha/a','alpha','a',1,1,NULL,NULL);
     INSERT INTO binding VALUES('binding-1','${dangling ? "missing-lane" : "lane-1"}','claude','session',7,'{}',2,NULL,NULL);
     INSERT INTO binding VALUES('binding-2','lane-1','dsh','host-session',3,'{}',4,5,NULL);
@@ -30,7 +25,7 @@ function writeDatabase(version: 7 | 10, dangling: boolean): { root: string; path
   return { root, path };
 }
 
-test("schema 7 migration preserves rows and generations and adds only the zcode backend value", () => {
+test("schema 7 migration preserves rows and generations and admits the zcode backend", () => {
   const { root, path } = writeDatabase(7, false);
   const database = openRouterDatabase(path);
   try {
@@ -78,7 +73,7 @@ test("a failure while adding zcode leaves the version 7 database as it was", () 
   } finally { database.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("opening an already-current schema rejects foreign key corruption", () => {
+test("opening a version 10 schema rejects foreign key corruption", () => {
   const { root, path } = writeDatabase(10, true);
   try { expect(() => openRouterDatabase(path)).toThrow(/dangling references/i); }
   finally { rmSync(root, { recursive: true, force: true }); }

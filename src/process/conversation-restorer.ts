@@ -37,7 +37,7 @@ export class ConversationRestorer {
   constructor(private readonly dependencies: RestorerDependencies) {}
 
   async restore(binding: BindingRecord, override: RestoreOverride = {}): Promise<RestoreResult> {
-    if (binding.backend === "dsh") return failure("backend_unavailable", "dsh conversations are restored by their Host");
+    if (binding.backend === "dsh" || binding.backend === "native-codex") return failure("backend_unavailable", `${binding.backend} conversations are restored by their Host`);
     // Not "later by someone else" but "not yet by anyone": spawning a ZCode client headless has no
     // implementation, and falling through would hand a ZCode conversation to a Claude terminal.
     if (binding.backend === "zcode") return failure("backend_unavailable", "zcode conversations cannot be reopened by the Router yet");
@@ -98,6 +98,7 @@ export class ConversationRestorer {
   }
 
   private async requireCwd(binding: BindingRecord): Promise<string> {
+    if (binding.backend === "native-codex") throw new InvalidStartupCwdError("Host-owned conversations have no shared launcher cwd");
     // The cwd column is the single home; startup.cwd is only read as a legacy fallback for
     // bindings written by builds that stored it there.
     if (binding.cwd !== null) return requireDirectory(binding.cwd, binding.laneAddress);

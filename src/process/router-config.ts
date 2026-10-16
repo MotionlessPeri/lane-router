@@ -35,6 +35,7 @@ export const zcodeDriverConfigSchema = z.object({
 });
 
 export const routerConfigSchema = z.object({
+  nativeHostsFile: z.string().trim().min(1).optional(),
   zcode: z.object({ driver: zcodeDriverConfigSchema }).strict().optional(),
 }).strict();
 
@@ -63,11 +64,13 @@ export async function readRouterConfig(options: {
     text = await read(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw error;
+    throw new Error("Router config could not be read");
   }
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch {
-    throw new Error(`Router config is not valid JSON: ${path}`);
+    throw new Error("Router config is not valid JSON");
   }
-  return routerConfigSchema.parse(parsed);
+  const result = routerConfigSchema.safeParse(parsed);
+  if (!result.success) throw new Error("Router config has an invalid shape");
+  return result.data;
 }

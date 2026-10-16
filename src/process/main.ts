@@ -10,6 +10,10 @@ import { ZcodeDriver } from "../adapters/zcode/driver/driver.js";
 import { ClaudeBackend } from "../backends/claude-backend.js";
 import { DshBackend, DshChannelHub } from "../backends/dsh-backend.js";
 import { ZcodeBackend } from "../backends/zcode-backend.js";
+import { NativeHostBackend } from "../backends/native-host-backend.js";
+import { NativeHostService } from "./native-host-service.js";
+import { readNativeHostPermits } from "./native-host-permits.js";
+import type { NativeHostPermit } from "./native-external-contract.js";
 import { BackendRegistry } from "../router/backend.js";
 import { dashboardSnapshot, type DashboardLauncherChoices } from "../router/dashboard.js";
 import { openRouterDatabase } from "../router/database.js";
@@ -28,7 +32,7 @@ import { ToolService } from "../tools/tool-service.js";
 import { ClaudeChannelHub, LocalRouterServer } from "./local-server.js";
 import { RuntimeLock } from "./runtime-lock.js";
 
-export async function runRouterProcess(options: { dataRoot?: string } = {}): Promise<{ close(): Promise<void> }> {
+export async function runRouterProcess(options: { dataRoot?: string; nativeHosts?: readonly NativeHostPermit[] } = {}): Promise<{ close(): Promise<void> }> {
   const dataRoot = options.dataRoot ?? process.env.LANE_ROUTER_DATA_ROOT ?? join(homedir(), ".lane-router");
   mkdirSync(dataRoot, { recursive: true });
   const lock = RuntimeLock.acquire(join(dataRoot, "router.lock"));
@@ -51,9 +55,14 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
   // or broken zcode install costs exactly the features that need it and never the Router's boot.
   // A config file that exists but does not parse is an operator error the Router must refuse to
   // run on, so the read sits inside the lock-owning lifecycle rather than before it.
-  const zcodeDriverConfig = (await readRouterConfig({ dataRoot }).catch((error: unknown) => {
+  const configuration = await (async () => {
+    const config = await readRouterConfig({ dataRoot });
+    const nativeHosts = await readNativeHostPermits({ dataRoot, nativeHostsFile: config.nativeHostsFile, nativeHosts: options.nativeHosts });
+    return { config, nativeHosts };
+  })().catch((error: unknown) => {
     database.close(); lock.release(); throw error;
-  })).zcode?.driver;
+  });
+  const zcodeDriverConfig = configuration.config.zcode?.driver;
   const zcodeDriver = zcodeDriverConfig === undefined ? undefined : new ZcodeDriver({
     launch: {
       command: zcodeDriverConfig.command,
@@ -75,6 +84,8 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
   );
   const dshHub = new DshChannelHub((sessionId) => state.activeBindingForConversation("dsh", sessionId));
   const dshBackend = new DshBackend(dshHub);
+  const nativeHostBackend = new NativeHostBackend(id => state.activeBindingForConversation("native-codex", id));
+  let nativeHost: NativeHostService | undefined;
   let tools: ToolService | undefined;
   const codex = createCodexRuntime({
     state,
@@ -92,7 +103,7 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     const dshToken = loadDshHostToken(dataRoot);
     await codex.start();
     const launcherChoices = await codexLauncherChoices(codex.client);
-    const backends = new BackendRegistry([claudeBackend, codex.backend, dshBackend, zcodeBackend]);
+    const backends = new BackendRegistry([claudeBackend, codex.backend, dshBackend, zcodeBackend, nativeHostBackend]);
     const pump = new NotificationPump(state, mailbox, backends);
     const restore = new ConversationRestorer({
       state, backends,
@@ -112,8 +123,13 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
       resolveProfileProvider: profileModelProvider,
     });
     tools = new ToolService(core);
+    if (configuration.nativeHosts !== undefined) nativeHost = new NativeHostService({
+      permits: configuration.nativeHosts, state, core, tools, backend: nativeHostBackend,
+      attention: lane => pump.onAttentionOpportunity(lane),
+    });
     server = new LocalRouterServer({
       tools, codex, claude: claudeHub, instanceId: randomUUID(),
+      nativeHost,
       dsh: { token: dshToken, channel: dshHub, read: (context, messageIds) => core.read(context, { messageIds }),
         handoff: (context, input) => core.handoffDsh(context, input) },
       // The cwd travels with whichever backend owns the binding, so the channel resolver decides
@@ -157,6 +173,8 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
     for (const backend of [claudeBackend, codex.backend, dshBackend, zcodeBackend]) backend.onAttentionOpportunity((lane) => { void pump.onAttentionOpportunity(lane); });
     await pump.onStartup();
   } catch (error) {
+    await server?.close().catch(() => undefined);
+    nativeHost?.close();
     await codex.stop().catch(() => undefined);
     await zcodeDriver?.shutdown().catch(() => undefined);
     database.close(); lock.release(); throw error;
