@@ -517,7 +517,12 @@ test("the launcher groups lanes by set, and by project for the lanes in none, em
   const page = startPage(setSnapshot);
   await page.ready();
   const groups = [...page.document.querySelectorAll("section.lane-group")];
-  expect(groups.map((group) => group.getAttribute("data-group"))).toEqual(["beta", "empty", "research"]);
+  // Sets ahead of every project, each run by name: the sets are what the reader is working on,
+  // and the user asked for them at the top of the page, not filed among the projects by initial.
+  expect(groups.map((group) => group.getAttribute("data-group"))).toEqual(["empty", "research", "beta"]);
+  // The controls that make and fill sets sit above the groups too, not under the open button.
+  const controls = page.document.querySelector(".set-controls")!;
+  expect(controls.compareDocumentPosition(groups[0]!) & 4).toBeTruthy();
   // Across projects, so each lane carries its project in front of its name.
   const research = [...page.document.querySelectorAll("section.lane-group[data-group='research'] input[data-lane-checkbox]")];
   expect(research.map((checkbox) => (checkbox as HTMLInputElement).value)).toEqual(["alpha/offline", "gamma/one"]);

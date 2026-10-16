@@ -95,7 +95,8 @@ CREATE INDEX lane_set_member_set_idx ON lane_set_member(set_id);
 
 ### 3.6 页面
 
-- 启动器第一层按组：lane 在 set 里就归 set 名，否则归项目名；组按名排序（不分大小写，沿用现有 `byName`），组内按地址排序。空 set 也显示一组，写「（空）」。
+- 启动器第一层按组：lane 在 set 里就归 set 名，否则归项目名。**set 组全部排在项目组前面**，两段各自按名排序（不分大小写，沿用现有 `byName`），组内按地址排序。空 set 也显示一组，写「（空）」。建 set / 移入的控件放在启动器最上面、全选那一行之下，不放在打开按钮之下。
+  > 勘误（2026-10-16）：用户原话「页面最开始就列 set，然后列 lane」，首版只做成了「分组第一层是 set」而把 set 组与项目组按字母混排、控件压在底部，用户指出后改成本条。
 - 组的 DOM：`section.lane-group[data-group=<名字>]`，组头复选框 `input[data-group-checkbox]`。现有测试里的 `section.project` / `data-project` / `data-project-checkbox` 跟着改。
 - lane 行保持原样：`地址 · backend · 恢复状态 · model`（Codex 另带 profile / provider）。
   > 勘误（2026-10-16）：本条原写「只显示地址，去掉那串」，源于需求第 6 条的误读（见需求稿勘误），实现后按用户要求改回。

@@ -34,7 +34,7 @@
   .override-grid { display: grid; grid-template-columns: 9rem minmax(12rem, 24rem); gap: .35rem .6rem; align-items: center; }
   .override-grid label, .set-controls label { color: var(--dim); }
   .override-grid input, .override-grid select, .set-controls input, .set-controls select { font: inherit; padding: .15rem .3rem; }
-  .set-controls { display: grid; grid-template-columns: 9rem minmax(12rem, 24rem) auto; gap: .35rem .6rem; align-items: center; justify-content: start; margin-top: 1rem; }
+  .set-controls { display: grid; grid-template-columns: 9rem minmax(12rem, 24rem) auto; gap: .35rem .6rem; align-items: center; justify-content: start; margin: .25rem 0 1rem; }
   #launcher-status { margin-top: .5rem; white-space: pre-wrap; }
 </style>
 </head>
@@ -252,7 +252,9 @@
       projects.get(lane.project).push(lane);
     });
     projects.forEach((lanes, project) => groups.push({ name: project, set: null, lanes }));
-    groups.sort((a, b) => byName(a.name, b.name));
+    // Sets first, then projects, each run by name: a set is what the reader is working on now,
+    // and it has to be at the top of the page rather than filed among 26 projects by its initial.
+    groups.sort((a, b) => Number(a.set === null) - Number(b.set === null) || byName(a.name, b.name));
     groups.forEach((group) => group.lanes.sort((a, b) => byName(a.address, b.address)));
     return groups;
   }
@@ -404,6 +406,9 @@
     selectAllChoice.appendChild(selectAll);
     selectAllChoice.appendChild(document.createTextNode(" 全选 / 取消全选"));
     host.appendChild(selectAllChoice);
+    // At the top with the sets they manage. Only for a Router that publishes sets: an older one
+    // serves this same page as soon as it is built, and has no endpoint behind these controls.
+    if (Array.isArray(snapshot.laneSets)) host.appendChild(setControls(snapshot, previous));
 
     const selectableLanes = () =>
       [...host.querySelectorAll("input[data-lane-checkbox]")].filter((checkbox) => !checkbox.disabled);
@@ -544,9 +549,6 @@
     const button = actionButton("open-selected", "打开选中 lane");
     button.addEventListener("click", openSelected);
     host.appendChild(button);
-    // Only for a Router that publishes sets. An older one serves this same page as soon as it is
-    // built, and has no endpoint behind these controls.
-    if (Array.isArray(snapshot.laneSets)) host.appendChild(setControls(snapshot, previous));
     const status = el("div", null, null);
     status.id = "launcher-status";
     status.textContent = previous.statusText;
