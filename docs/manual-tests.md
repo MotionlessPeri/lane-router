@@ -688,7 +688,15 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 **备份已做（第 2 步）：** 同一时刻从在用库拷出 `~/.lane-router/router.sqlite.bak-20261013-181108-v7-pre-merge`，已核实是 v7。因为 `dist/` 已是合并后的构建，Router 任何一次启动都会迁移在用库；这份是迁移前的回退点，回退时配合合并前的 tell 构建（`9641e33`；更早的构建只认 v6，打不开它）使用。
 
-**最后验证：** 尚未真机执行，等用户决定重启时机。
+**最后验证：** 2026-10-16 16:54 真机执行，按上方 ⚠️ 从 v7 直接迁到 v10，构建 `a6aa0b5`。
+
+- 第 1 步读数：`user_version` 7；后端列表 `'claude','codex'`；84 / 148 / 11298 / 3077；带 label 5；两张消息表的发送方约束在；`foreign_key_check` 空。
+- 第 2 步：临停前一刻再拷一份 `router.sqlite.bak-20261016-165405-v7-pre-set`（v7，`integrity_check` ok，此时 message 已是 11299）。更早的一份 `…-20261016-163355-v7-pre-set` 也在。
+- 第 3 步用 `scripts/restart-router.ps1`：旧 Router（pid 66944）停了，新 Router pid 77532 于 16:54:14 起来并把库迁到 10，但脚本报「Router process did not become ready」退出。原因：`ensureRouter` 只等 15 秒，Router 要先起 Codex app-server 再写 `discovery.json`，这次用了约 18 秒。16:54:32 起 25 条 lane 的 channel 全部接上新 Router（含虚拟机上的 4 条；`start-vm-bridge.ps1` 在 16:54:43 自动换到新端口 54856）。
+- 第 4 步：`user_version` 10；后端列表 `'claude','codex','dsh','zcode'`；84 / 148 / 11299 / 3077（多的一封是第 1 步之后正常新到的）；带 label 5；发送方约束在；`foreign_key_check` 空；另有空表 `lane_set` / `lane_set_member`。
+- 第 5 步：`lane_send` 到 `lane-router/impl` 一封，`notificationState = sent`；`lane-router-lane tell lane-router/design --origin design --subject …` 一封，退出码 0、`delivered: true`、目标 `online`，并且这封 tell 的 channel 通知当场把 design 自己的会话叫醒了，唤醒链在新 Router 上成立。重启后两分钟内快照里的可达状态：`unconfirmed` 25（刚接上、还没报过生命周期，预期如此）、`live` 1、`no_channel` 41（没开窗口的 lane）。
+
+⚠️ 两个发现：① `restart-router.ps1` 的等待比 Router 启动短，脚本报失败不等于 Router 没起来，下次先看 `discovery.json` 的 pid 再判断；② 期间有一条 lane 的 MCP 自己去拉 Router，被 `router.lock` 挡回（`router-start.log` 首行「Another Router process is already running」），这是预期的守卫，但那次尝试把日志开头覆盖掉了一截，属于已记录的启动竞态问题。
 
 ## 当前记录
 
