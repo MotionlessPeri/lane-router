@@ -17,6 +17,11 @@ export function parseLaneAddress(value: string): LaneAddress {
   return { address: value, project: parts[0]!, lane: parts[1]! };
 }
 
+/** Whether a name could be one part of a lane address: the same rule, not a copy of it. */
+export function isAddressSegment(value: string): boolean {
+  return SEGMENT.test(value);
+}
+
 export function mailboxLanePath(dataRoot: string, address: LaneAddress): string {
   return join(
     dataRoot,

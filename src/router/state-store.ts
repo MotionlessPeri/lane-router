@@ -6,6 +6,7 @@ import type {
   BackendName,
   BindingRecord,
   LaneRecord,
+  LaneSetRecord,
   MessageKind,
   MessageRecord,
   NewMessageRecord,
@@ -146,7 +147,11 @@ export class RouterStateStore {
    */
   archiveLane(address: string, now: number): LaneRecord {
     const lane = this.requireLane(address);
-    this.database.prepare("UPDATE lane SET archived_at=?,updated_at=? WHERE id=?").run(now, now, lane.id);
+    // A set holds lanes in service, so leaving service is leaving the set as well.
+    this.database.transaction(() => {
+      this.database.prepare("UPDATE lane SET archived_at=?,updated_at=? WHERE id=?").run(now, now, lane.id);
+      this.database.prepare("DELETE FROM lane_set_member WHERE lane_id=?").run(lane.id);
+    })();
     return this.requireLaneById(lane.id);
   }
 
@@ -165,6 +170,76 @@ export class RouterStateStore {
    */
   listAllLanes(): LaneRecord[] {
     return (this.database.prepare(`${LANE_SELECT} ORDER BY address`).all() as LaneRow[]).map(mapLane);
+  }
+
+  /** Every set by name, empty ones included, each with the addresses of its lanes in service. */
+  listLaneSets(): LaneSetRecord[] {
+    const sets = this.database.prepare("SELECT id,name FROM lane_set ORDER BY name,id").all() as Array<{ id: string; name: string }>;
+    // Filtered here even though archiving empties the row: a member row that outlived its lane's
+    // service must not put an archived lane back into a group on the board.
+    const members = this.database.prepare(`
+      SELECT m.set_id,l.address FROM lane_set_member m JOIN lane l ON l.id=m.lane_id
+      WHERE l.archived_at IS NULL ORDER BY l.address
+    `).all() as Array<{ set_id: string; address: string }>;
+    return sets.map((set) => ({
+      id: set.id,
+      name: set.name,
+      members: members.filter((member) => member.set_id === set.id).map((member) => member.address),
+    }));
+  }
+
+  /**
+   * The name is stored trimmed, so two names that differ only in surrounding spaces are one name.
+   * Whether it is a usable name at all is the caller's rule, not the table's.
+   */
+  createLaneSet(name: string, now: number): LaneSetRecord {
+    const trimmed = name.trim();
+    const id = randomUUID();
+    try {
+      this.database.prepare("INSERT INTO lane_set(id,name,created_at,updated_at) VALUES(?,?,?,?)").run(id, trimmed, now, now);
+    } catch (error) {
+      if (error instanceof Error && /unique constraint/iu.test(error.message)) throw new Error(`A lane set named ${trimmed} already exists`);
+      throw error;
+    }
+    return { id, name: trimmed, members: [] };
+  }
+
+  /** Its lanes go back to their projects: the member rows go with the set. */
+  deleteLaneSet(id: string): void {
+    if (this.database.prepare("DELETE FROM lane_set WHERE id=?").run(id).changes !== 1) throw new Error(`Lane set not found: ${id}`);
+  }
+
+  /**
+   * Put a lane in service into a set, or take it out with `null`. A lane already in another set
+   * moves, since it can be in only one. Moving into the set it is already in changes nothing,
+   * not even when it was added. `updated_at` on the set is left alone: it dates the set itself,
+   * and each member row carries its own date.
+   */
+  assignLaneSet(address: string, setId: string | null, now: number): void {
+    const lane = this.requireLane(address);
+    if (setId === null) {
+      this.database.prepare("DELETE FROM lane_set_member WHERE lane_id=?").run(lane.id);
+      return;
+    }
+    if (this.database.prepare("SELECT 1 FROM lane_set WHERE id=?").get(setId) === undefined) throw new Error(`Lane set not found: ${setId}`);
+    this.database.prepare(`
+      INSERT INTO lane_set_member(lane_id,set_id,added_at) VALUES(?,?,?)
+      ON CONFLICT(lane_id) DO UPDATE SET set_id=excluded.set_id,added_at=excluded.added_at WHERE set_id<>excluded.set_id
+    `).run(lane.id, setId, now);
+  }
+
+  /** The name of the set the lane in service at this address is in; undefined when it is in none. */
+  laneSetNameFor(address: string): string | undefined {
+    return (this.database.prepare(`
+      SELECT s.name FROM lane l
+      JOIN lane_set_member m ON m.lane_id=l.id
+      JOIN lane_set s ON s.id=m.set_id
+      WHERE l.address=? AND l.archived_at IS NULL
+    `).get(address) as { name: string } | undefined)?.name;
+  }
+
+  projectHasLiveLanes(project: string): boolean {
+    return this.database.prepare("SELECT 1 FROM lane WHERE project=? AND archived_at IS NULL LIMIT 1").get(project) !== undefined;
   }
 
   /**

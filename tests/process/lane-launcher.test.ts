@@ -7,6 +7,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { launchLane } from "../../src/process/lane-launcher.js";
 import { LocalRouterServer } from "../../src/process/local-server.js";
 import type { TerminalChildRequest } from "../../src/process/terminal-spawn.js";
+import { startLaneSetRouter } from "../fixtures/process/lane-set-router.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -93,6 +94,38 @@ test("open resumes the bound conversation in its recorded cwd", async () => {
   });
   expect(environment.LANE_ROUTER_CHILD_TITLE).toBe("alpha/worker gen3");
   expect(environment.LANE_ROUTER_CHILD_WINDOW).toBe("alpha");
+});
+
+// A Router older than lane sets sends no `laneSet` at all, and the lane still has to open somewhere
+// sensible: its project's window, exactly as before sets existed.
+test("open puts a lane in a set into the set's window, and otherwise into its project's", async () => {
+  const bound = (laneSet: Record<string, unknown>) => vi.fn(async () => ({
+    state: "bound" as const, backend: "claude" as const, conversationId: "4b50f153-0932-4442-840b-98a4b7593a51",
+    cwd: "E:\\proj", generation: 3, reach: reach("no_channel"), restorePresence: "offline" as const, model: null, ...laneSet,
+  }));
+  for (const [answer, window] of [
+    [{ laneSet: "research" }, "research"],
+    [{ laneSet: null }, "alpha"],
+    [{}, "alpha"],
+  ] as const) {
+    const deps = fakes({ queryResumeInfo: bound(answer) });
+    await launchLane(["open", "alpha/worker"], deps);
+    const [, environment] = deps.spawnTerminal.mock.calls[0]! as [TerminalChildRequest, NodeJS.ProcessEnv];
+    expect(environment.LANE_ROUTER_CHILD_WINDOW, JSON.stringify(answer)).toBe(window);
+    expect(environment.LANE_ROUTER_CHILD_TITLE).toBe("alpha/worker gen3");
+  }
+});
+
+// The same question asked of a real Router, so the answer is the one its state actually gives.
+test("open asks a real Router which window, and the Router answers with the lane's set", async () => {
+  const deps = fakes({ queryResumeInfo: undefined });
+  const router = await startLaneSetRouter(deps.dataRoot);
+  try {
+    await launchLane(["open", "alpha/worker"], deps);
+    await launchLane(["open", "alpha/plain"], deps);
+    const windows = deps.spawnTerminal.mock.calls.map((call) => (call[1] as NodeJS.ProcessEnv).LANE_ROUTER_CHILD_WINDOW);
+    expect(windows).toEqual(["research", "alpha"]);
+  } finally { await router.close(); }
 });
 
 test("open refuses what must not be reopened and says what to do instead", async () => {

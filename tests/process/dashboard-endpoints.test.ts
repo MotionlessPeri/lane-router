@@ -125,6 +125,115 @@ test("the open action is same-origin, token-protected, and optional", async () =
   } finally { await server.close(); }
 });
 
+function startSetServer() {
+  const laneSets = [{ id: "set-1", name: "research", members: ["alpha/a"] }];
+  const dashboardLaneSets = vi.fn(async () => ({ laneSets }));
+  const server = new LocalRouterServer({
+    tools: { call: vi.fn() } as never,
+    codex: { endpoint: "ws://127.0.0.1:1" } as never,
+    instanceId: "instance-1",
+    dashboardState: () => ({ capturedAt: 1, lanes: [], messages: [] }),
+    dashboardLaneSets,
+  });
+  return { server, dashboardLaneSets, laneSets };
+}
+
+async function setRequest(url: string) {
+  const state = await (await fetch(`${url}/dashboard/state`)).json() as { actionToken?: string };
+  const headers = { "content-type": "application/json", "origin": url, "x-lane-router-action": "lane-sets" };
+  return {
+    token: state.actionToken,
+    send: (body: Record<string, unknown>, override: { headers?: Record<string, string | undefined> } = {}) => {
+      const merged = Object.fromEntries(Object.entries({ ...headers, ...override.headers })
+        .filter((entry): entry is [string, string] => entry[1] !== undefined));
+      return fetch(`${url}/dashboard/lane-sets`, { method: "POST", headers: merged, body: JSON.stringify({ actionToken: state.actionToken, ...body }) });
+    },
+  };
+}
+
+// The same four checks as opening a lane: the same threat — a page on another site pressing the
+// button — and the same thing it does not defend against, a process on this machine.
+test("the set action is same-origin, token-protected, and refuses each missing check without acting", async () => {
+  const { server, dashboardLaneSets } = startSetServer();
+  const discovery = await server.start();
+  try {
+    const { token, send } = await setRequest(discovery.url);
+    expect(token).toEqual(expect.any(String));
+    const create = { action: "create", name: "research" };
+    for (const missing of [
+      { headers: { origin: undefined } },
+      { headers: { origin: "https://example.invalid" } },
+      { headers: { "x-lane-router-action": undefined } },
+      { headers: { "x-lane-router-action": "open" } },
+      { headers: { "content-type": "text/plain" } },
+    ]) {
+      const response = await send(create, missing);
+      expect(response.status, JSON.stringify(missing)).toBeGreaterThanOrEqual(400);
+    }
+    expect((await send({ ...create, actionToken: undefined })).status).toBe(403);
+    expect((await send({ ...create, actionToken: "wrong" })).status).toBe(403);
+    expect(dashboardLaneSets).not.toHaveBeenCalled();
+  } finally { await server.close(); }
+});
+
+test("the set endpoint takes create, delete and assign and answers with every set", async () => {
+  const { server, dashboardLaneSets, laneSets } = startSetServer();
+  const discovery = await server.start();
+  try {
+    const { send } = await setRequest(discovery.url);
+    for (const input of [
+      { action: "create", name: "research" },
+      { action: "delete", setId: "set-1" },
+      { action: "assign", addresses: ["alpha/a", "beta/b"], setId: "set-1" },
+      { action: "assign", addresses: ["alpha/a"], setId: null },
+    ]) {
+      const response = await send(input);
+      expect(response.status, JSON.stringify(input)).toBe(200);
+      expect(await response.json()).toEqual({ laneSets });
+      expect(dashboardLaneSets).toHaveBeenLastCalledWith(input);
+    }
+    expect(dashboardLaneSets).toHaveBeenCalledTimes(4);
+  } finally { await server.close(); }
+});
+
+test("the set endpoint refuses a malformed request before acting, and passes a refusal's words on", async () => {
+  const { server, dashboardLaneSets } = startSetServer();
+  const discovery = await server.start();
+  try {
+    const { send } = await setRequest(discovery.url);
+    for (const input of [
+      { action: "rename", name: "x" },
+      { action: "create" },
+      { action: "create", name: 7 },
+      { action: "delete" },
+      { action: "assign", addresses: [], setId: "set-1" },
+      { action: "assign", addresses: [7], setId: "set-1" },
+      { action: "assign", addresses: ["alpha/a"] },
+      { action: "assign", addresses: ["alpha/a"], setId: 7 },
+    ]) {
+      expect((await send(input)).status, JSON.stringify(input)).toBe(400);
+    }
+    expect(dashboardLaneSets).not.toHaveBeenCalled();
+
+    dashboardLaneSets.mockRejectedValueOnce(new Error("Lane set research still has 1 lane(s); move them out before deleting it"));
+    const refused = await send({ action: "delete", setId: "set-1" });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ error: "Lane set research still has 1 lane(s); move them out before deleting it" });
+  } finally { await server.close(); }
+});
+
+test("the set endpoint is absent when it is not wired, and the tool list does not grow", async () => {
+  const { server } = startOpenableServer();
+  const discovery = await server.start();
+  try {
+    const { send } = await setRequest(discovery.url);
+    expect((await send({ action: "create", name: "research" })).status).toBe(404);
+    expect([...LANE_TOOL_NAMES]).toEqual([
+      "lane_directory", "lane_attach_current", "lane_send", "lane_ack", "lane_restore_project",
+    ]);
+  } finally { await server.close(); }
+});
+
 test("the open endpoint is absent when the opener is not wired", async () => {
   const server = startServer(() => ({}));
   const discovery = await server.start();

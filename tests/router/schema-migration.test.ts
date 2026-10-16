@@ -495,8 +495,10 @@ function tableSql(database: Database.Database, table: string): string {
   return (database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as { sql: string }).sql;
 }
 
-function rowCounts(database: Database.Database): Record<string, number> {
-  return Object.fromEntries(["lane", "binding", "message", "message_archive"].map((table) =>
+const TABLES_BEFORE_SETS = ["lane", "binding", "message", "message_archive"] as const;
+
+function rowCounts(database: Database.Database, tables: readonly string[] = TABLES_BEFORE_SETS): Record<string, number> {
+  return Object.fromEntries(tables.map((table) =>
     [table, (database.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n]));
 }
 
@@ -544,12 +546,16 @@ function writeStartingShape(shape: (typeof STARTING_SHAPES)[StartingShape]): str
       VALUES('a-told','tell:a-told',NULL,'user:vikunja','lane-gone','normal',NULL,'archive/lane-gone/told.md',?,'resolved',7,8,'lane-gone',1,'sent',900)
     `).run(SHA);
   }
+  if (shape.laneSets) {
+    database.prepare("INSERT INTO lane_set(id,name,created_at,updated_at) VALUES('set-1','research',20,21)").run();
+    database.prepare("INSERT INTO lane_set_member(lane_id,set_id,added_at) VALUES('lane-a','set-1',22)").run();
+  }
   database.close();
   return path;
 }
 
 describe("router schema from version 6 on", () => {
-  // The five shapes a database can be in from version 6 on. Two of them are stamped 7 and mean
+  // The six shapes a database can be in from version 6 on. Two of them are stamped 7 and mean
   // different things, which is why the steps are decided by shape: decided by number, the tell
   // database would be read as "DSH done", skip the binding rebuild, and then add a column it has.
   for (const [name, shape] of Object.entries(STARTING_SHAPES)) {
@@ -585,6 +591,11 @@ describe("router schema from version 6 on", () => {
         ]);
         expect(database.prepare("SELECT reply_to,state,ack_lane_id,ack_generation FROM message WHERE id='m-resolved'").get())
           .toEqual({ reply_to: "m-pending", state: "resolved", ack_lane_id: "lane-a", ack_generation: 1 });
+        // The set tables arrive empty, or keep exactly what a version 10 build put there.
+        expect(database.prepare("SELECT id,name,created_at,updated_at FROM lane_set").all())
+          .toEqual(shape.laneSets ? [{ id: "set-1", name: "research", created_at: 20, updated_at: 21 }] : []);
+        expect(database.prepare("SELECT lane_id,set_id,added_at FROM lane_set_member").all())
+          .toEqual(shape.laneSets ? [{ lane_id: "lane-a", set_id: "set-1", added_at: 22 }] : []);
         expect(database.pragma("foreign_key_check")).toEqual([]);
         expect(database.pragma("foreign_keys", { simple: true })).toBe(1);
         for (const leftover of ["binding_legacy", "message_legacy", "message_archive_legacy"]) {
@@ -594,14 +605,41 @@ describe("router schema from version 6 on", () => {
     });
   }
 
-  it("leaves a version 9 database exactly as it was", () => {
-    const path = writeStartingShape(STARTING_SHAPES.v9);
+  it("leaves a version 10 database exactly as it was", () => {
+    const path = writeStartingShape(STARTING_SHAPES.v10);
     const schemaOf = (database: Database.Database) => database.prepare("SELECT type,name,sql FROM sqlite_master ORDER BY name").all();
     const raw = new Database(path, { readonly: true });
-    const before = schemaOf(raw);
+    const before = { schema: schemaOf(raw), rows: rowCounts(raw, [...TABLES_BEFORE_SETS, "lane_set", "lane_set_member"]) };
     raw.close();
     const database = openRouterDatabase(path);
-    try { expect(schemaOf(database)).toEqual(before); } finally { database.close(); }
+    try {
+      expect(database.pragma("user_version", { simple: true })).toBe(10);
+      expect({ schema: schemaOf(database), rows: rowCounts(database, [...TABLES_BEFORE_SETS, "lane_set", "lane_set_member"]) }).toEqual(before);
+    } finally { database.close(); }
+  });
+
+  // The set step is the third in the same transaction as the two rebuilds. Failing it must take
+  // both of them back, or the next start would find a version 6 number on a version 9 shape.
+  it("rolls the two earlier steps back when the lane set step fails", () => {
+    const path = writeStartingShape(STARTING_SHAPES.v6);
+    const database = new Database(path);
+    database.pragma("foreign_keys = ON");
+    const exec = database.exec.bind(database);
+    vi.spyOn(database, "exec").mockImplementation((sql) => {
+      if (sql.includes("CREATE TABLE lane_set")) throw new Error("injected lane set step failure");
+      return exec(sql);
+    });
+    try {
+      expect(() => initializeRouterSchema(database)).toThrow(/injected lane set step failure/);
+      expect(database.pragma("user_version", { simple: true })).toBe(6);
+      expect(tableSql(database, "binding")).toContain(`backend IN ${BINDING_BACKENDS.v6}`);
+      expect((database.pragma("table_info(message)") as Array<{ name: string }>).map((column) => column.name)).not.toContain("sender_label");
+      expect(rowCounts(database)).toEqual({ lane: 3, binding: 1, message: 2, message_archive: 1 });
+      for (const leftover of ["lane_set", "lane_set_member", "binding_legacy", "message_legacy"]) {
+        expect(database.prepare("SELECT name FROM sqlite_master WHERE name=?").get(leftover), leftover).toBeUndefined();
+      }
+      expect(database.pragma("foreign_keys", { simple: true })).toBe(1);
+    } finally { database.close(); }
   });
 
   // One transaction for every step: a failure in the last one must take the first one back too,
@@ -668,6 +706,66 @@ describe("router schema from version 6 on", () => {
       expect(columns.find((column) => column.name === "sender_label")).toMatchObject({ notnull: 0 });
       expect(columns.find((column) => column.name === "sender_lane_id")).toMatchObject({ notnull: 0 });
       expect(tableSql(database, "binding")).toContain("'zcode'");
+      expect(rowCounts(database, ["lane_set", "lane_set_member"])).toEqual({ lane_set: 0, lane_set_member: 0 });
     } finally { database.close(); }
   });
+});
+
+describe("lane set tables", () => {
+  function freshDatabasePath(): string {
+    const root = mkdtempSync(join(tmpdir(), "lane-router-migration-"));
+    roots.push(root);
+    return join(root, "router.sqlite");
+  }
+
+  it("builds a new database straight to version 10 with both tables", () => {
+    const database = openRouterDatabase(freshDatabasePath());
+    try {
+      expect(ROUTER_SCHEMA_VERSION).toBe(10);
+      expect(database.pragma("user_version", { simple: true })).toBe(10);
+      expect(rowCounts(database, ["lane_set", "lane_set_member"])).toEqual({ lane_set: 0, lane_set_member: 0 });
+    } finally { database.close(); }
+  });
+
+  // Checked on both ways a database gets the tables, because they are two pieces of code: the
+  // migration from a live version 9 database, and the schema a new database is created with.
+  const origins: ReadonlyArray<readonly [string, () => string]> = [
+    ["a version 9 database after migrating", () => writeStartingShape(STARTING_SHAPES.v9)],
+    ["a new database", () => {
+      const path = freshDatabasePath();
+      const database = openRouterDatabase(path);
+      const lane = database.prepare("INSERT INTO lane(id,address,project,role_description,created_at,updated_at,archived_at) VALUES(?,?,?,?,1,1,NULL)");
+      for (const id of ["lane-a", "lane-b"]) lane.run(id, `alpha/${id}`, "alpha", id);
+      database.close();
+      return path;
+    }],
+  ];
+  for (const [origin, makePath] of origins) {
+    it(`keeps a lane in at most one set and a set's members with it, in ${origin}`, () => {
+      const database = openRouterDatabase(makePath());
+      try {
+        const set = database.prepare("INSERT INTO lane_set(id,name,created_at,updated_at) VALUES(?,?,1,1)");
+        const member = database.prepare("INSERT INTO lane_set_member(lane_id,set_id,added_at) VALUES(?,?,1)");
+        set.run("set-1", "research");
+        set.run("set-2", "curvenet");
+        expect(() => set.run("set-3", "research")).toThrow(/constraint/iu);
+        expect(() => set.run("set-4", "   ")).toThrow(/constraint/iu);
+
+        member.run("lane-a", "set-1");
+        expect(() => member.run("lane-a", "set-2")).toThrow(/constraint/iu);
+        expect(() => member.run("lane-b", "no-such-set")).toThrow(/constraint/iu);
+        expect(() => member.run("no-such-lane", "set-2")).toThrow(/constraint/iu);
+
+        // A lane is never deleted, and a membership must not become the way one could be.
+        database.prepare("INSERT INTO lane(id,address,project,role_description,created_at,updated_at) VALUES('lane-x','beta/x','beta','x',1,1)").run();
+        member.run("lane-x", "set-2");
+        expect(() => database.prepare("DELETE FROM lane WHERE id='lane-x'").run()).toThrow(/constraint/iu);
+
+        database.prepare("DELETE FROM lane_set WHERE id='set-1'").run();
+        expect(database.prepare("SELECT lane_id,set_id FROM lane_set_member ORDER BY lane_id").all())
+          .toEqual([{ lane_id: "lane-x", set_id: "set-2" }]);
+        expect(database.prepare("SELECT COUNT(*) AS n FROM lane WHERE id='lane-a'").get()).toEqual({ n: 1 });
+      } finally { database.close(); }
+    });
+  }
 });

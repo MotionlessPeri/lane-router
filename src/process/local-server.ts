@@ -417,6 +417,8 @@ export class LocalRouterServer {
     readonly dashboardState?: (router: DashboardRouter) => unknown;
     /** Opens a validated dashboard selection; absent means this Router serves a read-only board. */
     readonly dashboardOpen?: (input: { readonly addresses: readonly string[]; readonly override: DashboardOpenOverride }) => Promise<unknown>;
+    /** Creates, deletes and fills lane sets from the board; answers with every set afterwards. */
+    readonly dashboardLaneSets?: (input: DashboardLaneSetsInput) => Promise<unknown>;
   }) {
     this.host = options.host ?? "127.0.0.1";
     if (this.host !== "127.0.0.1" && this.host !== "::1") throw new Error("Router internal server must bind to loopback");
@@ -493,7 +495,7 @@ export class LocalRouterServer {
         if (url.pathname === "/dashboard/state" && this.options.dashboardState) {
           const { pid, port, instanceId } = this.discovery();
           const snapshot = this.options.dashboardState({ pid, port, instanceId });
-          return json(response, 200, this.options.dashboardOpen === undefined
+          return json(response, 200, this.options.dashboardOpen === undefined && this.options.dashboardLaneSets === undefined
             ? snapshot
             : { ...(snapshot as object), actionToken: this.dashboardActionToken });
         }
@@ -541,14 +543,8 @@ export class LocalRouterServer {
       if (request.method === "POST" && request.url === "/dashboard/lanes/open") {
         const opener = this.options.dashboardOpen;
         if (!opener) return json(response, 404, { error: "not found" });
-        if (request.headers.origin !== this.discovery().url) return json(response, 403, { error: "origin is not the Router dashboard" });
-        if (request.headers["x-lane-router-action"] !== "open") return json(response, 403, { error: "action header is invalid" });
-        const contentType = request.headers["content-type"];
-        if (typeof contentType !== "string" || !contentType.toLowerCase().startsWith("application/json")) {
-          return json(response, 400, { error: "content-type must be application/json" });
-        }
-        const body = await readJson(request) as { addresses?: unknown; override?: unknown; actionToken?: unknown };
-        if (body.actionToken !== this.dashboardActionToken) return json(response, 403, { error: "action token is invalid" });
+        const body = await this.readDashboardAction(request, response, "open") as { addresses?: unknown; override?: unknown } | undefined;
+        if (body === undefined) return;
         if (!Array.isArray(body.addresses) || body.addresses.length === 0 || body.addresses.some((address) => typeof address !== "string")) {
           return json(response, 400, { error: "addresses must be a non-empty string array" });
         }
@@ -566,6 +562,17 @@ export class LocalRouterServer {
         } catch (error) {
           return json(response, 400, { error: error instanceof Error ? error.message : "dashboard open request failed" });
         }
+      }
+      if (request.method === "POST" && request.url === "/dashboard/lane-sets") {
+        const handler = this.options.dashboardLaneSets;
+        if (!handler) return json(response, 404, { error: "not found" });
+        const body = await this.readDashboardAction(request, response, "lane-sets");
+        if (body === undefined) return;
+        const input = parseLaneSetsInput(body);
+        if (typeof input === "string") return json(response, 400, { error: input });
+        // A refusal is the Router declining, with the sentence that says why, as for archiving.
+        try { return json(response, 200, await handler(input)); }
+        catch (error) { return json(response, 409, { error: error instanceof Error ? error.message : "lane set request refused" }); }
       }
       if (request.method === "POST" && request.url === "/zcode/spawn") {
         const spawn = this.options.zcodeSpawnLane;
@@ -635,6 +642,26 @@ export class LocalRouterServer {
       if (pathname.startsWith("/dsh/v1/")) return dshError(response, 400, "INVALID_REQUEST", error instanceof Error ? error.message : "request failed");
       return json(response, 400, { error: error instanceof Error ? error.message : "request failed" });
     }
+  }
+
+  /**
+   * The four checks every board action passes before its body is looked at: the page's own
+   * origin, the header naming this action, a JSON body, and the token only the page was handed.
+   * They keep out a page on another site, which can send none of the four; they do not try to
+   * keep out a process on this machine. Answers the body, or undefined once it has refused.
+   */
+  private async readDashboardAction(request: IncomingMessage, response: ServerResponse, action: "open" | "lane-sets"): Promise<Record<string, unknown> | undefined> {
+    if (request.headers.origin !== this.discovery().url) return void json(response, 403, { error: "origin is not the Router dashboard" });
+    if (request.headers["x-lane-router-action"] !== action) return void json(response, 403, { error: "action header is invalid" });
+    const contentType = request.headers["content-type"];
+    if (typeof contentType !== "string" || !contentType.toLowerCase().startsWith("application/json")) {
+      return void json(response, 400, { error: "content-type must be application/json" });
+    }
+    const body = await readJson(request);
+    if (typeof body !== "object" || body === null || (body as { actionToken?: unknown }).actionToken !== this.dashboardActionToken) {
+      return void json(response, 403, { error: "action token is invalid" });
+    }
+    return body as Record<string, unknown>;
   }
 
   private async handleDsh(request: IncomingMessage, response: ServerResponse, pathname: string): Promise<void> {
@@ -818,6 +845,25 @@ function refuseWebPage(request: IncomingMessage, response: ServerResponse): bool
     return true;
   }
   return false;
+}
+
+/** What the board can ask of its sets. The Router's rules on names and lanes are applied later. */
+export type DashboardLaneSetsInput =
+  | { readonly action: "create"; readonly name: string }
+  | { readonly action: "delete"; readonly setId: string }
+  | { readonly action: "assign"; readonly addresses: readonly string[]; readonly setId: string | null };
+
+/** The request's shape only; a string is the reason it is not one. */
+function parseLaneSetsInput(body: Record<string, unknown>): DashboardLaneSetsInput | string {
+  if (body.action === "create") return typeof body.name === "string" ? { action: "create", name: body.name } : "name must be a string";
+  if (body.action === "delete") return typeof body.setId === "string" ? { action: "delete", setId: body.setId } : "setId must be a string";
+  if (body.action !== "assign") return "action must be create, delete or assign";
+  if (!Array.isArray(body.addresses) || body.addresses.length === 0 || body.addresses.some((address) => typeof address !== "string")) {
+    return "addresses must be a non-empty string array";
+  }
+  // Null is an answer here, not a missing value: it moves the lanes back to their projects.
+  if (body.setId !== null && typeof body.setId !== "string") return "setId must be a string, or null for the lanes' projects";
+  return { action: "assign", addresses: body.addresses as string[], setId: body.setId };
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {

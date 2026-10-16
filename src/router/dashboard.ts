@@ -82,10 +82,22 @@ export interface DashboardLauncherChoices {
   readonly modelProviders: readonly string[];
 }
 
+export interface DashboardLaneSet {
+  readonly id: string;
+  readonly name: string;
+  /** Addresses of the lanes in service in this set; an archived lane is never a member. */
+  readonly members: readonly string[];
+}
+
 export interface DashboardSnapshot {
   readonly capturedAt: number;
   readonly router: DashboardRouter & { readonly schemaVersion: number };
   readonly lanes: readonly DashboardLane[];
+  /**
+   * Every set, empty ones included. A lane's set is read from here rather than copied onto its
+   * row, so there is one place for it to be true; a lane in none is grouped by its project.
+   */
+  readonly laneSets: readonly DashboardLaneSet[];
   readonly messages: readonly DashboardMessage[];
   readonly truncated: { readonly messages: boolean; readonly limit: number };
   readonly launcher?: DashboardLauncherChoices;
@@ -143,6 +155,7 @@ export function dashboardSnapshot(
         pending: { count: waiting?.count ?? 0, oldestCreatedAt: waiting?.oldestCreatedAt ?? null },
       };
     }),
+    laneSets: state.listLaneSets().map((set) => ({ id: set.id, name: set.name, members: set.members })),
     messages: state.recentMessages(limit).map((message) => ({
       id: message.id,
       sender: message.senderLane,

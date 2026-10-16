@@ -6,6 +6,7 @@
  * Versions 7 and 8 were numbered on two machines at once. One line of work used them for two new
  * binding backends (7 `dsh`, 8 `zcode`); the other used 7 for the message sender label, which is
  * version 9 after the two were merged. So "version 7" names two different databases here.
+ * Version 10 adds the lane set tables and touches nothing else.
  */
 
 const LANE_SQL = `
@@ -90,6 +91,20 @@ CREATE TABLE message_archive (
 );
 `;
 
+/** The two lane set tables as version 10 added them. */
+export const LANE_SET_TABLES_SQL = `
+CREATE TABLE lane_set (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) > 0),
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE lane_set_member (
+  lane_id TEXT PRIMARY KEY REFERENCES lane(id) ON DELETE RESTRICT,
+  set_id TEXT NOT NULL REFERENCES lane_set(id) ON DELETE CASCADE,
+  added_at INTEGER NOT NULL
+);
+CREATE INDEX lane_set_member_set_idx ON lane_set_member(set_id);
+`;
+
 export const BINDING_BACKENDS = {
   v6: "('claude','codex')",
   dsh: "('claude','codex','dsh')",
@@ -98,17 +113,18 @@ export const BINDING_BACKENDS = {
 
 /** Every shape a database from version 6 on can be in, with the version its build stamped on it. */
 export const STARTING_SHAPES = {
-  "v6": { version: 6, bindingBackends: BINDING_BACKENDS.v6, senderLabel: false },
-  "v7 (DSH)": { version: 7, bindingBackends: BINDING_BACKENDS.dsh, senderLabel: false },
-  "v8 (ZCode)": { version: 8, bindingBackends: BINDING_BACKENDS.zcode, senderLabel: false },
-  "v7 (tell)": { version: 7, bindingBackends: BINDING_BACKENDS.v6, senderLabel: true },
-  "v9": { version: 9, bindingBackends: BINDING_BACKENDS.zcode, senderLabel: true },
+  "v6": { version: 6, bindingBackends: BINDING_BACKENDS.v6, senderLabel: false, laneSets: false },
+  "v7 (DSH)": { version: 7, bindingBackends: BINDING_BACKENDS.dsh, senderLabel: false, laneSets: false },
+  "v8 (ZCode)": { version: 8, bindingBackends: BINDING_BACKENDS.zcode, senderLabel: false, laneSets: false },
+  "v7 (tell)": { version: 7, bindingBackends: BINDING_BACKENDS.v6, senderLabel: true, laneSets: false },
+  "v9": { version: 9, bindingBackends: BINDING_BACKENDS.zcode, senderLabel: true, laneSets: false },
+  "v10": { version: 10, bindingBackends: BINDING_BACKENDS.zcode, senderLabel: true, laneSets: true },
 } as const;
 
 export type StartingShape = keyof typeof STARTING_SHAPES;
 
-export function schemaSql(shape: { readonly bindingBackends: string; readonly senderLabel: boolean }): string {
-  return `${LANE_SQL}${bindingSql(shape.bindingBackends)}${shape.senderLabel ? MESSAGE_TABLES_WITH_SENDER_LABEL_SQL : MESSAGE_TABLES_V6_SQL}`;
+export function schemaSql(shape: { readonly bindingBackends: string; readonly senderLabel: boolean; readonly laneSets: boolean }): string {
+  return `${LANE_SQL}${bindingSql(shape.bindingBackends)}${shape.senderLabel ? MESSAGE_TABLES_WITH_SENDER_LABEL_SQL : MESSAGE_TABLES_V6_SQL}${shape.laneSets ? LANE_SET_TABLES_SQL : ""}`;
 }
 
 /** The version 6 shape both lines of work started from. */

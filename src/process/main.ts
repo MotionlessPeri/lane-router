@@ -144,6 +144,12 @@ export async function runRouterProcess(options: { dataRoot?: string } = {}): Pro
       }),
       dashboardState: (router) => dashboardSnapshot({ state, mailbox, backends, now: Date.now, launcherChoices }, router),
       dashboardOpen: (input) => dashboardOpener.open(input),
+      dashboardLaneSets: async (input) => {
+        if (input.action === "create") core.createLaneSet(input.name);
+        else if (input.action === "delete") core.deleteLaneSet(input.setId);
+        else core.assignLaneSet(input.addresses, input.setId);
+        return { laneSets: core.listLaneSets() };
+      },
     });
     mailbox.reconcile(state);
     const discovery = await server.start();

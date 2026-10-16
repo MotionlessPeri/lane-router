@@ -214,7 +214,7 @@ describe("dashboardSnapshot", () => {
       addMessage(x, "message-1", { from: "alpha/bound", to: "alpha/bound" });
       const state = x.snapshot();
 
-      expect(Object.keys(state).sort()).toEqual(["capturedAt", "lanes", "messages", "router", "truncated"]);
+      expect(Object.keys(state).sort()).toEqual(["capturedAt", "laneSets", "lanes", "messages", "router", "truncated"]);
       expect(state.capturedAt).toBe(9_999);
       expect(state.router).toEqual({ ...ROUTER, schemaVersion: ROUTER_SCHEMA_VERSION });
       expect(Object.keys(state.lanes[0]!).sort())
@@ -228,6 +228,31 @@ describe("dashboardSnapshot", () => {
         "replyTo", "resolvedAt", "sender", "state", "target",
       ]);
       expect(state.truncated).toEqual({ messages: false, limit: DASHBOARD_MESSAGE_LIMIT });
+    } finally { x.database.close(); }
+  });
+
+  // The board groups its launcher by these. Lane rows stay as they are: a lane's set is read from
+  // here, not copied onto the lane, so there is one place for it to be true.
+  it("lists every set with its lanes in service, empty sets included", () => {
+    const x = setup();
+    try {
+      addLane(x, "alpha/a");
+      addLane(x, "beta/a");
+      addLane(x, "gamma/gone");
+      const research = x.state.createLaneSet("research", 5);
+      const empty = x.state.createLaneSet("empty", 5);
+      x.state.assignLaneSet("beta/a", research.id, 6);
+      x.state.assignLaneSet("alpha/a", research.id, 6);
+      x.state.archiveLane("gamma/gone", 7);
+      // A member row for a lane that has left service, which archiving itself would have removed:
+      // the board must still not show that lane in the group.
+      x.database.prepare("INSERT INTO lane_set_member(lane_id,set_id,added_at) SELECT id,?,8 FROM lane WHERE address='gamma/gone'").run(research.id);
+
+      expect(x.snapshot().laneSets).toEqual([
+        { id: empty.id, name: "empty", members: [] },
+        { id: research.id, name: "research", members: ["alpha/a", "beta/a"] },
+      ]);
+      expect(Object.keys(x.snapshot().lanes[0]!)).not.toContain("laneSet");
     } finally { x.database.close(); }
   });
 });

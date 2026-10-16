@@ -41,6 +41,17 @@ export interface LaneRecord {
   readonly archivedAt: number | null;
 }
 
+/**
+ * A named group of lanes that open in one terminal window. The lanes are listed by address for
+ * whoever reads it, but held by id: only lanes in service are members.
+ */
+export interface LaneSetRecord {
+  readonly id: string;
+  readonly name: string;
+  /** Addresses of the member lanes in service, sorted. */
+  readonly members: readonly string[];
+}
+
 export interface BindingRecord {
   readonly id: string;
   readonly laneAddress: string;

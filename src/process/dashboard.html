@@ -27,12 +27,14 @@
     margin: 1.75rem 0 .5rem; padding-bottom: .25rem; border-bottom: 1px solid var(--line);
   }
   .empty { color: var(--dim); padding: .4rem 0; }
-  .project { margin: .65rem 0; }
-  .project h3 { font-size: 13px; margin: 0 0 .25rem; }
+  .lane-group { margin: .65rem 0; }
+  .lane-group h3 { font-size: 13px; margin: 0 0 .25rem; font-weight: 600; }
+  .lane-group h3 .dim { font-weight: normal; }
   .lane-choice, .override-grid { display: block; margin: .2rem 0; }
   .override-grid { display: grid; grid-template-columns: 9rem minmax(12rem, 24rem); gap: .35rem .6rem; align-items: center; }
-  .override-grid label { color: var(--dim); }
-  .override-grid input, .override-grid select { font: inherit; padding: .15rem .3rem; }
+  .override-grid label, .set-controls label { color: var(--dim); }
+  .override-grid input, .override-grid select, .set-controls input, .set-controls select { font: inherit; padding: .15rem .3rem; }
+  .set-controls { display: grid; grid-template-columns: 9rem minmax(12rem, 24rem) auto; gap: .35rem .6rem; align-items: center; justify-content: start; margin-top: 1rem; }
   #launcher-status { margin-top: .5rem; white-space: pre-wrap; }
 </style>
 </head>
@@ -170,15 +172,23 @@
     document.querySelectorAll("[data-override]").forEach((control) => {
       overrides.set(control.getAttribute("data-override"), control.value);
     });
+    const setControls = new Map();
+    document.querySelectorAll("[data-set-control]").forEach((control) => {
+      setControls.set(control.getAttribute("data-set-control"), control.value);
+    });
     const status = document.getElementById("launcher-status");
     const active = document.activeElement;
     return {
       choices,
       overrides,
+      setControls,
       statusText: status ? status.textContent : "",
       statusClassName: status ? status.className : "",
       activeOverride: active && active.matches("[data-override]")
         ? active.getAttribute("data-override")
+        : null,
+      activeSetControl: active && active.matches("[data-set-control]")
+        ? active.getAttribute("data-set-control")
         : null,
     };
   }
@@ -196,21 +206,136 @@
     checkbox.checked = previous.choices.get(lane.address) === true && lane.binding !== null;
     checkbox.disabled = lane.binding === null;
     choice.appendChild(checkbox);
-    const startup = lane.binding && lane.binding.backend === "codex"
-      ? " · " + (lane.binding.profile || "—") + " / " + (lane.binding.modelProvider || "—")
-      : "";
-    choice.appendChild(document.createTextNode(
-      " " + lane.address + " · " + (lane.binding ? lane.binding.backend : "未绑定")
-      + startup + " · " + (lane.restorePresence || "无 backend") + " · " + (lane.model || "未声明模型")
-    ));
+    // The address and nothing more: backend, presence and model are not what anyone picks a lane
+    // by, and the topology section below still has them. An unbound lane says why its box is
+    // greyed out, which is otherwise a silent refusal.
+    choice.appendChild(document.createTextNode(" " + lane.address));
+    if (lane.binding === null) choice.appendChild(el("span", "dim", " 未绑定"));
     return choice;
   }
 
-  function syncProjectCheckbox(group, projectCheckbox) {
+  function syncGroupCheckbox(group, groupCheckbox) {
     const checkboxes = [...group.querySelectorAll("input[data-lane-checkbox]")];
     const selectable = checkboxes.filter((checkbox) => !checkbox.disabled);
-    projectCheckbox.checked = selectable.length > 0 && selectable.every((checkbox) => checkbox.checked);
-    projectCheckbox.indeterminate = !projectCheckbox.checked && selectable.some((checkbox) => checkbox.checked);
+    groupCheckbox.checked = selectable.length > 0 && selectable.every((checkbox) => checkbox.checked);
+    groupCheckbox.indeterminate = !groupCheckbox.checked && selectable.some((checkbox) => checkbox.checked);
+  }
+
+  // By name, not in snapshot order: the snapshot lists lanes as they were created, and nobody
+  // looks a group up by when it was created. Case-insensitive so "MobuLiveLink" sits among the
+  // m's rather than ahead of every lower-case name.
+  const byName = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" });
+
+  /**
+   * The launcher's groups. A lane in a set is listed under the set, any other lane under its
+   * project, and a set with no lanes is still a group: it was made on purpose and is waiting to be
+   * filled. A Router older than sets publishes no `laneSets`, and then every lane is under its
+   * project exactly as before.
+   */
+  function launcherGroups(snapshot) {
+    const live = snapshot.lanes.filter((lane) => !lane.archived);
+    const byAddress = new Map(live.map((lane) => [lane.address, lane]));
+    const placed = new Set();
+    const groups = [];
+    (Array.isArray(snapshot.laneSets) ? snapshot.laneSets : []).forEach((set) => {
+      const lanes = set.members.map((address) => byAddress.get(address)).filter((lane) => lane !== undefined);
+      lanes.forEach((lane) => placed.add(lane.address));
+      groups.push({ name: set.name, set, lanes });
+    });
+    const projects = new Map();
+    live.filter((lane) => !placed.has(lane.address)).forEach((lane) => {
+      if (!projects.has(lane.project)) projects.set(lane.project, []);
+      projects.get(lane.project).push(lane);
+    });
+    projects.forEach((lanes, project) => groups.push({ name: project, set: null, lanes }));
+    groups.sort((a, b) => byName(a.name, b.name));
+    groups.forEach((group) => group.lanes.sort((a, b) => byName(a.address, b.address)));
+    return groups;
+  }
+
+  function checkedAddresses() {
+    return [...document.querySelectorAll("input[data-lane-checkbox]")].
+      filter((checkbox) => checkbox.checked).
+      map((checkbox) => checkbox.value);
+  }
+
+  function actionButton(id, text) {
+    const button = document.createElement("button");
+    if (id) button.id = id;
+    button.type = "button";
+    button.textContent = text;
+    return button;
+  }
+
+  /**
+   * Making a set and filling it, acting on the same ticked lanes the open button does. Marked
+   * `data-set-control` and never `data-override`: every `data-override` value goes out as a launch
+   * option when lanes are opened, so a set control marked that way would reach the CLI.
+   */
+  function setControls(snapshot, previous) {
+    const block = el("div", "set-controls");
+
+    const nameField = el("label", null, "新建 set");
+    nameField.setAttribute("for", "new-set-name");
+    const name = document.createElement("input");
+    name.id = "new-set-name";
+    name.type = "text";
+    name.setAttribute("data-set-control", "new-set-name");
+    name.value = previous.setControls.get("new-set-name") || "";
+    const create = actionButton("create-set", "新建");
+    create.addEventListener("click", () => {
+      const value = name.value.trim();
+      if (value === "") return setLauncherStatus("先填 set 名。", true);
+      // Emptied before the reload, which would otherwise carry the name over as unfinished input.
+      sendSetAction({ action: "create", name: value }, "已新建 set " + value + "。", () => { name.value = ""; });
+    });
+    block.appendChild(nameField);
+    block.appendChild(name);
+    block.appendChild(create);
+
+    const moveField = el("label", null, "把选中 lane 移入");
+    moveField.setAttribute("for", "move-to-set");
+    const move = document.createElement("select");
+    move.id = "move-to-set";
+    move.setAttribute("data-set-control", "move-to-set");
+    selectOption(move, "", "项目默认");
+    snapshot.laneSets.slice().sort((a, b) => byName(a.name, b.name)).forEach((set) => selectOption(move, set.id, set.name));
+    const preserved = previous.setControls.get("move-to-set") || "";
+    if ([...move.options].some((option) => option.value === preserved)) move.value = preserved;
+    const moveButton = actionButton("move-selected", "移入");
+    moveButton.addEventListener("click", () => {
+      const addresses = checkedAddresses();
+      if (addresses.length === 0) return setLauncherStatus("先勾选要移动的 lane。", true);
+      const target = snapshot.laneSets.find((set) => set.id === move.value);
+      // "项目默认" is the empty value and means back to each lane's project, which the Router
+      // reads from null rather than from an empty id.
+      sendSetAction(
+        { action: "assign", addresses, setId: target ? target.id : null },
+        "已把 " + addresses.length + " 条 lane " + (target ? "移入 " + target.name : "移回各自的项目") + "。",
+      );
+    });
+    block.appendChild(moveField);
+    block.appendChild(move);
+    block.appendChild(moveButton);
+    return block;
+  }
+
+  /** One set request; on success the board is reloaded, on refusal the Router's sentence is shown. */
+  function sendSetAction(body, doneText, beforeReload) {
+    if (!currentSnapshot || currentSnapshot.actionToken === undefined) return;
+    fetch("/dashboard/lane-sets", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-lane-router-action": "lane-sets" },
+      body: JSON.stringify(Object.assign({}, body, { actionToken: currentSnapshot.actionToken })),
+    }).then((response) => response.json().catch(() => ({})).then((result) => {
+      if (!response.ok) throw new Error(result && result.error ? result.error : "set 接口返回 " + response.status);
+    })).then(() => {
+      if (beforeReload) beforeReload();
+      setLauncherStatus(doneText);
+      return load();
+    }).catch((error) => {
+      setLauncherStatus("set 操作失败：" + (error && error.message ? error.message : "未知错误"), true);
+    });
   }
 
   function selectOption(select, value, text) {
@@ -265,7 +390,7 @@
       return replace(document.getElementById("launcher"), host);
     }
 
-    // Above the projects rather than inside one, because it acts on all of them. Disabled lanes
+    // Above the groups rather than inside one, because it acts on all of them. Disabled lanes
     // (no binding, nothing to resume) are never ticked by it: they are not choices, and a control
     // that appears to select them would report a selection the launcher cannot act on.
     const selectAllChoice = el("label", "lane-choice");
@@ -294,52 +419,57 @@
 
     selectAll.addEventListener("change", () => {
       selectableLanes().forEach((checkbox) => { checkbox.checked = selectAll.checked; });
-      host.querySelectorAll("section.project").forEach((group) => {
-        syncProjectCheckbox(group, group.querySelector("input[data-project-checkbox]"));
+      host.querySelectorAll("section.lane-group").forEach((group) => {
+        syncGroupCheckbox(group, group.querySelector("input[data-group-checkbox]"));
       });
       syncSelectAll();
       applyModelFilter();
     });
 
-    const projects = new Map();
-    snapshot.lanes.filter((lane) => !lane.archived).forEach((lane) => {
-      if (!projects.has(lane.project)) projects.set(lane.project, []);
-      projects.get(lane.project).push(lane);
-    });
-    // By name, not in snapshot order: the snapshot lists lanes as they were created, and nobody
-    // looks a project up by when it was created. Case-insensitive so "MobuLiveLink" sits among
-    // the m's rather than ahead of every lower-case name.
-    const byName = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" });
-    [...projects.keys()].sort(byName).forEach((project) => {
-      const lanes = projects.get(project).slice().sort((a, b) => byName(a.address, b.address));
-      const group = el("section", "project");
-      group.setAttribute("data-project", project);
-      const projectChoice = el("label", null);
-      const projectCheckbox = document.createElement("input");
-      projectCheckbox.type = "checkbox";
-      projectCheckbox.setAttribute("data-project-checkbox", project);
-      projectCheckbox.addEventListener("change", () => {
+    launcherGroups(snapshot).forEach((entry) => {
+      const group = el("section", "lane-group");
+      group.setAttribute("data-group", entry.name);
+      const groupChoice = el("label", null);
+      const groupCheckbox = document.createElement("input");
+      groupCheckbox.type = "checkbox";
+      groupCheckbox.setAttribute("data-group-checkbox", entry.name);
+      groupCheckbox.addEventListener("change", () => {
         group.querySelectorAll("input[data-lane-checkbox]").forEach((checkbox) => {
-          (checkbox).checked = projectCheckbox.checked && !checkbox.disabled;
+          (checkbox).checked = groupCheckbox.checked && !checkbox.disabled;
         });
-        syncProjectCheckbox(group, projectCheckbox);
+        syncGroupCheckbox(group, groupCheckbox);
         syncSelectAll();
         applyModelFilter();
       });
-      projectChoice.appendChild(projectCheckbox);
-      projectChoice.appendChild(document.createTextNode(" " + project));
+      groupChoice.appendChild(groupCheckbox);
+      groupChoice.appendChild(document.createTextNode(" " + entry.name));
       const heading = el("h3", null);
-      heading.appendChild(projectChoice);
+      heading.appendChild(groupChoice);
+      if (entry.set !== null) {
+        heading.appendChild(el("span", "dim", " · set"));
+        // Only an empty set can be deleted. The Router refuses the others, so a button on them
+        // could only ever fail.
+        if (entry.lanes.length === 0) {
+          const remove = actionButton(null, "删除");
+          remove.setAttribute("data-delete-set", entry.set.id);
+          remove.addEventListener("click", () => {
+            sendSetAction({ action: "delete", setId: entry.set.id }, "已删除 set " + entry.set.name + "。");
+          });
+          heading.appendChild(document.createTextNode(" "));
+          heading.appendChild(remove);
+        }
+      }
       group.appendChild(heading);
-      lanes.forEach((lane) => group.appendChild(launcherLane(lane, previous)));
+      if (entry.lanes.length === 0) group.appendChild(el("div", "empty", "（空）"));
+      entry.lanes.forEach((lane) => group.appendChild(launcherLane(lane, previous)));
       group.querySelectorAll("input[data-lane-checkbox]").forEach((checkbox) => {
         checkbox.addEventListener("change", () => {
-          syncProjectCheckbox(group, projectCheckbox);
+          syncGroupCheckbox(group, groupCheckbox);
           syncSelectAll();
           applyModelFilter();
         });
       });
-      syncProjectCheckbox(group, projectCheckbox);
+      syncGroupCheckbox(group, groupCheckbox);
       host.appendChild(group);
     });
     syncSelectAll();
@@ -407,12 +537,12 @@
     overrides.appendChild(provider.select);
     host.appendChild(overrides);
 
-    const button = document.createElement("button");
-    button.id = "open-selected";
-    button.type = "button";
-    button.textContent = "打开选中 lane";
+    const button = actionButton("open-selected", "打开选中 lane");
     button.addEventListener("click", openSelected);
     host.appendChild(button);
+    // Only for a Router that publishes sets. An older one serves this same page as soon as it is
+    // built, and has no endpoint behind these controls.
+    if (Array.isArray(snapshot.laneSets)) host.appendChild(setControls(snapshot, previous));
     const status = el("div", null, null);
     status.id = "launcher-status";
     status.textContent = previous.statusText;
@@ -425,6 +555,11 @@
     if (previous.activeOverride !== null) {
       document.querySelectorAll("[data-override]").forEach((control) => {
         if (control.getAttribute("data-override") === previous.activeOverride) control.focus();
+      });
+    }
+    if (previous.activeSetControl !== null) {
+      document.querySelectorAll("[data-set-control]").forEach((control) => {
+        if (control.getAttribute("data-set-control") === previous.activeSetControl) control.focus();
       });
     }
   }
@@ -503,9 +638,7 @@
 
   function openSelected() {
     if (!currentSnapshot || currentSnapshot.actionToken === undefined) return;
-    const addresses = [...document.querySelectorAll("input[data-lane-checkbox]")].
-      filter((checkbox) => checkbox.checked).
-      map((checkbox) => checkbox.value);
+    const addresses = checkedAddresses();
     // Answered here rather than by the Router, which rejects an empty list with a 400 the reader
     // would see as "打开接口返回 400" — a transport code standing in for "you have not picked
     // anything yet". Nothing is selected by default, so this is the first click, not a rare one.
@@ -546,7 +679,9 @@
 
   function formatOpenResults(results) {
     if (!results.length) return "没有返回结果。";
-    const projects = new Map(currentSnapshot.lanes.map((lane) => [lane.address, lane.project]));
+    // Under the same groups the launcher shows, so a result sits where its lane was picked from.
+    const groupOf = new Map();
+    launcherGroups(currentSnapshot).forEach((group) => group.lanes.forEach((lane) => groupOf.set(lane.address, group.name)));
     const labels = {
       launch_requested: "已请求打开",
       skipped_online: "已在线，跳过",
@@ -555,14 +690,14 @@
     };
     const groups = new Map();
     results.forEach((entry) => {
-      const project = projects.get(entry.address) || "其他";
-      if (!groups.has(project)) groups.set(project, []);
-      groups.get(project).push(
+      const group = groupOf.get(entry.address) || "其他";
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push(
         entry.address + "：" + (labels[entry.status] || entry.status) +
         (entry.message ? "（" + entry.message + "）" : "")
       );
     });
-    return [...groups].map(([project, entries]) => project + "\n" + entries.join("\n")).join("\n\n");
+    return [...groups].map(([group, entries]) => group + "\n" + entries.join("\n")).join("\n\n");
   }
 
   load();

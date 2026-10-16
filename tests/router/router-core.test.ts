@@ -865,8 +865,21 @@ describe("resume info", () => {
       x.backend.restoreState = "offline";
       await expect(x.core.resumeInfo("alpha/design")).resolves.toEqual({
         state: "bound", backend: "codex", conversationId: "thread-1", cwd: "E:\\project",
-        generation: 1, reach: x.backend.reachState, restorePresence: "offline", model: null,
+        generation: 1, reach: x.backend.reachState, restorePresence: "offline", model: null, laneSet: null,
       });
+    } finally { x.database.close(); }
+  });
+
+  // The two CLIs that open windows outside the Router learn the window name from this answer.
+  it("names the set a bound lane is in, and null when it is in none", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("thread-1"), { address: "alpha/design", roleDescription: "design" });
+      await x.core.attachCurrent(caller("thread-2"), { address: "beta/impl", roleDescription: "impl" });
+      const research = x.core.createLaneSet("research");
+      x.core.assignLaneSet(["alpha/design"], research.id);
+      await expect(x.core.resumeInfo("alpha/design")).resolves.toMatchObject({ state: "bound", laneSet: "research" });
+      await expect(x.core.resumeInfo("beta/impl")).resolves.toMatchObject({ state: "bound", laneSet: null });
     } finally { x.database.close(); }
   });
 
@@ -903,6 +916,90 @@ describe("resume info", () => {
       // A resolver that finds nothing leaves the fact honest: null, never a guess.
       x.resolveCwd.mockResolvedValueOnce(null);
       await expect(x.core.resumeInfo("alpha/blank")).resolves.toMatchObject({ cwd: null });
+    } finally { x.database.close(); }
+  });
+});
+
+describe("lane sets", () => {
+  function withLanes() {
+    const x = setup();
+    for (const address of ["alpha/a", "alpha/b", "beta/a", "gamma/old"]) {
+      x.state.createLane({ address, project: address.split("/")[0]!, roleDescription: address, now: 1 });
+    }
+    x.state.archiveLane("gamma/old", 2);
+    return x;
+  }
+
+  function refusal(action: () => unknown): RouterError {
+    try { action(); } catch (error) {
+      if (error instanceof RouterError) return error;
+      throw error;
+    }
+    throw new Error("expected a refusal");
+  }
+
+  // The name becomes a Windows Terminal window name passed through a command line, where a space
+  // splits it into two arguments; the lane address segment rule already keeps such names out.
+  it("takes only a name a lane address segment could be", () => {
+    const x = withLanes();
+    try {
+      for (const name of ["re search", "a/b", "", "   ", "-lead", "研究", "set\"name"]) {
+        expect(refusal(() => x.core.createLaneSet(name)).code, JSON.stringify(name)).toBe("INVALID_LANE_SET_NAME");
+      }
+      expect(x.core.createLaneSet(" research-6.b ").name).toBe("research-6.b");
+      expect(x.core.listLaneSets().map((set) => set.name)).toEqual(["research-6.b"]);
+    } finally { x.database.close(); }
+  });
+
+  // A set named like a project would merge with that project's lanes into one group on the board.
+  it("refuses a name a project with lanes in service already uses, and a name another set uses", () => {
+    const x = withLanes();
+    try {
+      expect(refusal(() => x.core.createLaneSet("alpha")).code).toBe("LANE_SET_NAME_IS_PROJECT");
+      // Only lanes in service make a group, so a project whose lanes are all archived does not.
+      expect(x.core.createLaneSet("gamma").name).toBe("gamma");
+      x.core.createLaneSet("research");
+      expect(refusal(() => x.core.createLaneSet("research")).code).toBe("LANE_SET_EXISTS");
+      expect(x.core.listLaneSets().map((set) => set.name)).toEqual(["gamma", "research"]);
+    } finally { x.database.close(); }
+  });
+
+  it("moves lanes in and out, and refuses an archived lane and a missing one in different words", () => {
+    const x = withLanes();
+    try {
+      const research = x.core.createLaneSet("research");
+      x.core.assignLaneSet(["alpha/a", "beta/a"], research.id);
+      expect(x.core.listLaneSets()).toEqual([{ id: research.id, name: "research", members: ["alpha/a", "beta/a"] }]);
+
+      const archived = refusal(() => x.core.assignLaneSet(["alpha/b", "gamma/old"], research.id));
+      const missing = refusal(() => x.core.assignLaneSet(["alpha/b", "gamma/ghost"], research.id));
+      expect(archived.code).toBe("LANE_ARCHIVED");
+      expect(missing.code).toBe("LANE_NOT_FOUND");
+      expect(archived.message).toMatch(/gamma\/old.*archived|archived.*gamma\/old/iu);
+      expect(missing.message).toMatch(/gamma\/ghost/u);
+      expect(missing.message).not.toMatch(/archived/iu);
+      // Checked before anything moves: the good address in a refused request stays where it was.
+      expect(x.core.listLaneSets()[0]!.members).toEqual(["alpha/a", "beta/a"]);
+
+      expect(refusal(() => x.core.assignLaneSet(["alpha/b"], "no-such-set")).code).toBe("LANE_SET_NOT_FOUND");
+      x.core.assignLaneSet(["beta/a"], null);
+      expect(x.core.listLaneSets()[0]!.members).toEqual(["alpha/a"]);
+    } finally { x.database.close(); }
+  });
+
+  // Deleting a set with lanes in it would send all of them back to their projects at once, which
+  // is a bigger change than the one button it would take.
+  it("deletes only an empty set", () => {
+    const x = withLanes();
+    try {
+      const research = x.core.createLaneSet("research");
+      x.core.assignLaneSet(["alpha/a"], research.id);
+      expect(refusal(() => x.core.deleteLaneSet(research.id)).code).toBe("LANE_SET_NOT_EMPTY");
+      expect(x.core.listLaneSets()).toHaveLength(1);
+      x.core.assignLaneSet(["alpha/a"], null);
+      x.core.deleteLaneSet(research.id);
+      expect(x.core.listLaneSets()).toEqual([]);
+      expect(refusal(() => x.core.deleteLaneSet(research.id)).code).toBe("LANE_SET_NOT_FOUND");
     } finally { x.database.close(); }
   });
 });

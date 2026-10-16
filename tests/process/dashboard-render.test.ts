@@ -364,9 +364,9 @@ test("a launcher refresh keeps operator choices instead of resetting offline def
 
   const checkboxes = [...document.querySelectorAll("input[data-lane-checkbox]")];
   expect(checkboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([true, false, false]);
-  const projectCheckboxes = [...document.querySelectorAll("input[data-project-checkbox]")];
-  expect(projectCheckboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([true, false]);
-  expect(projectCheckboxes.map((checkbox) => (checkbox as HTMLInputElement).indeterminate)).toEqual([false, false]);
+  const groupCheckboxes = [...document.querySelectorAll("input[data-group-checkbox]")];
+  expect(groupCheckboxes.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([true, false]);
+  expect(groupCheckboxes.map((checkbox) => (checkbox as HTMLInputElement).indeterminate)).toEqual([false, false]);
   expect((document.querySelector("#override-model") as HTMLInputElement).value).toBe("glm-5.3");
   expect(document.activeElement?.id).toBe("override-model");
   expect((document.querySelector("#override-profile") as HTMLInputElement).value).toBe("glm");
@@ -456,8 +456,215 @@ test("the launcher lists projects and their lanes alphabetically, whatever order
   new Function("document", "fetch", "setInterval", script!)(window.document, fetchStub as never, () => 0);
   await vi.waitFor(() => expect(window.document.body.textContent).toContain("zeta/one"));
 
-  const groups = [...window.document.querySelectorAll("section.project")];
-  expect(groups.map((group) => group.getAttribute("data-project"))).toEqual(["alpha", "Beta", "zeta"]);
-  const betaLanes = [...window.document.querySelectorAll("section.project[data-project='Beta'] input[data-lane-checkbox]")];
+  const groups = [...window.document.querySelectorAll("section.lane-group")];
+  expect(groups.map((group) => group.getAttribute("data-group"))).toEqual(["alpha", "Beta", "zeta"]);
+  const betaLanes = [...window.document.querySelectorAll("section.lane-group[data-group='Beta'] input[data-lane-checkbox]")];
   expect(betaLanes.map((checkbox) => (checkbox as HTMLInputElement).value)).toEqual(["Beta/one", "Beta/two"]);
+});
+
+/**
+ * A Router with lane sets: alpha/offline and gamma/one are in "research", across two projects, so
+ * neither alpha nor gamma has a group of its own any more; "empty" has no lanes; the beta lanes
+ * are in no set and stay under their project.
+ */
+const setSnapshot = {
+  ...launcherSnapshot,
+  lanes: [
+    ...launcherSnapshot.lanes,
+    { ...snapshot.lanes[0]!, address: "gamma/one", project: "gamma", restorePresence: "offline" },
+  ],
+  laneSets: [
+    { id: "set-research", name: "research", members: ["alpha/offline", "gamma/one"] },
+    { id: "set-empty", name: "empty", members: [] },
+  ],
+};
+
+/** Serves `state` for every poll and answers each POST with `answer`, recording every call. */
+function startPage(state: unknown, answer: (url: string, body: Record<string, unknown>) => { ok: boolean; status?: number; json: () => Promise<unknown> } = () => ({
+  ok: true, json: async () => ({ laneSets: setSnapshot.laneSets }),
+})) {
+  const window = new Window({ url: "http://127.0.0.1:52494/dashboard" });
+  window.document.write(pageSource);
+  const script = window.document.querySelector("script")?.textContent;
+  expect(script).toBeTruthy();
+  let current = state;
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const fetchStub = vi.fn(async (url: string | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    if (init?.method === "POST") return answer(String(url), JSON.parse(String(init.body)) as Record<string, unknown>);
+    return { ok: true, json: async () => current };
+  });
+  new Function("document", "fetch", "setInterval", script!)(window.document, fetchStub as never, () => 0);
+  const posts = () => calls.filter((call) => call.init?.method === "POST");
+  const gets = () => calls.filter((call) => call.init?.method !== "POST");
+  return {
+    window, document: window.document, calls, posts, gets,
+    ready: () => vi.waitFor(() => expect(window.document.body.textContent).toContain("alpha/offline")),
+    /** Polls again, the way the interval would, after the snapshot changed to `next`. */
+    poll: async (next: unknown, marker: string) => {
+      current = next;
+      new Function("document", "fetch", "setInterval", script!)(window.document, fetchStub as never, () => 0);
+      await vi.waitFor(() => expect(window.document.body.textContent).toContain(marker));
+    },
+  };
+}
+
+function laneText(document: Window["document"], address: string): string {
+  return (document.querySelector(`input[data-lane-checkbox][value='${address}']`)?.closest("label")?.textContent ?? "").trim();
+}
+
+test("the launcher groups lanes by set, and by project for the lanes in none, empty sets included", async () => {
+  const page = startPage(setSnapshot);
+  await page.ready();
+  const groups = [...page.document.querySelectorAll("section.lane-group")];
+  expect(groups.map((group) => group.getAttribute("data-group"))).toEqual(["beta", "empty", "research"]);
+  // Across projects, so each lane carries its project in front of its name.
+  const research = [...page.document.querySelectorAll("section.lane-group[data-group='research'] input[data-lane-checkbox]")];
+  expect(research.map((checkbox) => (checkbox as HTMLInputElement).value)).toEqual(["alpha/offline", "gamma/one"]);
+  expect(laneText(page.document, "gamma/one")).toBe("gamma/one");
+
+  const empty = page.document.querySelector("section.lane-group[data-group='empty']")!;
+  expect(empty.textContent).toContain("（空）");
+  expect(empty.querySelector("button[data-delete-set='set-empty']")).not.toBeNull();
+  // Only an empty set offers deletion: the Router refuses the others, and a button that can only
+  // fail is a button that should not be there.
+  expect(page.document.querySelectorAll("button[data-delete-set]")).toHaveLength(1);
+
+  // The group's own box picks its lanes, wherever they came from.
+  const box = page.document.querySelector("input[data-group-checkbox='research']") as HTMLInputElement;
+  box.checked = true;
+  box.dispatchEvent(new page.window.Event("change"));
+  expect(research.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([true, true]);
+});
+
+test("a lane row says only its address, and why an unbound lane cannot be picked", async () => {
+  const page = startPage(setSnapshot);
+  await page.ready();
+  expect(laneText(page.document, "alpha/offline")).toBe("alpha/offline");
+  expect(laneText(page.document, "beta/online")).toBe("beta/online");
+  const unbound = laneText(page.document, "beta/unbound");
+  expect(unbound).toMatch(/^beta\/unbound\s*未绑定$/u);
+  const rows = [...page.document.querySelectorAll("input[data-lane-checkbox]")].map((box) => box.closest("label")?.textContent ?? "");
+  expect(rows.filter((row) => row.includes(" · ") || row.includes("未声明模型"))).toEqual([]);
+});
+
+test("creating, moving and deleting each send one protected request and then reload", async () => {
+  const page = startPage(setSnapshot);
+  await page.ready();
+  const name = page.document.querySelector("input[data-set-control]") as HTMLInputElement;
+  const move = page.document.querySelector("select#move-to-set") as HTMLSelectElement;
+  expect(move.getAttribute("data-set-control")).not.toBeNull();
+  expect([...move.querySelectorAll("option")].map((option) => [option.getAttribute("value"), option.textContent]))
+    .toEqual([["", "项目默认"], ["set-empty", "empty"], ["set-research", "research"]]);
+
+  /** One click: exactly one protected request with this body, then exactly one reload. */
+  const press = async (selector: string, body: Record<string, unknown>) => {
+    const posts = page.posts().length;
+    const reloads = page.gets().length;
+    (page.document.querySelector(selector) as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(page.posts()).toHaveLength(posts + 1));
+    const post = page.posts().at(-1)!;
+    expect(post.url).toBe("/dashboard/lane-sets");
+    expect(new Headers(post.init?.headers).get("x-lane-router-action")).toBe("lane-sets");
+    expect(new Headers(post.init?.headers).get("content-type")).toBe("application/json");
+    expect(JSON.parse(String(post.init?.body))).toEqual({ ...body, actionToken: "action-token-1" });
+    await vi.waitFor(() => expect(page.gets()).toHaveLength(reloads + 1));
+  };
+
+  name.value = "curvenet";
+  await press("button#create-set", { action: "create", name: "curvenet" });
+  // A name that was just used is not left behind as unfinished input.
+  expect((page.document.querySelector("input[data-set-control]") as HTMLInputElement).value).toBe("");
+
+  (page.document.querySelector("input[data-lane-checkbox][value='beta/online']") as HTMLInputElement).checked = true;
+  (page.document.querySelector("select#move-to-set") as HTMLSelectElement).value = "set-research";
+  await press("button#move-selected", { action: "assign", addresses: ["beta/online"], setId: "set-research" });
+
+  // "项目默认" is the empty value, and it means back to the project: null, not an empty id.
+  (page.document.querySelector("select#move-to-set") as HTMLSelectElement).value = "";
+  await press("button#move-selected", { action: "assign", addresses: ["beta/online"], setId: null });
+
+  await press("button[data-delete-set='set-empty']", { action: "delete", setId: "set-empty" });
+  expect(page.posts()).toHaveLength(4);
+});
+
+test("moving with no lane ticked says so and sends nothing", async () => {
+  const page = startPage(setSnapshot);
+  await page.ready();
+  (page.document.querySelector("select#move-to-set") as HTMLSelectElement).value = "set-research";
+  (page.document.querySelector("button#move-selected") as HTMLButtonElement).click();
+  await vi.waitFor(() => expect(page.document.querySelector("#launcher-status")?.textContent).toContain("先勾选"));
+  expect(page.posts()).toHaveLength(0);
+});
+
+test("a refused set request shows the Router's words", async () => {
+  const page = startPage(setSnapshot, () => ({
+    ok: false, status: 409, json: async () => ({ error: "research is already a project with lanes in service; give the set another name" }),
+  }));
+  await page.ready();
+  (page.document.querySelector("input[data-set-control]") as HTMLInputElement).value = "research";
+  (page.document.querySelector("button#create-set") as HTMLButtonElement).click();
+  await vi.waitFor(() => expect(page.document.querySelector("#launcher-status")?.textContent).toContain("already a project"));
+  expect(page.document.querySelector("#launcher-status")?.className).toBe("warn");
+});
+
+// The open button sends every [data-override] control's value as an override. A set control
+// marked that way would send "move-to-set: set-research" to the CLI as if it were a launch option.
+test("the set controls never ride along in an open request's override", async () => {
+  const page = startPage(setSnapshot, (url) => ({
+    ok: true, json: async () => (url === "/dashboard/lanes/open" ? { results: [{ address: "alpha/offline", status: "launch_requested" }] } : { laneSets: [] }),
+  }));
+  await page.ready();
+  (page.document.querySelector("input[data-set-control]") as HTMLInputElement).value = "curvenet";
+  (page.document.querySelector("select#move-to-set") as HTMLSelectElement).value = "set-research";
+  (page.document.querySelector("input[data-lane-checkbox][value='alpha/offline']") as HTMLInputElement).checked = true;
+  (page.document.querySelector("button#open-selected") as HTMLButtonElement).click();
+  await vi.waitFor(() => expect(page.posts()).toHaveLength(1));
+  expect(page.posts()[0]!.url).toBe("/dashboard/lanes/open");
+  expect(JSON.parse(String(page.posts()[0]!.init?.body)).override).toEqual({});
+});
+
+test("a poll keeps what was typed and chosen in the set controls", async () => {
+  const page = startPage(setSnapshot);
+  await page.ready();
+  (page.document.querySelector("input[data-set-control]") as HTMLInputElement).value = "curvenet";
+  (page.document.querySelector("select#move-to-set") as HTMLSelectElement).value = "set-research";
+  (page.document.querySelector("input[data-set-control]") as HTMLInputElement).focus();
+
+  await page.poll({ ...setSnapshot, router: { ...setSnapshot.router, pid: 2 } }, "pid 2");
+
+  expect((page.document.querySelector("input[data-set-control]") as HTMLInputElement).value).toBe("curvenet");
+  expect((page.document.querySelector("select#move-to-set") as HTMLSelectElement).value).toBe("set-research");
+  expect(page.document.activeElement).toBe(page.document.querySelector("input[data-set-control]"));
+});
+
+// `dist/dashboard.html` is read on every request, so a build reaches the running Router's page
+// before the Router itself is restarted onto the build that publishes sets. That page has to be
+// today's page.
+test("without laneSets in the snapshot there is no set control and lanes group by project", async () => {
+  const page = startPage(launcherSnapshot);
+  await page.ready();
+  expect(page.document.querySelectorAll("[data-set-control]")).toHaveLength(0);
+  expect(page.document.querySelector("button#create-set")).toBeNull();
+  expect(page.document.querySelector("button#move-selected")).toBeNull();
+  expect(page.document.querySelectorAll("button[data-delete-set]")).toHaveLength(0);
+  expect([...page.document.querySelectorAll("section.lane-group")].map((group) => group.getAttribute("data-group")))
+    .toEqual(["alpha", "beta"]);
+  expect(page.document.querySelector("button#open-selected")?.hasAttribute("disabled")).toBe(false);
+});
+
+test("open results are grouped the way the launcher groups the lanes", async () => {
+  const page = startPage(setSnapshot, () => ({
+    ok: true, json: async () => ({ results: [
+      { address: "alpha/offline", status: "launch_requested" },
+      { address: "beta/online", status: "skipped_online" },
+    ] }),
+  }));
+  await page.ready();
+  (page.document.querySelector("input[data-lane-checkbox][value='alpha/offline']") as HTMLInputElement).checked = true;
+  (page.document.querySelector("input[data-lane-checkbox][value='beta/online']") as HTMLInputElement).checked = true;
+  (page.document.querySelector("button#open-selected") as HTMLButtonElement).click();
+  await vi.waitFor(() => expect(page.document.querySelector("#launcher-status")?.textContent).toContain("已请求打开"));
+  expect(page.document.querySelector("#launcher-status")?.textContent).toContain("research\nalpha/offline：已请求打开");
+  expect(page.document.querySelector("#launcher-status")?.textContent).toContain("beta\nbeta/online：已在线，跳过");
 });

@@ -6,10 +6,12 @@ import { pathToFileURL } from "node:url";
 
 import { afterEach, expect, test, vi } from "vitest";
 
+import { LocalRouterServer } from "../../src/process/local-server.js";
 import { launchRotation, laneFacts } from "../../src/process/rotation-launcher.js";
 import {
   awaitChildStart, childEnvironment, claudeExecutable, withoutInheritedConsoleDescription, withoutVendorSessionIdentity,
 } from "../../src/process/terminal-spawn.js";
+import { startLaneSetRouter } from "../fixtures/process/lane-set-router.js";
 
 // These tests start real child processes, and on a loaded Windows machine one can take longer than
 // the 5 s default just to come up. Scoped to this file so a genuine hang elsewhere still fails fast.
@@ -259,6 +261,80 @@ test("titles the window with the generation the successor is about to become", a
   expect(environment.LANE_ROUTER_CHILD_WINDOW).toBe("alpha");
   // The title reaches the terminal from the child process, not through this command line.
   expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD");
+});
+
+test("opens the successor in the set's window when the lane is in a set", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  const handoffRoot = join(dataRoot, "rotation-handoffs");
+  mkdirSync(handoffRoot);
+  const handoff = join(handoffRoot, "00000000-0000-4000-8000-000000000016.md");
+  writeFileSync(handoff, "handoff", "utf8");
+  const spawnTerminal = terminalThatStarts();
+
+  await launchRotation(["claude", "alpha/design", "--handoff-file", handoff], {
+    dataRoot, spawnTerminal,
+    laneFacts: async (address) => ({ title: `${address} gen5`, model: undefined, laneSet: "research" }),
+  });
+
+  const environment = spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
+  expect(environment.LANE_ROUTER_CHILD_WINDOW).toBe("research");
+  expect(environment.LANE_ROUTER_CHILD_TITLE).toBe("alpha/design gen5");
+});
+
+// The set comes from the resume-info answer, the rest still from lane_directory. A Router that
+// cannot answer the second question must not cost the rotation the answers to the first.
+test("asks the Router for the lane's set beside its directory entry, and does without it when it cannot say", async () => {
+  const directory = [{ address: "alpha/design", model: "claude-opus-5", binding: { generation: 4 } }];
+  const start = async (resumeInfo?: () => unknown) => {
+    const server = new LocalRouterServer({
+      tools: { call: vi.fn(async () => directory) } as never,
+      codex: { endpoint: "ws://127.0.0.1:1" } as never,
+      instanceId: "instance-1",
+      ...(resumeInfo === undefined ? {} : { resumeInfo }),
+    });
+    const discovery = await server.start();
+    const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+    roots.push(dataRoot);
+    writeFileSync(join(dataRoot, "discovery.json"), JSON.stringify(discovery), "utf8");
+    return { server, dataRoot };
+  };
+
+  const inSet = await start(() => ({ state: "bound", laneSet: "research" }));
+  try {
+    await expect(laneFacts("alpha/design", inSet.dataRoot)).resolves.toEqual({ title: "alpha/design gen5", model: "claude-opus-5", laneSet: "research" });
+  } finally { await inSet.server.close(); }
+
+  const inNone = await start(() => ({ state: "bound", laneSet: null }));
+  try {
+    await expect(laneFacts("alpha/design", inNone.dataRoot)).resolves.toEqual({ title: "alpha/design gen5", model: "claude-opus-5" });
+  } finally { await inNone.server.close(); }
+
+  const cannotSay = await start();
+  try {
+    await expect(laneFacts("alpha/design", cannotSay.dataRoot)).resolves.toEqual({ title: "alpha/design gen5", model: "claude-opus-5" });
+  } finally { await cannotSay.server.close(); }
+});
+
+test("rotates a lane in a set into the set's window, as a real Router reports it", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-rotate-"));
+  roots.push(dataRoot);
+  const router = await startLaneSetRouter(dataRoot);
+  try {
+    const windows: Array<string | undefined> = [];
+    for (const [index, address] of ["alpha/worker", "alpha/plain"].entries()) {
+      const handoffRoot = join(dataRoot, "rotation-handoffs");
+      mkdirSync(handoffRoot, { recursive: true });
+      const handoff = join(handoffRoot, `00000000-0000-4000-8000-00000000002${index}.md`);
+      writeFileSync(handoff, "handoff", "utf8");
+      const spawnTerminal = terminalThatStarts();
+      await launchRotation(["claude", address, "--handoff-file", handoff], { dataRoot, spawnTerminal });
+      const environment = spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
+      windows.push(environment.LANE_ROUTER_CHILD_WINDOW);
+      expect(environment.LANE_ROUTER_CHILD_TITLE).toBe(`${address} gen3`);
+    }
+    expect(windows).toEqual(["research", "alpha"]);
+  } finally { await router.close(); }
 });
 
 test("falls back to the bare address when the Router cannot say which generation is next", async () => {

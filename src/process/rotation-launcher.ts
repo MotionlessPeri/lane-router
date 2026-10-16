@@ -55,7 +55,7 @@ export async function launchRotation(args: readonly string[], dependencies: Rota
     ...(backend !== "codex" || facts.modelProvider === undefined ? {} : { modelProvider: facts.modelProvider }),
   } satisfies TerminalChildRequest;
   const title = facts.title;
-  const environment = childEnvironment(request, process.env, title, resolved.shell, parsedAddress.project);
+  const environment = childEnvironment(request, process.env, title, resolved.shell, facts.laneSet ?? parsedAddress.project);
   await (dependencies.spawnTerminal ?? ((current, env) => spawnTerminal(current, env, terminalLaunchScript(resolved))))(request, environment);
   // Opening a window proves nothing, so the handoff is not retired until the successor itself
   // reports that its CLI started. Retiring on the strength of an exit code destroyed a handoff
@@ -86,18 +86,41 @@ export interface LaneFacts {
   readonly model: string | undefined;
   readonly profile?: string;
   readonly modelProvider?: string;
+  /** The set the lane is in, whose window the successor opens in; absent when it is in none. */
+  readonly laneSet?: string;
 }
 
 /**
- * Both facts the rotation needs about the lane, from one lookup. The generation is only assigned
- * when the successor attaches, which is after the window exists, so the title names the generation
- * it is about to become. Asking the Router can fail — it may not be running yet — and neither a
- * plainer window title nor a successor on the default model is worth failing a rotation over, so
- * a miss degrades instead of throwing.
+ * The facts the rotation needs about the lane. The generation is only assigned when the successor
+ * attaches, which is after the window exists, so the title names the generation it is about to
+ * become. Asking the Router can fail — it may not be running yet — and neither a plainer window
+ * title, a successor on the default model nor the project's window instead of the set's is worth
+ * failing a rotation over, so a miss degrades instead of throwing.
+ *
+ * Two questions, because lane_directory is what agents see and a set is not something they need:
+ * the set comes from resume-info, asked on its own so that a Router unable to answer it still
+ * leaves the directory's facts standing.
  */
 export async function laneFacts(address: string, dataRoot: string): Promise<LaneFacts> {
+  let url: string;
   try {
-    const { url } = JSON.parse(readFileSync(resolve(dataRoot, "discovery.json"), "utf8")) as { url: string };
+    ({ url } = JSON.parse(readFileSync(resolve(dataRoot, "discovery.json"), "utf8")) as { url: string });
+  } catch { return { title: address, model: undefined }; }
+  const laneSet = await laneSetOf(url, address);
+  return { ...await directoryFacts(url, address), ...(laneSet === undefined ? {} : { laneSet }) };
+}
+
+async function laneSetOf(url: string, address: string): Promise<string | undefined> {
+  try {
+    const response = await fetch(`${url}/lanes/resume-info?address=${encodeURIComponent(address)}`);
+    if (!response.ok) return undefined;
+    const body = await response.json() as { result?: { laneSet?: unknown } };
+    return typeof body.result?.laneSet === "string" ? body.result.laneSet : undefined;
+  } catch { return undefined; }
+}
+
+async function directoryFacts(url: string, address: string): Promise<LaneFacts> {
+  try {
     const response = await fetch(`${url}/rpc`, {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({

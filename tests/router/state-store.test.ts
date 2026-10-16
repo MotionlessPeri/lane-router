@@ -9,7 +9,7 @@ function setup() {
 }
 
 describe("V1 state store", () => {
-  it("contains only lane, binding, and message domain tables", () => {
+  it("contains only lane, binding, message, and lane set domain tables", () => {
     const { database } = setup();
     try {
       const tables = database.prepare(`
@@ -17,7 +17,7 @@ describe("V1 state store", () => {
         WHERE type='table' AND name NOT LIKE 'sqlite_%'
         ORDER BY name
       `).all() as Array<{ name: string }>;
-      expect(tables.map((row) => row.name)).toEqual(["binding", "lane", "message", "message_archive"]);
+      expect(tables.map((row) => row.name)).toEqual(["binding", "lane", "lane_set", "lane_set_member", "message", "message_archive"]);
       const messageColumns = database.pragma("table_info(message)") as Array<{ name: string }>;
       expect(messageColumns.map((column) => column.name)).not.toContain("body");
       expect(messageColumns.map((column) => column.name)).not.toContain("metadata_json");
@@ -74,6 +74,118 @@ describe("V1 state store", () => {
     } finally {
       database.close();
     }
+  });
+});
+
+describe("lane sets", () => {
+  function withLanes() {
+    const context = setup();
+    for (const address of ["alpha/a", "alpha/b", "beta/a"]) {
+      context.store.createLane({ address, project: address.split("/")[0]!, roleDescription: address, now: 1 });
+    }
+    return context;
+  }
+
+  it("creates, lists and deletes sets, empty ones included, by name", () => {
+    const { database, store } = withLanes();
+    try {
+      const research = store.createLaneSet("  research ", 5);
+      const curvenet = store.createLaneSet("curvenet", 6);
+      expect(research).toEqual({ id: expect.any(String), name: "research", members: [] });
+      expect(store.listLaneSets()).toEqual([
+        { id: curvenet.id, name: "curvenet", members: [] },
+        { id: research.id, name: "research", members: [] },
+      ]);
+      store.deleteLaneSet(research.id);
+      expect(store.listLaneSets()).toEqual([{ id: curvenet.id, name: "curvenet", members: [] }]);
+      expect(() => store.deleteLaneSet(research.id)).toThrow(/not found/iu);
+    } finally { database.close(); }
+  });
+
+  it("refuses a second set with the same name", () => {
+    const { database, store } = withLanes();
+    try {
+      store.createLaneSet("research", 5);
+      expect(() => store.createLaneSet("research", 6)).toThrow(/already exists/iu);
+      expect(() => store.createLaneSet(" research", 6)).toThrow(/already exists/iu);
+      expect(store.listLaneSets()).toHaveLength(1);
+    } finally { database.close(); }
+  });
+
+  it("moves a lane in, across to another set, and back out", () => {
+    const { database, store } = withLanes();
+    try {
+      const research = store.createLaneSet("research", 5);
+      const curvenet = store.createLaneSet("curvenet", 5);
+      store.assignLaneSet("beta/a", research.id, 6);
+      store.assignLaneSet("alpha/b", research.id, 6);
+      expect(store.listLaneSets().find((set) => set.id === research.id)?.members).toEqual(["alpha/b", "beta/a"]);
+      expect(store.laneSetNameFor("alpha/b")).toBe("research");
+      expect(store.laneSetNameFor("alpha/a")).toBeUndefined();
+
+      // Moving is the whole of leaving: a lane is in at most one set, so the old one lets it go.
+      store.assignLaneSet("alpha/b", curvenet.id, 7);
+      expect(store.listLaneSets()).toEqual([
+        { id: curvenet.id, name: "curvenet", members: ["alpha/b"] },
+        { id: research.id, name: "research", members: ["beta/a"] },
+      ]);
+      expect(store.laneSetNameFor("alpha/b")).toBe("curvenet");
+      store.assignLaneSet("beta/a", research.id, 9);
+      expect(database.prepare("SELECT m.added_at FROM lane_set_member m JOIN lane l ON l.id=m.lane_id WHERE l.address='beta/a'").get())
+        .toEqual({ added_at: 6 });
+
+      store.assignLaneSet("alpha/b", null, 8);
+      expect(store.laneSetNameFor("alpha/b")).toBeUndefined();
+      expect(store.listLaneSets().find((set) => set.id === curvenet.id)?.members).toEqual([]);
+    } finally { database.close(); }
+  });
+
+  it("refuses to move a lane that is not in service, or into a set that does not exist", () => {
+    const { database, store } = withLanes();
+    try {
+      const research = store.createLaneSet("research", 5);
+      store.archiveLane("alpha/a", 6);
+      expect(() => store.assignLaneSet("alpha/a", research.id, 7)).toThrow(/not found/iu);
+      expect(() => store.assignLaneSet("gamma/none", research.id, 7)).toThrow(/not found/iu);
+      expect(() => store.assignLaneSet("alpha/b", "no-such-set", 7)).toThrow(/not found/iu);
+      expect(store.listLaneSets()[0]?.members).toEqual([]);
+    } finally { database.close(); }
+  });
+
+  // A set holds the lanes in service. The next lane to take an archived address is a different
+  // lane, and must not find itself in a set it was never put in.
+  it("lets an archived lane leave its set, and does not hand the set to the lane that takes its address", () => {
+    const { database, store } = withLanes();
+    try {
+      const research = store.createLaneSet("research", 5);
+      store.assignLaneSet("alpha/a", research.id, 6);
+      store.archiveLane("alpha/a", 7);
+      expect(store.listLaneSets()[0]?.members).toEqual([]);
+      expect(database.prepare("SELECT COUNT(*) AS n FROM lane_set_member").get()).toEqual({ n: 0 });
+      store.createLane({ address: "alpha/a", project: "alpha", roleDescription: "again", now: 8 });
+      expect(store.laneSetNameFor("alpha/a")).toBeUndefined();
+    } finally { database.close(); }
+  });
+
+  it("sends a deleted set's lanes back to their projects", () => {
+    const { database, store } = withLanes();
+    try {
+      const research = store.createLaneSet("research", 5);
+      store.assignLaneSet("alpha/a", research.id, 6);
+      store.deleteLaneSet(research.id);
+      expect(store.laneSetNameFor("alpha/a")).toBeUndefined();
+      expect(store.lane("alpha/a")).toEqual(expect.objectContaining({ address: "alpha/a", archivedAt: null }));
+    } finally { database.close(); }
+  });
+
+  it("knows whether a project still has lanes in service", () => {
+    const { database, store } = withLanes();
+    try {
+      store.archiveLane("beta/a", 5);
+      expect(store.projectHasLiveLanes("alpha")).toBe(true);
+      expect(store.projectHasLiveLanes("beta")).toBe(false);
+      expect(store.projectHasLiveLanes("gamma")).toBe(false);
+    } finally { database.close(); }
   });
 });
 

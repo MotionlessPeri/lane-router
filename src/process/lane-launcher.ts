@@ -169,7 +169,9 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     ...(info.backend !== "codex" || info.profile === undefined ? {} : { profile: info.profile }),
     ...(info.backend !== "codex" || info.modelProvider === undefined ? {} : { modelProvider: info.modelProvider }),
   } satisfies TerminalChildRequest;
-  await openTerminal(dependencies, invocation.terminal, request, `${invocation.address!.address} gen${info.generation}`, invocation.address!.project);
+  // The set's window when the lane is in one. A Router older than sets sends no `laneSet`, and the
+  // lane opens in its project's window as it always did.
+  await openTerminal(dependencies, invocation.terminal, request, `${invocation.address!.address} gen${info.generation}`, info.laneSet ?? invocation.address!.project);
 }
 
 interface ParsedInvocation {

@@ -1,10 +1,10 @@
 import type { BackendRegistry, RestorePresence } from "./backend.js";
-import { parseLaneAddress, senderLabel } from "./address.js";
+import { isAddressSegment, parseLaneAddress, senderLabel } from "./address.js";
 import type { MailboxStore } from "./mailbox-store.js";
 import { tellBody, type TellInput, type TellResult, type TellTargetState } from "./tell.js";
 import type { NotificationPump } from "./notification-pump.js";
 import type { RouterStateStore } from "./state-store.js";
-import type { CallerContext, BackendName, LaneRecord, MessageKind, MessageRecord, ReachSnapshot, ResolvedIdentity } from "./types.js";
+import type { CallerContext, BackendName, LaneRecord, LaneSetRecord, MessageKind, MessageRecord, ReachSnapshot, ResolvedIdentity } from "./types.js";
 import type { BindingRecord } from "./types.js";
 
 export interface LaneRestoreResult {
@@ -69,6 +69,8 @@ export type ResumeInfo =
       readonly reach: ReachSnapshot | null;
       readonly restorePresence: RestorePresence;
       readonly model: string | null;
+      /** The set the lane is in, which names the window it opens in; null when it is in none. */
+      readonly laneSet: string | null;
       readonly profile?: string;
       readonly modelProvider?: string;
     };
@@ -137,6 +139,7 @@ export class RouterCore {
       reach: backend?.reach(binding) ?? null,
       restorePresence: backend?.restorePresence(binding) ?? "unavailable",
       model: this.dependencies.state.requireLane(parsed.address).model,
+      laneSet: this.dependencies.state.laneSetNameFor(parsed.address) ?? null,
       ...(typeof binding.startup.profile === "string" ? { profile: binding.startup.profile } : {}),
       ...(typeof binding.startup.modelProvider === "string" ? { modelProvider: binding.startup.modelProvider } : {}),
     };
@@ -384,6 +387,66 @@ export class RouterCore {
 
   listArchivedLanes(project: string | undefined): LaneRecord[] {
     return this.dependencies.state.listArchivedLanes(project);
+  }
+
+  listLaneSets(): LaneSetRecord[] {
+    return this.dependencies.state.listLaneSets();
+  }
+
+  /**
+   * The name becomes the Windows Terminal window a set's lanes open in, and it is passed through a
+   * command line as it is, where a space would split it in two — so it is held to the rule a lane
+   * address segment already follows. It must not be the name of a project with lanes in service
+   * either: the board groups lanes by set or project name, and the two would merge into one group.
+   */
+  createLaneSet(name: string): LaneSetRecord {
+    const trimmed = name.trim();
+    const state = this.dependencies.state;
+    if (!isAddressSegment(trimmed)) {
+      throw new RouterError("INVALID_LANE_SET_NAME", `Invalid lane set name: ${JSON.stringify(name)}; start with a letter or digit and use only letters, digits and . _ % ~ -`);
+    }
+    if (state.projectHasLiveLanes(trimmed)) {
+      throw new RouterError("LANE_SET_NAME_IS_PROJECT", `${trimmed} is already a project with lanes in service; give the set another name`);
+    }
+    if (state.listLaneSets().some((set) => set.name === trimmed)) {
+      throw new RouterError("LANE_SET_EXISTS", `A lane set named ${trimmed} already exists`);
+    }
+    return state.createLaneSet(trimmed, this.dependencies.now());
+  }
+
+  /**
+   * Only an empty set: deleting one with lanes in it would send all of them back to their projects
+   * at once, a bigger change than the single click that would cause it.
+   */
+  deleteLaneSet(id: string): void {
+    const set = this.dependencies.state.listLaneSets().find((current) => current.id === id);
+    if (!set) throw new RouterError("LANE_SET_NOT_FOUND", `Lane set not found: ${id}`);
+    if (set.members.length > 0) {
+      throw new RouterError("LANE_SET_NOT_EMPTY", `Lane set ${set.name} still has ${set.members.length} lane(s); move them out before deleting it`);
+    }
+    this.dependencies.state.deleteLaneSet(id);
+  }
+
+  /**
+   * Move lanes into a set, or back to their projects with `null`. Every address is checked before
+   * any lane moves, so a refused request leaves every lane where it was. An archived lane is told
+   * apart from one that never existed, for the reason `resumeInfo` tells them apart.
+   */
+  assignLaneSet(addresses: readonly string[], setId: string | null): void {
+    const state = this.dependencies.state;
+    for (const address of addresses) {
+      const parsed = parseLaneAddress(address);
+      if (state.lane(parsed.address)) continue;
+      if (state.archivedLaneAt(parsed.address)) {
+        throw new RouterError("LANE_ARCHIVED", `Lane is archived: ${parsed.address}; only lanes in service can be in a set`);
+      }
+      throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${parsed.address}`);
+    }
+    if (setId !== null && !state.listLaneSets().some((set) => set.id === setId)) {
+      throw new RouterError("LANE_SET_NOT_FOUND", `Lane set not found: ${setId}`);
+    }
+    const now = this.dependencies.now();
+    for (const address of addresses) state.assignLaneSet(address, setId, now);
   }
 
   /**

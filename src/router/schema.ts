@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type Database from "better-sqlite3";
 
-export const ROUTER_SCHEMA_VERSION = 9;
+export const ROUTER_SCHEMA_VERSION = 10;
 
 /**
  * The version 2 message table, kept verbatim because the version 1 migration has to build exactly
@@ -205,6 +205,29 @@ CREATE UNIQUE INDEX binding_lane_generation_idx
   ON binding(lane_id,generation);
 `;
 
+/**
+ * Version 10: a lane set is a name and a list of lanes, kept by the Router and never on the lane
+ * itself. The member table is keyed by lane, so "a lane is in at most one set" is the schema's
+ * rule rather than a convention the code has to remember. Members are lanes by id, not addresses:
+ * an archived address can be taken again, and the lane that takes it is not the one that was put
+ * in the set. Deleting a set lets its members fall back to their projects; a lane is never deleted,
+ * and membership must not become a way to try.
+ */
+const LANE_SET_TABLES_SQL = `
+CREATE TABLE lane_set (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) > 0),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE lane_set_member (
+  lane_id TEXT PRIMARY KEY REFERENCES lane(id) ON DELETE RESTRICT,
+  set_id TEXT NOT NULL REFERENCES lane_set(id) ON DELETE CASCADE,
+  added_at INTEGER NOT NULL
+);
+CREATE INDEX lane_set_member_set_idx ON lane_set_member(set_id);
+`;
+
 const ROUTER_SCHEMA_PREFIX = `
 CREATE TABLE lane (
   id TEXT PRIMARY KEY,
@@ -233,7 +256,7 @@ CREATE INDEX lane_project_address_idx ON lane(project,address);
 const ROUTER_SCHEMA_V6_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V6_SQL}${MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V6_SQL}`;
 
 /** Schema for newly created databases at the current version. */
-export const ROUTER_SCHEMA_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V8_SQL}${MESSAGE_TABLE_V9_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V9_SQL}`;
+export const ROUTER_SCHEMA_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V8_SQL}${MESSAGE_TABLE_V9_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V9_SQL}${LANE_SET_TABLES_SQL}`;
 
 export function initializeRouterSchema(database: Database.Database): void {
   let version = database.pragma("user_version", { simple: true }) as number;
@@ -273,7 +296,8 @@ function assertForeignKeys(database: Database.Database): void {
  * say what a database already has. One line of work used 7 and 8 for two new binding backends;
  * the other used 7 for the message sender label, which is version 9 now. A version 7 database is
  * therefore either one. Each step is decided by the shape it produces, and the number is written
- * once, when every step is in place.
+ * once, when every step is in place. Version 10's lane set tables are one more step of the same
+ * kind, and the only one that adds rather than rebuilds.
  *
  * One transaction for all of it: a failure anywhere leaves the database exactly as it was opened,
  * so the next start decides again from the same shape.
@@ -282,8 +306,9 @@ function assertForeignKeys(database: Database.Database): void {
  *   1. 关外键（重建期间新表的引用对着改了名的旧表），并在事务外切换
  *   2. binding 的 CHECK 不含 'zcode' 就按 version 8 的表重建，'dsh' 随之补上
  *   3. message 没有 sender_label 列就重建两张消息表
- *   4. 置 user_version = 9 并复查外键完整性 —— 与 2、3 同一个事务，任何一步失败整体回滚
- *   5. 恢复外键开关
+ *   4. 没有 lane_set 表就建两张 set 表 —— 纯加法，不碰任何已有的行
+ *   5. 置 user_version = 10 并复查外键完整性 —— 与 2、3、4 同一个事务，任何一步失败整体回滚
+ *   6. 恢复外键开关
  */
 function completeFromVersion6(database: Database.Database): void {
   const foreignKeysWereOn = database.pragma("foreign_keys", { simple: true }) === 1;
@@ -292,6 +317,7 @@ function completeFromVersion6(database: Database.Database): void {
     database.transaction(() => {
       if (!bindingAllowsZcode(database)) rebuildBindingWithEveryBackend(database);
       if (!messageHasSenderLabel(database)) addMessageSenderLabel(database);
+      if (!hasTable(database, "lane_set")) database.exec(LANE_SET_TABLES_SQL);
       database.pragma(`user_version = ${ROUTER_SCHEMA_VERSION}`);
       assertForeignKeys(database);
     })();
@@ -307,6 +333,10 @@ function bindingAllowsZcode(database: Database.Database): boolean {
 
 function messageHasSenderLabel(database: Database.Database): boolean {
   return (database.pragma("table_info(message)") as Array<{ name: string }>).some((column) => column.name === "sender_label");
+}
+
+function hasTable(database: Database.Database, name: string): boolean {
+  return database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name) !== undefined;
 }
 
 /**

@@ -463,6 +463,74 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 **最后验证：** 尚未真机执行。
 
+## lane set：一起干活的 lane 开进同一个窗口
+
+需求与设计见 `docs/superpowers/specs/2026-10-16-lane-sets.md` 与 `2026-10-16-lane-sets-design.md`。
+
+自动测试覆盖以下几方面：
+- schema 10 的迁移：六种起点形态都能到 10；已是 10 的库再开一次不动；空库直接建到 10；set 那一步失败时，前两步一起回滚。
+- 两张新表的约束。
+- state-store 与 RouterCore 的建、挪、删，以及各条拒绝。
+- 快照里的 `laneSets`。
+- `/dashboard/lane-sets` 的四道守卫与三种 action。
+- 恢复、`open`、`rotate` 三处的窗口名；`open` 与 `rotate` 各有一条走真实 Router 的用例。
+- 页面的分组、三处控件，以及快照没有 `laneSets` 时照旧工作。
+
+设计稿第六节的五个变异都让预定的用例变红。下面这条要真的开出 Windows Terminal 窗口，自动测试代替不了。
+
+**前提：** 共享 Router 受控重启到含 lane set 的构建（schema 10），时机由用户决定。重启前先照 TC-MERGE-1 第 1、2 步记数并备份：在用库会从 7 直接迁到 10。
+
+### TC-SET-1：set 里的 lane 开在同一个以 set 命名的窗口
+
+1. 浏览器打开 `http://127.0.0.1:<port>/dashboard`，在「恢复 lane」下的「新建 set」里填一个不与任何项目同名的名字（如 `research-test`），点「新建」。
+   确认启动器多出一组 `research-test · set`，组里写「（空）」，组头有「删除」。
+2. 勾选两个**不同项目**的各一条 lane（已绑定、当前没开着），在「把选中 lane 移入」里选这个 set，点「移入」。
+   确认这两条从各自项目的组里消失，出现在 set 组里，地址带项目前缀。
+3. 勾选这两条，点「打开选中 lane」。
+4. 关掉其中一条的窗口。把它勾上，在下拉里选「项目默认」点「移入」，再勾上它点「打开选中 lane」。
+5. 对还在 set 里的那条：关掉窗口，在 shell 里跑 `lane-router-lane open <地址>`。
+6. 对同一条做一次轮换：`lane-router-rotate <claude|codex> <地址> --handoff-file <...>`。handoff 文件按「自动轮换的可见 Windows terminal」那条的做法准备。
+7. 收尾：把留在 set 里的那条移回「项目默认」，set 变空后点「删除」。
+
+**预期：**
+- 第 3 步：两个标签页开在**同一个** Windows Terminal 窗口，窗口名是 set 名，不是各自项目的窗口。
+- 第 4 步：那条回到它项目名的窗口。
+- 第 5、6 步：都开在 set 名的窗口。
+- 第 7 步：set 消失，lane 回到项目组。
+- 第 1 步若填了项目名、含空格，或与已有 set 同名：状态栏显示 Router 的拒绝语，什么都不建。
+
+**关键看点：** 窗口名要看 Windows Terminal 的窗口本身，不看标签标题：标签标题一直是 `地址 genN`，set 不改它。改了 set 之后，已经开着的窗口不会跟着挪（设计稿第七节），所以每一步都是先关再开。
+
+⚠️ 只有已绑定的 lane 能挪进 set：未绑定的 lane 在启动器里勾不上（后面写着「未绑定」）。
+
+**副本预演（2026-10-16，未重启）：**
+- 做法同 TC-MERGE-1：从在用库（只读打开）用 backup API 拷出一份快照，再从快照拷一份，用 lane set 构建的 `dist/` 打开第二份，触发迁移。
+- 比对对象是没动过的快照，这样预演期间新进在用库的信不会让比对失真。
+- 在用库本身和共享 Router 都没有动。
+
+| | 快照（迁移前） | 副本（迁移后） |
+|---|---|---|
+| `user_version` | 7 | 10 |
+| 表 | `binding` `lane` `message` `message_archive` | 另加 `lane_set` `lane_set_member` |
+| `lane` / `binding` / `message` / `message_archive` 行数 | 84 / 148 / 11294 / 3077 | 84 / 148 / 11294 / 3077 |
+| 四张旧表的行指纹（按两边共有的列逐行取 SHA-256，前 16 位） | `e83fac6898965183` / `154e931ea715c213` / `acbf855cb3e0d7f0` / `2258acdb0bcdd4f9` | 相同 |
+| `lane_set` / `lane_set_member` 行数 | — | 0 / 0 |
+| `binding` 后端列表 | `'claude','codex'` | `'claude','codex','dsh','zcode'` |
+| 带 label 的消息 | 5 | 5 |
+| `foreign_key_check` | — | 空 |
+
+迁移后的副本再打开一次：仍是 10，`sqlite_master` 与各表行数都不变。
+
+**旧 Router 配新页面（2026-10-16）：** `npm run build` 之后，用无头 Edge 打开正在跑的共享 Router 的 `/dashboard`，取渲染后的 DOM。这个 Router 是 pid 66944、schema v7，快照里没有 `laneSets`。结果如下：
+- 启动器的 26 个组都是项目，按名排序。
+- 67 条 lane 的复选框都在。
+- 「打开选中 lane」可点，覆盖菜单三项都在。
+- set 的三处控件一个都没有。
+
+这次没有点打开；真开窗口留给 TC-SET-1。
+
+**最后验证：** 尚未真机执行，等用户决定重启时机。
+
 ## `lane_send` 的抄送
 
 自动测试覆盖副本的独立 ack、全有或全无、重放幂等、逐收件人的投递结果、`cc:` 文件头与旧文件兼容，并做过五个变异（结果见设计稿第六节）。下面两条依赖真实 Claude 会话与 channel，fake backend 代替不了。
@@ -592,6 +660,8 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 **前提：** 共享 Router 受控重启到 `6c3eb64` 或之后的构建，重启时机由用户决定。
 
 ⚠️ `dist/` 现在已经是合并后的构建。Router 若意外退出，被 `ensure-router` 自动拉起时同样会迁移在用库，而且没有事先备份那一步。
+
+⚠️ 2026-10-16 起 `dist/` 是 lane set 的构建（schema 10），下一次重启会从 7 直接迁到 10：第 4 步的 `user_version` 读作 10，另外多出两张空表 `lane_set` / `lane_set_member`，其余预期不变。那次的副本预演见 TC-SET-1。
 
 1. 重启前，用只读方式记下 `lane` / `binding` / `message` / `message_archive` 四张表的行数、`PRAGMA user_version`（应为 7）、`binding` 建表语句里的后端列表（应为 `'claude','codex'`），以及 `SELECT COUNT(*) FROM message WHERE sender_label IS NOT NULL`。
 2. 备份 `~/.lane-router/router.sqlite`，并核实备份是 v7。

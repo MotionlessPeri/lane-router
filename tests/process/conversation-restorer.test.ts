@@ -45,6 +45,23 @@ test("launches an offline Codex binding and reserves it for thirty seconds", asy
   } finally { x.database.close(); }
 });
 
+// The board's "restore" and lane_restore_project both come through here, so this is where a lane in
+// a set has to land in the set's window rather than its project's.
+test("opens a lane in a set in the set's window, and back in its project's once it leaves", async () => {
+  const x = setup();
+  try {
+    const research = x.state.createLaneSet("research", 3);
+    x.state.assignLaneSet("alpha/design", research.id, 4);
+    await expect(x.restorer.restore(x.binding)).resolves.toEqual({ status: "launch_requested" });
+    expect(x.launch.mock.calls.at(-1)!.at(2)).toBe("research");
+
+    x.state.assignLaneSet("alpha/design", null, 5);
+    x.advance(30_001);
+    await expect(x.restorer.restore(x.binding)).resolves.toEqual({ status: "launch_requested" });
+    expect(x.launch.mock.calls.at(-1)!.at(2)).toBe("alpha");
+  } finally { x.database.close(); }
+});
+
 test("skips online clients and fails without launching when the backend is unavailable", async () => {
   const online = setup();
   try {

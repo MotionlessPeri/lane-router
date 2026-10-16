@@ -71,10 +71,11 @@ export class ConversationRestorer {
         ...(binding.backend !== "codex" || modelProvider === undefined ? {} : { modelProvider }),
         ...(binding.backend !== "codex" || !transientStartup ? {} : { transientStartup: true }),
       } satisfies TerminalChildRequest;
+      // A lane in a set opens in the set's window; any other lane in its project's.
       await (this.dependencies.launch ?? launchRestoreTerminal)(
         request,
         `${binding.laneAddress} gen${binding.generation}`,
-        binding.laneAddress.split("/")[0] ?? "",
+        this.dependencies.state.laneSetNameFor(binding.laneAddress) ?? binding.laneAddress.split("/")[0] ?? "",
       );
       this.reservations.set(binding.id, (this.dependencies.now ?? Date.now)() + RESERVATION_MS);
       return { status: "launch_requested" };
