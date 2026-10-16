@@ -97,7 +97,8 @@ CREATE INDEX lane_set_member_set_idx ON lane_set_member(set_id);
 
 - 启动器第一层按组：lane 在 set 里就归 set 名，否则归项目名；组按名排序（不分大小写，沿用现有 `byName`），组内按地址排序。空 set 也显示一组，写「（空）」。
 - 组的 DOM：`section.lane-group[data-group=<名字>]`，组头复选框 `input[data-group-checkbox]`。现有测试里的 `section.project` / `data-project` / `data-project-checkbox` 跟着改。
-- lane 行只显示地址；未绑定的 lane 后面加一个灰色「未绑定」，解释为什么勾不了。现有 `backend · 恢复状态 · model` 那串去掉。
+- lane 行保持原样：`地址 · backend · 恢复状态 · model`（Codex 另带 profile / provider）。
+  > 勘误（2026-10-16）：本条原写「只显示地址，去掉那串」，源于需求第 6 条的误读（见需求稿勘误），实现后按用户要求改回。
 - 控件三处，快照没有 `laneSets` 时一个都不渲染：
   - 「新建 set」文本框加按钮 `button#create-set`，发 `create`；
   - 「把选中 lane 移入」下拉 `select#move-to-set`（选项：「项目默认」值为空，各 set 值为 id）加按钮 `button#move-selected`，对勾选的 lane 发 `assign`；没勾任何 lane 时和打开按钮一样，在状态栏说「先勾选」，不发请求；
@@ -132,7 +133,7 @@ CREATE INDEX lane_set_member_set_idx ON lane_set_member(set_id);
 5. **快照。** `laneSets` 列出每个 set 的 id、名字和在役成员地址，空 set 也在，归档 lane 不在成员里；`dashboard-state.test.ts` 里「exactly the facts」的键集合更新为含 `laneSets`。
 6. **HTTP。** `/dashboard/lane-sets` 四道守卫各缺一项都拒且不调用处理函数；未接线 404；三种 action 各到位，返回 `{ laneSets }`；`LANE_TOOL_NAMES` 不变。
 7. **开窗。** 恢复、`open`、`rotate` 三处：lane 在 set 里时 `LANE_ROUTER_CHILD_WINDOW` 是 set 名，否则项目名；`open` 收到没有 `laneSet` 字段的 resume-info 时落回项目；`new` 仍是项目。
-8. **页面。** 按 set 分组且跨项目 set 内 lane 带项目前缀；空 set 显示为一组；lane 行文本只有地址（未绑定的多一个「未绑定」）；新建、移入、删除各发一次带 `x-lane-router-action: lane-sets` 和 token 的请求；没勾 lane 就点移入不发请求；快照没有 `laneSets` 时三处控件都不存在，且现有页面测试全部照过；轮询刷新保留新建框的文字和下拉选择。
+8. **页面。** 按 set 分组且跨项目 set 内 lane 带项目前缀；空 set 显示为一组；lane 行文本仍是「地址 · backend · 恢复状态 · model」（Codex 带 profile / provider，未绑定的写「未绑定」）；新建、移入、删除各发一次带 `x-lane-router-action: lane-sets` 和 token 的请求；没勾 lane 就点移入不发请求；快照没有 `laneSets` 时三处控件都不存在，且现有页面测试全部照过；轮询刷新保留新建框的文字和下拉选择。
 9. **自包含。** 页面仍不引用任何外部资源。
 
 ## 六、验证方法与变异检验

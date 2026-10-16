@@ -521,7 +521,7 @@ test("the launcher groups lanes by set, and by project for the lanes in none, em
   // Across projects, so each lane carries its project in front of its name.
   const research = [...page.document.querySelectorAll("section.lane-group[data-group='research'] input[data-lane-checkbox]")];
   expect(research.map((checkbox) => (checkbox as HTMLInputElement).value)).toEqual(["alpha/offline", "gamma/one"]);
-  expect(laneText(page.document, "gamma/one")).toBe("gamma/one");
+  expect(laneText(page.document, "gamma/one")).toBe("gamma/one · claude · offline · 未声明模型");
 
   const empty = page.document.querySelector("section.lane-group[data-group='empty']")!;
   expect(empty.textContent).toContain("（空）");
@@ -537,15 +537,15 @@ test("the launcher groups lanes by set, and by project for the lanes in none, em
   expect(research.map((checkbox) => (checkbox as HTMLInputElement).checked)).toEqual([true, true]);
 });
 
-test("a lane row says only its address, and why an unbound lane cannot be picked", async () => {
+// Grouping by set changed where a row sits, not what it says. The row keeps backend, Codex
+// startup, presence and model: presence is how the reader tells an already open lane from one
+// worth ticking. It was cut once on a misread of the user's words (2026-10-16) and put back.
+test("a lane row still names its backend, startup, presence and model under set grouping", async () => {
   const page = startPage(setSnapshot);
   await page.ready();
-  expect(laneText(page.document, "alpha/offline")).toBe("alpha/offline");
-  expect(laneText(page.document, "beta/online")).toBe("beta/online");
-  const unbound = laneText(page.document, "beta/unbound");
-  expect(unbound).toMatch(/^beta\/unbound\s*未绑定$/u);
-  const rows = [...page.document.querySelectorAll("input[data-lane-checkbox]")].map((box) => box.closest("label")?.textContent ?? "");
-  expect(rows.filter((row) => row.includes(" · ") || row.includes("未声明模型"))).toEqual([]);
+  expect(laneText(page.document, "alpha/offline")).toBe("alpha/offline · codex · gpt / openai · offline · 未声明模型");
+  expect(laneText(page.document, "beta/online")).toBe("beta/online · claude · online · 未声明模型");
+  expect(laneText(page.document, "beta/unbound")).toBe("beta/unbound · 未绑定 · unavailable · 未声明模型");
 });
 
 test("creating, moving and deleting each send one protected request and then reload", async () => {

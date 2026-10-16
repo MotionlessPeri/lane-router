@@ -206,11 +206,15 @@
     checkbox.checked = previous.choices.get(lane.address) === true && lane.binding !== null;
     checkbox.disabled = lane.binding === null;
     choice.appendChild(checkbox);
-    // The address and nothing more: backend, presence and model are not what anyone picks a lane
-    // by, and the topology section below still has them. An unbound lane says why its box is
-    // greyed out, which is otherwise a silent refusal.
-    choice.appendChild(document.createTextNode(" " + lane.address));
-    if (lane.binding === null) choice.appendChild(el("span", "dim", " 未绑定"));
+    // Backend, presence and model stay on the row: presence is how the reader tells an already
+    // open lane from one worth ticking, without unfolding the topology section to look it up.
+    const startup = lane.binding && lane.binding.backend === "codex"
+      ? " · " + (lane.binding.profile || "—") + " / " + (lane.binding.modelProvider || "—")
+      : "";
+    choice.appendChild(document.createTextNode(
+      " " + lane.address + " · " + (lane.binding ? lane.binding.backend : "未绑定")
+      + startup + " · " + (lane.restorePresence || "无 backend") + " · " + (lane.model || "未声明模型")
+    ));
     return choice;
   }
 
