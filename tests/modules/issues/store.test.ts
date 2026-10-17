@@ -84,6 +84,32 @@ describe("independent issue persistence", () => {
     });
   }
 
+  for (const table of ["issue_entry", "issue_operation"]) {
+    it(`rolls back question status, history event and operation together when ${table} fails`, () => {
+      const x = setup();
+      const published = publishQuestion(x);
+      const before = x.service.detail(published.issueId);
+      const input = { operationKey: "resolve-retry", issueId: published.issueId, questionId: published.questionId!,
+        status: "not_needed", reason: "The replacement passed verification." } as const;
+      const database = new Database(x.path);
+      database.exec(`CREATE TRIGGER fail_resolution BEFORE INSERT ON ${table} BEGIN SELECT RAISE(ABORT,'injected resolution failure'); END`);
+      try {
+        expect(() => x.service.updateQuestion(x.caller, input)).toThrow("injected resolution failure");
+        expect(x.service.detail(published.issueId)).toEqual(before);
+        expect(x.store.operation("lane:lane-one", "update_question", input.operationKey)).toBeNull();
+      } finally { database.exec("DROP TRIGGER fail_resolution"); database.close(); }
+      const saved = x.service.updateQuestion(x.caller, input);
+      x.reopen();
+      const after = x.service.detail(published.issueId);
+      expect(after.questions[0]).toMatchObject({ status: "not_needed", reason: input.reason });
+      expect(after.entries.map((entry) => entry.seq)).toEqual([1, 2]);
+      expect(after.entries.at(-1)).toMatchObject({ kind: "event", relatedEntryId: published.entryId });
+      expect(after.entries.at(-1)?.body).toContain(input.reason);
+      expect(x.service.updateQuestion(x.caller, input)).toEqual(saved);
+      expect(x.service.detail(published.issueId)).toEqual(after);
+    });
+  }
+
   for (const kind of ["future", "corrupt", "unknown", "incomplete", "altered_owned_schema"]) {
     it(`refuses a ${kind} database without replacing or altering the original file`, () => {
       const root = mkdtempSync(join(tmpdir(), "lane-issues-invalid-")); roots.push(root);

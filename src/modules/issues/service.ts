@@ -77,15 +77,18 @@ export class IssuesService {
     const answerEntryId = input.status === "answered" ? text(input.answerEntryId, "answerEntryId") : null;
     const reason = input.status === "not_needed" ? text(input.reason, "reason") : null;
     if (input.status === "answered" && "reason" in input || input.status === "not_needed" && "answerEntryId" in input) invalid("Question resolution fields do not match status");
-    return this.agentWrite(context, "update_question", operationKey, { issueId, questionId, status: input.status, answerEntryId, reason }, issueId, () => {
+    return this.agentWrite(context, "update_question", operationKey, { issueId, questionId, status: input.status, answerEntryId, reason }, issueId, (actor) => {
       const question = this.requireQuestion(issueId, questionId);
       if (answerEntryId !== null) {
         const answer = this.store.entry(issueId, answerEntryId);
         if (!answer || !["answer", "reply"].includes(answer.kind)) reference("An answered question needs a specific answer or reply in this issue");
       }
       this.store.updateQuestion({ ...question, status: input.status, answerEntryId, reason });
-      const thread = this.requireThread(issueId);
-      this.store.updateThread({ ...thread, updatedAt: this.now() });
+      // Later turns replace current status, so retain completion facts in immutable history.
+      const body = input.status === "answered"
+        ? `问题 ${questionId} 已回答（answered）。\n答复 entry ID: ${answerEntryId}`
+        : `问题 ${questionId} 无需回答（not_needed）。\n原因：${reason}`;
+      this.addEntry(issueId, "event", "lane", "agent", body, question.promptEntryId, actor);
       return { issueId, questionId };
     });
   }

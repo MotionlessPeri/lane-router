@@ -98,6 +98,57 @@ describe("issue conversation business", () => {
     expect(detail.thread.status).toBe("open");
   });
 
+  it("retains completed-question reasons and answer links after later turns, paging, restart and replay", () => {
+    const x = setup();
+    const published = publishQuestion(x);
+    const issueId = published.issueId;
+    const questionId = published.questionId!;
+    x.service.markRead({ operationKey: "initial-read", issueId, throughSeq: published.entrySeq });
+    const reason = "Option A was superseded by the verified B result.";
+    const notNeeded = { operationKey: "not-needed", issueId, questionId, status: "not_needed", reason } as const;
+    const savedNotNeeded = x.service.updateQuestion(x.caller, notNeeded);
+    expect(savedNotNeeded).toEqual({ issueId, questionId });
+    expect(x.service.list({ filter: "all" }).items[0]?.attentionReasons).toEqual([]);
+    x.service.reply({ operationKey: "follow-up", issueId, questionId, body: "Please explain the verification." });
+    expect(x.service.detail(issueId).questions[0]).toMatchObject({ status: "waiting_lane", reason: null });
+    const answer = x.service.append(x.caller, { operationKey: "answer", issueId, questionId, kind: "answer", body: "B passed the full verification." });
+    x.service.markRead({ operationKey: "answer-read", issueId, throughSeq: answer.entrySeq });
+    const answered = { operationKey: "answered", issueId, questionId, status: "answered", answerEntryId: answer.entryId } as const;
+    const savedAnswered = x.service.updateQuestion(x.caller, answered);
+    expect(x.service.list({ filter: "all" }).items[0]?.attentionReasons).toEqual([]);
+    x.service.append(x.caller, { operationKey: "clarify", issueId, questionId, kind: "explanation", body: "Please decide whether to apply B." });
+    expect(x.service.detail(issueId).questions[0]).toMatchObject({ status: "waiting_user", answerEntryId: null, reason: null });
+    x.reopen();
+
+    const history: ReturnType<typeof x.service.detail>["entries"][number][] = [];
+    let afterSeq = 0;
+    for (;;) {
+      const page = x.service.readForLane(x.caller, issueId, { afterSeq, limit: 1 });
+      history.push(...page.entries);
+      if (!page.hasMore) break;
+      afterSeq = page.displayedThroughSeq;
+    }
+    const events = history.filter((entry) => entry.kind === "event");
+    expect(events).toHaveLength(2);
+    expect(events.some((entry) => entry.body.includes(reason))).toBe(true);
+    expect(events.some((entry) => entry.body.includes(answer.entryId))).toBe(true);
+    for (const event of events) {
+      expect(event).toMatchObject({ relatedEntryId: published.entryId, author: "lane", source: "agent",
+        recordedByBindingId: "binding:lane-one", recordedByGeneration: 1 });
+    }
+    expect(new Set(history.map((entry) => entry.id)).size).toBe(history.length);
+    const beforeReplay = x.service.detail(issueId);
+    expect(x.service.updateQuestion(x.caller, notNeeded)).toEqual(savedNotNeeded);
+    expect(x.service.updateQuestion(x.caller, answered)).toEqual(savedAnswered);
+    expect(x.service.detail(issueId)).toEqual(beforeReplay);
+    x.service.close({ operationKey: "close", issueId, body: "Explicit end" });
+    const closed = x.service.detail(issueId);
+    expect(x.service.updateQuestion(x.caller, answered)).toEqual(savedAnswered);
+    expect(x.service.detail(issueId)).toEqual(closed);
+    expect(() => x.service.updateQuestion(x.caller, { ...notNeeded, operationKey: "after-close" }))
+      .toThrowError(expect.objectContaining({ code: "ISSUE_CLOSED" }));
+  });
+
   it("paginates equal-time threads by stable IDs and preserves content arriving after history was shown", () => {
     const x = setup();
     let id = 0;
