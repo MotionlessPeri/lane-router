@@ -5,7 +5,6 @@ import type { ClaudeChannelNotification, ClaudeChannelSink } from "../adapters/c
 import type { NotificationMessage } from "../router/backend.js";
 import { notificationPayload } from "../router/notification-payload.js";
 import type { CallerContext } from "../router/types.js";
-import type { LaneToolName } from "../tools/tool-contract.js";
 import type { RouterDiscovery } from "./local-server.js";
 
 /**
@@ -18,7 +17,7 @@ export class LocalRouterClient {
 
   constructor(private readonly resolveUrl: () => Promise<string>) {}
 
-  async call(name: LaneToolName, args: Record<string, unknown>, context: CallerContext): Promise<unknown> {
+  async call(name: string, args: Record<string, unknown>, context: CallerContext): Promise<unknown> {
     const response = await this.send((url) => fetch(`${url}/rpc`, {
       method: "POST",
       headers: { "content-type": "application/json" },

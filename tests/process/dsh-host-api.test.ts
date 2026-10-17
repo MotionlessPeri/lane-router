@@ -14,6 +14,7 @@ import { loadDshHostToken, parseWindowsTokenAclResult, runRouterProcess, windows
 import { RuntimeLock } from "../../src/process/runtime-lock.js";
 import { ROUTER_SCHEMA_SQL, ROUTER_SCHEMA_VERSION } from "../../src/router/schema.js";
 import type { BindingRecord } from "../../src/router/types.js";
+import { productToolCatalog } from "../../src/application/builtin-tools.js";
 
 // Some of these tests start real child processes (the token's Windows ACL is set through
 // PowerShell), and on a loaded Windows machine one can take longer than the 5 s default just to
@@ -37,6 +38,7 @@ async function setup() {
   const channel = new DshChannelHub(() => undefined, () => now);
   const server = new LocalRouterServer({
     tools: tools as never,
+    applicationTools: productToolCatalog.bind(() => { throw new Error("DSH must not enter the product dispatcher"); }),
     codex: { endpoint: `ws://127.0.0.1:${address.port}` } as never,
     instanceId: "instance",
     dsh: { token: "secret", channel, read, handoff },
@@ -158,7 +160,7 @@ test("DSH call accepts only directory, attach, send and ack, leaving read on its
       }, expect.any(AbortSignal), { rejectTakeover: true });
     }
     fixture.tools.call.mockClear();
-    for (const method of ["lane_restore_project", "lane_read", "external_lane_read", "lane_handoff", "unknown"]) {
+    for (const method of ["lane_restore_project", "lane_read", "external_lane_read", "lane_handoff", "unknown", "lane_issue_publish", "lane_issue_read", "lane_issue_append", "lane_issue_update"]) {
       const response = await post(method);
       expect(response.status).toBe(400);
       expect(await response.json()).toEqual({ protocolVersion: 1, error: { code: "INVALID_REQUEST", message: "method, params, and requestKey are required" } });

@@ -132,12 +132,12 @@
 
 **Files:** 新建 `src/application/tool-catalog.ts`、`builtin-tools.ts`、模块 `tool-schema.ts`、`tools.ts`；修改 `src/adapters/codex/dynamic-tools.ts`、`codex-runtime.ts`、`src/mcp/tool-schemas.ts`、`lane-mcp-server.ts`、`zcode-lane-mcp-server.ts`、`src/process/local-client.ts`、`local-server.ts`、`main.ts`。新建 `tests/application/tool-catalog.test.ts`、`tests/modules/issues/tools.test.ts`、`tests/tools/issue-entry-contract.test.ts`，扩展既有工具/MCP/动态工具测试。
 
-- [ ] 先写失败测试：组合工具可发布并调用；重名/未知名拒绝；四个议题工具与专门 TUI 用户结束操作只访问本 lane；额外 owner/backend/generation/confirmed 参数拒绝；原五工具定义/参数/行为不变。
-- [ ] 纯定义目录统一提供名称、说明、Zod schema 与解析；运行分发按相同目录接到各服务。保留原 `ToolService` 及其 `AbortSignal`、`rejectTakeover` 行为；不把议题 case 放进去。
-- [ ] MCP/动态工具分别从该定义生成适用 JSON Schema，普通客户端接组合目录；Codex runtime 的工具发布与 dispatcher 检查必须使用同一目录，并保留 thread ownership 和已有请求缓存。不要求旧会话热更新动态工具。
-- [ ] `main.ts` 在 Codex 初始化前可构造纯定义，服务 ready 后才接处理函数；启动恢复在 mailbox 对账后进行。MCP import 定义不实例化数据库。独立产品显式装配议题；不装配路径保持通信工具原状。
-- [ ] 测试模块库故障时 core 仍能启动、议题入口返回 `ISSUES_UNAVAILABLE`；异常启动/正常关闭均回收交接调度与库，且不影响 core shutdown。DSH/Native Host 仍用原通信服务和现有白名单。
-- [ ] 运行 `npm test -- tests/application tests/modules/issues/tools.test.ts tests/tools tests/mcp tests/adapters/codex/dynamic-tools.test.ts tests/backends/codex-backend.test.ts tests/process/dsh-host-api.test.ts tests/process/native-host-boundary.test.ts tests/process/local-transport.test.ts`；通过后自查并提交。
+- [x] 先写失败测试：组合工具可发布并调用；重名/未知名拒绝；四个议题工具与专门 TUI 用户结束操作只访问本 lane；额外 owner/backend/generation/confirmed 参数拒绝；原五工具定义/参数/行为不变。
+- [x] 纯定义目录统一提供名称、说明、Zod schema 与解析；运行分发按相同目录接到各服务。保留原 `ToolService` 及其 `AbortSignal`、`rejectTakeover` 行为；不把议题 case 放进去。
+- [x] MCP/动态工具分别从该定义生成适用 JSON Schema，普通客户端接组合目录；Codex runtime 的工具发布与 dispatcher 检查必须使用同一目录，并保留 thread ownership 和已有请求缓存。不要求旧会话热更新动态工具。
+- [x] `main.ts` 在 Codex 初始化前可构造纯定义，服务 ready 后才接处理函数；启动恢复在 mailbox 对账后进行。MCP import 定义不实例化数据库。独立产品显式装配议题；不装配路径保持通信工具原状。
+- [x] 测试模块库故障时 core 仍能启动、议题入口返回 `ISSUES_UNAVAILABLE`；异常启动/正常关闭均回收交接调度与库，且不影响 core shutdown。DSH/Native Host 仍用原通信服务和现有白名单。
+- [x] 运行 `npm test -- tests/application tests/modules/issues/tools.test.ts tests/tools tests/mcp tests/adapters/codex/dynamic-tools.test.ts tests/backends/codex-backend.test.ts tests/process/dsh-host-api.test.ts tests/process/native-host-boundary.test.ts tests/process/local-transport.test.ts`；通过后自查并提交。
 
 ### Task 6：旧 Codex CLI 与用户 HTTP
 

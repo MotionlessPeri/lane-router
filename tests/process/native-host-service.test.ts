@@ -49,7 +49,7 @@ test("Company native Host rejects tools outside its external send, read and ack 
   const x = await sharedFixture(); await x.register();
   const call = vi.spyOn(x.tools, "call");
   const read = vi.spyOn(x.core, "read");
-  for (const name of [...LANE_TOOL_NAMES, "external_lane_directory", "external_lane_restore_project", "unknown"]) {
+  for (const name of [...LANE_TOOL_NAMES, "lane_issue_publish", "lane_issue_read", "lane_issue_append", "lane_issue_update", "external_lane_directory", "external_lane_restore_project", "unknown"]) {
     await expect(x.call(`contract-${name}`, name, {})).rejects.toThrow("NATIVE_EXTERNAL_INVALID_REQUEST");
   }
   expect(call).not.toHaveBeenCalled();

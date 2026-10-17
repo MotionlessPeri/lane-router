@@ -2,7 +2,7 @@ import { CodexBackend } from "../../backends/codex-backend.js";
 import type { RouterStateStore } from "../../router/state-store.js";
 import { LANE_ROUTER_INSTRUCTIONS } from "../../tools/tool-contract.js";
 import type { CallerContext } from "../../router/types.js";
-import type { LaneToolName } from "../../tools/tool-contract.js";
+import type { ToolCatalog } from "../../application/tool-catalog.js";
 import { AppServerClient } from "./app-server-client.js";
 import { CodexAppServerProcess, CodexCapabilityGate, type CodexCommand } from "./app-server-process.js";
 import { CodexDynamicToolDispatcher, codexDynamicTools } from "./dynamic-tools.js";
@@ -18,7 +18,7 @@ export interface CodexProcessControl {
 export class CodexRuntime {
   readonly client: AppServerClient;
   readonly backend: CodexBackend;
-  readonly dynamicTools = codexDynamicTools();
+  readonly dynamicTools: ReturnType<typeof codexDynamicTools>;
   private readonly dispatcher: CodexDynamicToolDispatcher;
   private readonly ownedThreads = new Set<string>();
   private readonly visibleClients = new Map<string, number>();
@@ -31,10 +31,12 @@ export class CodexRuntime {
 
   constructor(private readonly options: {
     readonly state: RouterStateStore;
-    readonly callTool: (name: LaneToolName, args: Record<string, unknown>, context: CallerContext) => unknown | Promise<unknown>;
+    readonly callTool: (name: string, args: Record<string, unknown>, context: CallerContext) => unknown | Promise<unknown>;
+    readonly catalog?: ToolCatalog;
     readonly process: CodexProcessControl;
   }) {
     this.client = options.process.client;
+    this.dynamicTools = codexDynamicTools(options.catalog);
     this.backend = new CodexBackend({
       client: this.client,
       resolveLane: (threadId) => options.state.activeBindingForConversation("codex", threadId)?.laneAddress,
@@ -45,6 +47,7 @@ export class CodexRuntime {
       cwdForThread: (threadId) => this.threadCwds.get(threadId) ?? startupCwd(this.options.state.activeBindingForConversation("codex", threadId)),
       startupForThread: (threadId) => this.threadStartups.get(threadId),
       call: options.callTool,
+      catalog: options.catalog,
     });
   }
 
@@ -116,12 +119,13 @@ export class CodexRuntime {
 
 export function createCodexRuntime(options: {
   readonly state: RouterStateStore;
-  readonly callTool: (name: LaneToolName, args: Record<string, unknown>, context: CallerContext) => unknown | Promise<unknown>;
+  readonly callTool: (name: string, args: Record<string, unknown>, context: CallerContext) => unknown | Promise<unknown>;
+  readonly catalog?: ToolCatalog;
   readonly command: CodexCommand;
   readonly capabilityCacheDir: string;
 }): CodexRuntime {
   const process = new CodexAppServerProcess({ command: options.command, gate: new CodexCapabilityGate({ cacheDir: options.capabilityCacheDir }) });
-  return new CodexRuntime({ state: options.state, callTool: options.callTool, process });
+  return new CodexRuntime({ state: options.state, callTool: options.callTool, catalog: options.catalog, process });
 }
 
 function startupCwd(binding: ReturnType<RouterStateStore["activeBindingForConversation"]>): string | undefined {

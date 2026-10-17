@@ -1,20 +1,15 @@
-import { z } from "zod";
-
-import { LANE_TOOLS, type LaneToolName } from "../tools/tool-contract.js";
-import { toolArgsSchemas } from "../tools/tool-schema.js";
+import { communicationToolCatalog } from "../application/builtin-tools.js";
+import type { ToolCatalog } from "../application/tool-catalog.js";
 
 export interface LaneMcpToolDefinition {
-  readonly name: LaneToolName;
+  readonly name: string;
   readonly description: string;
   readonly inputSchema: Record<string, unknown> & { readonly type: "object" };
 }
 
-export const LANE_MCP_TOOLS: readonly LaneMcpToolDefinition[] = LANE_TOOLS.map((tool) => ({
-  name: tool.name,
-  description: tool.description,
-  inputSchema: z.toJSONSchema(toolArgsSchemas[tool.name]) as LaneMcpToolDefinition["inputSchema"],
-}));
+export function laneMcpTools(catalog: ToolCatalog = communicationToolCatalog): readonly LaneMcpToolDefinition[] { return catalog.jsonTools(); }
+export const LANE_MCP_TOOLS = laneMcpTools();
 
-export function parseLaneToolArguments(name: LaneToolName, input: unknown): Record<string, unknown> {
-  return toolArgsSchemas[name].parse(input) as Record<string, unknown>;
+export function parseLaneToolArguments(name: string, input: unknown, catalog: ToolCatalog = communicationToolCatalog): Record<string, unknown> {
+  return catalog.parse(name, input);
 }

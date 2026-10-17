@@ -30,10 +30,13 @@ import { defaultCodexModelProvider, listCodexModelProviders, listCodexProfiles, 
 import { readRouterConfig } from "./router-config.js";
 import { spawnHeadlessZcodeLane } from "./zcode-lane-spawner.js";
 import { ToolService } from "../tools/tool-service.js";
+import { bindBuiltinTools, communicationToolCatalog, productToolCatalog } from "../application/builtin-tools.js";
+import type { ApplicationTools } from "../application/tool-catalog.js";
+import { openIssuesModule } from "../modules/issues/index.js";
 import { ClaudeChannelHub, LocalRouterServer } from "./local-server.js";
 import { RuntimeLock } from "./runtime-lock.js";
 
-export async function runRouterProcess(options: { dataRoot?: string; nativeHosts?: readonly NativeHostPermit[] } = {}): Promise<{ close(): Promise<void> }> {
+export async function runRouterProcess(options: { dataRoot?: string; nativeHosts?: readonly NativeHostPermit[]; issues?: boolean } = {}): Promise<{ close(): Promise<void> }> {
   const dataRoot = options.dataRoot ?? process.env.LANE_ROUTER_DATA_ROOT ?? join(homedir(), ".lane-router");
   mkdirSync(dataRoot, { recursive: true });
   const lock = RuntimeLock.acquire(join(dataRoot, "router.lock"));
@@ -88,20 +91,36 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
   const nativeHostBackend = new NativeHostBackend(id => state.activeBindingForConversation("native-codex", id));
   let nativeHost: NativeHostService | undefined;
   let tools: ToolService | undefined;
-  const codex = createCodexRuntime({
-    state,
-    callTool: (name, args, context) => {
-      if (!tools) throw new Error("Router tools are not ready");
-      return tools.call(name, args, context);
-    },
-    command: { executable: process.env.CODEX_EXE ?? "codex" },
-    capabilityCacheDir: join(dataRoot, "cache"),
-  });
+  const catalog = options.issues === false ? communicationToolCatalog : productToolCatalog;
+  let applicationTools: ApplicationTools | undefined;
+  let issues: ReturnType<typeof openIssuesModule> | undefined;
+  let codex: ReturnType<typeof createCodexRuntime> | undefined;
   let server: LocalRouterServer | undefined;
   const discoveryPath = join(dataRoot, "discovery.json");
   let closed = false;
+  const closeResources = async (): Promise<void> => {
+    let failure: unknown;
+    const attempt = async (work: () => unknown | Promise<unknown>) => { try { await work(); } catch (error) { failure ??= error; } };
+    // Drain module work while core storage and delivery backends are still available.
+    await attempt(() => issues?.close());
+    await attempt(() => server?.close());
+    await attempt(() => nativeHost?.close());
+    await attempt(() => codex?.stop());
+    await attempt(() => zcodeDriver?.shutdown());
+    try { database.close(); } finally { lock.release(); }
+    if (failure !== undefined) throw failure;
+  };
   try {
     const dshToken = loadDshHostToken(dataRoot);
+    codex = createCodexRuntime({
+      state, catalog,
+      callTool: (name, args, context) => {
+        if (!applicationTools) throw new Error("Router tools are not ready");
+        return applicationTools.call(name, args, context);
+      },
+      command: { executable: process.env.CODEX_EXE ?? "codex" },
+      capabilityCacheDir: join(dataRoot, "cache"),
+    });
     await codex.start();
     const launcherChoices = await codexLauncherChoices(codex.client);
     const backends = new BackendRegistry([claudeBackend, codex.backend, dshBackend, zcodeBackend, nativeHostBackend]);
@@ -128,12 +147,30 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
       resolveProfileProvider: profileModelProvider,
     });
     tools = new ToolService(core);
+    if (options.issues !== false) {
+      try {
+        issues = openIssuesModule({ databasePath: join(dataRoot, "issues.sqlite"), lanes: core, delivery: core,
+          onError: error => process.stderr.write(`Issues module: ${error instanceof Error ? error.message : "unknown error"}\n`) });
+      } catch (error) {
+        process.stderr.write(`ISSUES_UNAVAILABLE: ${error instanceof Error ? error.message : "unknown error"}\n`);
+      }
+    }
+    applicationTools = bindBuiltinTools(tools, issues?.service, catalog);
     if (configuration.nativeHosts !== undefined) nativeHost = new NativeHostService({
       permits: configuration.nativeHosts, state, core, tools, backend: nativeHostBackend,
       attention: lane => pump.onAttentionOpportunity(lane),
     });
+    mailbox.reconcile(state);
+    if (issues) {
+      try { await issues.start(); }
+      catch (error) {
+        await issues.close().catch(() => undefined); issues = undefined;
+        applicationTools = bindBuiltinTools(tools, undefined, catalog);
+        process.stderr.write(`ISSUES_UNAVAILABLE: ${error instanceof Error ? error.message : "unknown error"}\n`);
+      }
+    }
     server = new LocalRouterServer({
-      tools, codex, claude: claudeHub, instanceId: randomUUID(),
+      tools, applicationTools, codex, claude: claudeHub, instanceId: randomUUID(),
       nativeHost,
       dsh: { token: dshToken, channel: dshHub, read: (context, messageIds) => core.read(context, { messageIds }),
         handoff: (context, input) => core.handoffDsh(context, input) },
@@ -172,27 +209,19 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
         return { laneSets: core.listLaneSets() };
       },
     });
-    mailbox.reconcile(state);
     const discovery = await server.start();
     writeDiscovery(discoveryPath, discovery);
     for (const backend of [claudeBackend, codex.backend, dshBackend, zcodeBackend]) backend.onAttentionOpportunity((lane) => { void pump.onAttentionOpportunity(lane); });
     await pump.onStartup();
   } catch (error) {
-    await server?.close().catch(() => undefined);
-    nativeHost?.close();
-    await codex.stop().catch(() => undefined);
-    await zcodeDriver?.shutdown().catch(() => undefined);
-    database.close(); lock.release(); throw error;
+    await closeResources().catch(() => undefined);
+    throw error;
   }
 
   return { close: async () => {
     if (closed) return; closed = true;
     rmSync(discoveryPath, { force: true });
-    await server?.close();
-    await codex.stop();
-    await zcodeDriver?.shutdown().catch(() => undefined);
-    database.close();
-    lock.release();
+    await closeResources();
   } };
 }
 

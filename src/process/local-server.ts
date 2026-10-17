@@ -13,6 +13,7 @@ import { parseTellInput, type TellInput, type TellResult } from "../router/tell.
 import type { CallerContext, BindingRecord, ReachSnapshot, ResolvedIdentity } from "../router/types.js";
 import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
 import type { ToolService } from "../tools/tool-service.js";
+import type { ApplicationTools } from "../application/tool-catalog.js";
 import type { NativeHostService } from "./native-host-service.js";
 import type { DashboardOpenOverride } from "./dashboard-lane-opener.js";
 import { DashboardHttp, type DashboardLaneSetsInput } from "./dashboard-http.js";
@@ -365,6 +366,7 @@ export class LocalRouterServer {
 
   constructor(private readonly options: {
     readonly tools: ToolService;
+    readonly applicationTools?: ApplicationTools;
     readonly codex: CodexTuiBridgeHost;
     readonly instanceId: string;
     readonly host?: string;
@@ -615,10 +617,12 @@ export class LocalRouterServer {
       if (request.method !== "POST" || request.url !== "/rpc") return json(response, 404, { error: "not found" });
       if (refuseWebPage(request, response)) return;
       const body = await readJson(request) as { method?: unknown; params?: unknown; context?: unknown };
-      if (LANE_TOOL_NAMES.includes(body.method as LaneToolName)) {
+      if (typeof body.method === "string" && (this.options.applicationTools?.catalog.has(body.method) ?? LANE_TOOL_NAMES.includes(body.method as LaneToolName))) {
         const context = callerContext(body.context);
         if (!context || typeof body.params !== "object" || body.params === null || Array.isArray(body.params)) return json(response, 400, { error: "invalid request" });
-        const result = await this.options.tools.call(body.method as LaneToolName, body.params as Record<string, unknown>, context, callerLifetime(request));
+        const result = this.options.applicationTools
+          ? await this.options.applicationTools.call(body.method, body.params as Record<string, unknown>, context, callerLifetime(request))
+          : await this.options.tools.call(body.method as LaneToolName, body.params as Record<string, unknown>, context, callerLifetime(request));
         return json(response, 200, { result });
       }
       return json(response, 400, { error: "unknown method" });

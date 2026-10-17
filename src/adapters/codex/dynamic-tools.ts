@@ -1,12 +1,11 @@
-import { z } from "zod";
 import type { CallerContext } from "../../router/types.js";
-import { LANE_TOOL_NAMES, LANE_TOOLS, type LaneToolName } from "../../tools/tool-contract.js";
-import { toolArgsSchemas } from "../../tools/tool-schema.js";
+import { communicationToolCatalog } from "../../application/builtin-tools.js";
+import type { ToolCatalog } from "../../application/tool-catalog.js";
 import type { DynamicToolCallParams } from "./protocol.js";
 
-export interface CodexDynamicTool { readonly type: "function"; readonly name: LaneToolName; readonly description: string; readonly inputSchema: Record<string, unknown> }
-export function codexDynamicTools(): readonly CodexDynamicTool[] {
-  return LANE_TOOLS.map((tool) => ({ type: "function", name: tool.name, description: tool.description, inputSchema: z.toJSONSchema(toolArgsSchemas[tool.name], { target: "draft-7" }) as Record<string, unknown> }));
+export interface CodexDynamicTool { readonly type: "function"; readonly name: string; readonly description: string; readonly inputSchema: Record<string, unknown> }
+export function codexDynamicTools(catalog: ToolCatalog = communicationToolCatalog): readonly CodexDynamicTool[] {
+  return catalog.jsonTools("draft-7").map(tool => ({ type: "function", ...tool }));
 }
 export class UnknownCodexThreadError extends Error { readonly code = "CODEX_THREAD_NOT_OWNED"; constructor(readonly threadId: string) { super(`Codex thread is not owned by Lane Router: ${threadId}`); this.name = new.target.name; } }
 
@@ -15,7 +14,7 @@ interface CompletedCall { readonly promise: Promise<DynamicToolResult>; readonly
 export class CodexDynamicToolDispatcher {
   private readonly inflight = new Map<string, Promise<DynamicToolResult>>();
   private readonly completed = new Map<string, CompletedCall>();
-  constructor(private readonly deps: { ownsThread: (threadId: string) => boolean; cwdForThread?: (threadId: string) => string | undefined; startupForThread?: (threadId: string) => CallerContext["startup"]; call: (name: LaneToolName, args: Record<string, unknown>, context: CallerContext) => unknown | Promise<unknown>; now?: () => number; completedTtlMs?: number; maxCompletedEntries?: number }) {}
+  constructor(private readonly deps: { ownsThread: (threadId: string) => boolean; cwdForThread?: (threadId: string) => string | undefined; startupForThread?: (threadId: string) => CallerContext["startup"]; call: (name: string, args: Record<string, unknown>, context: CallerContext) => unknown | Promise<unknown>; catalog?: ToolCatalog; now?: () => number; completedTtlMs?: number; maxCompletedEntries?: number }) {}
   dispatch(request: DynamicToolCallParams): Promise<DynamicToolResult> {
     const key = callKey(request);
     const now = this.now();
@@ -39,11 +38,12 @@ export class CodexDynamicToolDispatcher {
   private now(): number { return (this.deps.now ?? Date.now)(); }
   private async execute(request: DynamicToolCallParams, requestKey: string) {
     if (!this.deps.ownsThread(request.threadId)) throw new UnknownCodexThreadError(request.threadId);
-    if (!(LANE_TOOL_NAMES as readonly string[]).includes(request.tool)) throw new Error(`Unknown Lane Router tool: ${request.tool}`);
+    const catalog = this.deps.catalog ?? communicationToolCatalog;
+    if (!catalog.has(request.tool)) throw new Error(`Unknown Lane Router tool: ${request.tool}`);
     const raw = typeof request.arguments === "object" && request.arguments !== null && !Array.isArray(request.arguments) ? request.arguments as Record<string, unknown> : request.arguments;
     if (typeof raw !== "object" || raw === null) throw new Error("Lane tool arguments must be an object");
     const cwd = this.deps.cwdForThread?.(request.threadId);
-    const result = await this.deps.call(request.tool as LaneToolName, raw as Record<string, unknown>, {
+    const result = await this.deps.call(request.tool, catalog.parse(request.tool, raw), {
       backend: "codex", conversationId: request.threadId,
       ...(cwd === undefined ? {} : { cwd }),
       ...(this.deps.startupForThread?.(request.threadId) === undefined ? {} : { startup: this.deps.startupForThread(request.threadId) }),

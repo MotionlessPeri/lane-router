@@ -8,11 +8,13 @@ import { resolve } from "node:path";
 
 import type { ClaudeChannelNotification, ClaudeChannelSink } from "../adapters/claude/channel-bridge.js";
 import type { BackendName, CallerContext } from "../router/types.js";
-import { LANE_ROUTER_INSTRUCTIONS, LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
-import { LANE_MCP_TOOLS, parseLaneToolArguments } from "./tool-schemas.js";
+import { LANE_ROUTER_INSTRUCTIONS } from "../tools/tool-contract.js";
+import { communicationToolCatalog, productToolCatalog } from "../application/builtin-tools.js";
+import type { ToolCatalog } from "../application/tool-catalog.js";
+import { laneMcpTools, parseLaneToolArguments } from "./tool-schemas.js";
 
 export interface LaneRouterClient {
-  call(name: LaneToolName, args: Record<string, unknown>, context: CallerContext): Promise<unknown>;
+  call(name: string, args: Record<string, unknown>, context: CallerContext): Promise<unknown>;
 }
 
 export interface ClaudeChannelConnection {
@@ -34,6 +36,7 @@ export function claudeJoinKey(env: NodeJS.ProcessEnv = process.env): string {
 
 export interface LaneMcpServerOptions {
   readonly router: LaneRouterClient;
+  readonly catalog?: ToolCatalog;
   /**
    * Backend the caller context speaks for. Absent means "claude", which is what this file's own
    * stdio entry is; other platforms riding the same channel supply their own name so the request
@@ -65,7 +68,7 @@ export class LaneMcpServer {
       this.connected = false;
       void Promise.resolve(this.options.onClose?.()).catch(() => undefined);
     };
-    this.protocol.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...LANE_MCP_TOOLS] }));
+    this.protocol.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...laneMcpTools(this.options.catalog)] }));
     this.protocol.setRequestHandler(CallToolRequestSchema, async (request) => this.callTool(request.params.name, request.params.arguments));
   }
 
@@ -81,12 +84,12 @@ export class LaneMcpServer {
   }
 
   private async callTool(name: string, input: unknown) {
-    if (!LANE_TOOL_NAMES.includes(name as LaneToolName)) return toolError("Unknown Lane Router tool");
+    const catalog = this.options.catalog ?? communicationToolCatalog;
+    if (!catalog.has(name)) return toolError("Unknown Lane Router tool");
     try {
-      const tool = name as LaneToolName;
-      const args = parseLaneToolArguments(tool, input ?? {});
+      const args = parseLaneToolArguments(name, input ?? {}, catalog);
       const backend = this.options.backend ?? "claude";
-      const result = await this.options.router.call(tool, args, {
+      const result = await this.options.router.call(name, args, {
         backend,
         conversationId: this.options.conversationId,
         ...(this.options.cwd === undefined ? {} : { cwd: this.options.cwd }),
@@ -136,7 +139,7 @@ export async function runLaneMcpStdio(profile: LaneMcpStdioProfile = {}): Promis
   const channel = await connectClaudeChannel(resolveRouterUrl, conversationId, joinKey);
   let closing: Promise<void> | undefined;
   const server = createLaneMcpServer({
-    router, conversationId, cwd: process.cwd(), joinKey, backend: profile.backend, channel, onClose: () => close(),
+    router, catalog: productToolCatalog, conversationId, cwd: process.cwd(), joinKey, backend: profile.backend, channel, onClose: () => close(),
   });
   const close = (): Promise<void> => closing ??= (async () => {
     await channel.close();
