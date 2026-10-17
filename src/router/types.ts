@@ -87,6 +87,8 @@ export interface NewMessageRecord {
   readonly requestKey: string;
   readonly senderLane: string;
   readonly targetLane: string;
+  /** Optional file-recovery identity. Older send files continue resolving their address as before. */
+  readonly targetLaneId?: string;
   readonly kind: MessageKind;
   readonly replyTo: string | null;
   readonly relativePath: string;

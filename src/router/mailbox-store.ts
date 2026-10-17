@@ -19,6 +19,8 @@ export interface MailboxMessageInput {
   readonly requestKey: string;
   readonly senderLane: string;
   readonly targetLane: string;
+  /** Stable owner for new user-message files; absent on legacy and lane_send files. */
+  readonly targetLaneId?: string;
   readonly kind: MessageKind;
   readonly replyTo: string | null;
   readonly createdAt: number;
@@ -73,6 +75,7 @@ export class MailboxStore {
     if (input.replyTo !== null) validateToken("reply_to", input.replyTo);
     validateSender(input.senderLane);
     const target = parseLaneAddress(input.targetLane);
+    if (input.targetLaneId !== undefined) validateToken("target lane ID", input.targetLaneId);
     const directory = join(mailboxLanePath(this.root, target), "pending");
     mkdirSync(directory, { recursive: true });
     mkdirSync(join(mailboxLanePath(this.root, target), "resolved"), { recursive: true });
@@ -160,11 +163,14 @@ export class MailboxStore {
     return this.describe(destination, readFileSync(destination, "utf8"));
   }
 
-  reconcile(state: RouterStateStore): { recovered: number; moved: number } {
+  reconcile(state: RouterStateStore, requestKey?: string): { recovered: number; moved: number } {
     let recovered = 0;
     let moved = 0;
     const orphanFiles = this.pendingFiles().map((absolutePath) => {
       const contents = readFileSync(absolutePath, "utf8");
+      // A live retry repairs only its own write window. Do not parse or adopt unrelated files;
+      // startup still calls this without a filter and checks the entire mailbox.
+      if (requestKey !== undefined && !hasRequestKey(contents, requestKey)) return undefined;
       const parsed = parseMessage(contents);
       const relativePath = this.relative(absolutePath);
       const existing = state.message(parsed.id) ?? state.messageByRequestKey(parsed.requestKey);
@@ -185,11 +191,17 @@ export class MailboxStore {
     while (orphanFiles.length > 0) {
       const index = orphanFiles.findIndex((message) => message.replyTo === null || state.message(message.replyTo) !== undefined);
       if (index < 0) throw new MailboxCorruptionError("Orphan messages contain a missing or cyclic reply_to reference");
-      state.insertMessage(orphanFiles.splice(index, 1)[0]!);
+      const message = state.insertMessage(orphanFiles.splice(index, 1)[0]!);
+      const archived = state.archivedMessage(message.id);
+      if (archived) {
+        state.updateArchivedMessagePath(message.id, this.archiveFile(archived.targetLaneId, message.relativePath).relativePath);
+        moved += 1;
+      }
       recovered += 1;
     }
 
     for (const message of state.allMessages()) {
+      if (requestKey !== undefined && message.requestKey !== requestKey) continue;
       const currentPath = this.absolute(message.relativePath);
       if (message.state === "resolved" && message.relativePath.replaceAll("\\", "/").includes("/pending/")) {
         const result = this.resolve(message.relativePath);
@@ -254,6 +266,7 @@ function serializeMessage(input: MailboxMessageInput): string {
     `request_key: ${input.requestKey}`,
     `sender: ${input.senderLane}`,
     `target: ${input.targetLane}`,
+    ...(input.targetLaneId === undefined ? [] : [`target_lane_id: ${input.targetLaneId}`]),
     ...(recipients.length > 1 ? [`cc: ${recipients.join(", ")}`] : []),
     `kind: ${input.kind}`,
     `reply_to: ${input.replyTo ?? ""}`,
@@ -279,6 +292,8 @@ function parseMessage(contents: string): NewMessageRecord {
   const requestKey = requiredHeader(header, "request_key");
   const senderLane = requiredHeader(header, "sender");
   const targetLane = requiredHeader(header, "target");
+  const targetLaneId = header.get("target_lane_id");
+  if (targetLaneId !== undefined) validateToken("target lane ID", targetLaneId);
   const kind = requiredHeader(header, "kind");
   const createdAt = Number(requiredHeader(header, "created_at"));
   if (kind !== "normal" && kind !== "correction") throw new MailboxCorruptionError("Message kind is invalid");
@@ -294,12 +309,20 @@ function parseMessage(contents: string): NewMessageRecord {
     requestKey,
     senderLane,
     targetLane,
+    ...(targetLaneId === undefined ? {} : { targetLaneId }),
     kind,
     replyTo: reply || null,
     relativePath: "",
     contentSha256: "",
     createdAt,
   };
+}
+
+function hasRequestKey(contents: string, requestKey: string): boolean {
+  const lines = contents.split("\n");
+  const end = lines.indexOf("---", 1);
+  if (lines[0] !== "---" || end < 0) return false;
+  return lines.slice(1, end).some((line) => line.startsWith("request_key:") && line.slice("request_key:".length).trimStart() === requestKey);
 }
 
 /**

@@ -1,4 +1,5 @@
 import { parseLaneAddress, senderLabel } from "./address.js";
+import type { UserMessageDelivery, UserMessageTargetState } from "./user-message.js";
 
 /**
  * Telling a lane something from outside every lane: a local program, running as the user, puts one
@@ -19,7 +20,7 @@ export interface TellInput {
  * lanes rather than judged afresh. The first three take the message; the last two have no mailbox
  * to put it in, and a lane is not invented just to hold one message.
  */
-export type TellTargetState = "online" | "offline" | "unbound" | "archived" | "missing";
+export type TellTargetState = UserMessageTargetState;
 
 export interface TellResult {
   readonly delivered: boolean;
@@ -27,6 +28,29 @@ export interface TellResult {
   readonly target: { readonly address: string; readonly state: TellTargetState };
   /** Where this project was last worked on, for a caller that goes on to create a lane for it. */
   readonly project: { readonly cwdHint: string | null };
+}
+
+/** Fixed-template ingress. Generic user delivery never acquires this adapter's discussion policy. */
+export class TellAdapter {
+  constructor(private readonly dependencies: {
+    readonly delivery: UserMessageDelivery;
+    readonly latestProjectCwd: (project: string) => string | null;
+    readonly newRequestKey: () => string;
+  }) {}
+
+  async tell(raw: TellInput): Promise<TellResult> {
+    const input = parseTellInput(raw);
+    const address = parseLaneAddress(input.address);
+    const project = { cwdHint: this.dependencies.latestProjectCwd(address.project) };
+    const result = await this.dependencies.delivery.deliverUserMessage({
+      target: { address: address.address }, source: { kind: "user", origin: input.origin },
+      body: tellBody(input), requestKey: this.dependencies.newRequestKey(),
+    });
+    return {
+      delivered: result.delivered, messageId: result.messageId,
+      target: { address: address.address, state: result.target.state }, project,
+    };
+  }
 }
 
 /** A refusal of the input itself, which the endpoint answers with 400 and the command with exit 1. */

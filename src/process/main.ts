@@ -21,6 +21,7 @@ import { MailboxStore } from "../router/mailbox-store.js";
 import { NotificationPump } from "../router/notification-pump.js";
 import { RouterCore } from "../router/router-core.js";
 import { RouterStateStore } from "../router/state-store.js";
+import { TellAdapter } from "../router/tell.js";
 import { ClaudeSessionLocator } from "./claude-session-locator.js";
 import { ConversationRestorer } from "./conversation-restorer.js";
 import { DashboardLaneOpener } from "./dashboard-lane-opener.js";
@@ -112,6 +113,10 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
       dataRoot,
     });
     const core = new RouterCore({ state, mailbox, backends, pump, restore, newId: () => randomUUID(), now: Date.now });
+    const teller = new TellAdapter({
+      delivery: core, latestProjectCwd: (project) => state.latestProjectCwd(project),
+      newRequestKey: () => `tell:${randomUUID()}`,
+    });
     const dashboardOpener = new DashboardLaneOpener({
       state,
       restore,
@@ -147,7 +152,7 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
       resumeInfo: (address) => core.resumeInfo(address),
       archiveLane: (address) => core.archiveLane(address),
       listArchivedLanes: (project) => core.listArchivedLanes(project),
-      tell: (input) => core.tell(input),
+      tell: (input) => teller.tell(input),
       ...(zcodeDriver === undefined ? {} : {
         zcodeSpawnLane: (input) => spawnHeadlessZcodeLane({
           driver: zcodeDriver,

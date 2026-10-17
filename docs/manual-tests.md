@@ -616,6 +616,8 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 ## 从 lane 之外捎话：`lane-router-lane tell`
 
+2026-10-17 的[投递底座抽取](superpowers/plans/2026-10-17-tell-user-delivery.md)保留本节 tell 对外验收。新增进程内 `UserMessageDelivery` 的完整正文、重试、ack 后重试、文件先写恢复和归档/地址复用由隔离 fixture 自动验证；它不提供公开 CLI/HTTP/MCP。新 tell 的内部请求键为 `user-message:tell:<request-id>`，新文件另带稳定 `target_lane_id` 恢复头；下面历史现场记录仍描述当时构建。
+
 自动测试覆盖五种目标状态（文件与 `message` 行两边都数）、绑在 `dsh` / `zcode` 后端的 lane、正文逐字等于模板（有无链接各一）、参数边界（含 URL 解析器吞换行那一例）、通知的 `sender` 与 `summary`、ack 与归档拒绝句、孤儿收养、`sender_label` 的迁移（v6、v7（DSH）、v8、v7（tell）、v9 五种起点各一条，另有空库和「消息那步失败时 binding 那步一起回滚」）、`cwdHint`、旧 Router 的 404、套用网页守卫的六个 POST 入口与 `/claude` 握手（DSH 通道只认 Bearer、不看来源，也有一条测试钉住），以及一条不注入任何东西的「命令行 → 真实 Router 服务 → mailbox」端到端；变异检验结果见设计稿第六节与 impl 的回报。下面两条不能自动化：**lane 读到之后会不会照模板末句等用户开口**，只有真实模型能答；**真实生产库的迁移**，只有重启那一次能验。
 
 **前提：** 已构建 `dist/` 且 `npm link` 已刷新；**共享 Router 已受控重启到带 tell 的构建**——新端点与 `sender_label` 迁移都在 Router 进程里，旧 Router 上命令以退出 1、stderr 含 `restart` 失败，不落任何文件。**接收方会话不必是新起的**：Claude 侧 MCP server 拼通知载荷时对 `sender` 原样透传、不做地址校验（`local-client.ts` 的 `toNotificationMessages`），旧会话也能收到 `user:<来源>`。

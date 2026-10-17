@@ -42,6 +42,7 @@ interface MessageRow {
   request_key: string;
   sender_lane: string;
   target_lane: string;
+  target_lane_id: string;
   kind: MessageKind;
   reply_to: string | null;
   relative_path: string;
@@ -52,6 +53,12 @@ interface MessageRow {
   ack_lane: string | null;
   ack_generation: number | null;
   notification_state: NotificationState;
+}
+
+export interface StoredMessageRequest {
+  readonly message: MessageRecord;
+  readonly targetLaneId: string;
+  readonly archived: boolean;
 }
 
 export class RouterStateStore {
@@ -406,31 +413,36 @@ export class RouterStateStore {
   }
 
   insertMessage(input: NewMessageRecord): MessageRecord {
-    // Both ends are resolved to the lanes in service now. A message is addressed to whoever holds
-    // the address at the moment it is sent, and it goes on naming that lane afterwards even once
-    // the address has moved on. A sender that no lane is — `user:<origin>` — is stored as a label
-    // with no lane behind it, and the schema refuses a row that names both or neither.
+    // Ordinary sends resolve the current owner. New user-message files carry their already fixed
+    // target ID so recovery cannot pick an address's later owner. A `user:<origin>` sender is a
+    // label with no lane behind it; the schema refuses a row that names both or neither.
     const fromOutside = isSenderLabel(input.senderLane);
     const senderId = fromOutside ? null : this.requireLane(input.senderLane).id;
-    const targetId = this.requireLane(input.targetLane).id;
+    const target = input.targetLaneId === undefined ? this.requireLane(input.targetLane) : this.requireLaneById(input.targetLaneId);
+    if (target.address !== input.targetLane) throw new Error("Message target identity does not match its address");
+    // A new-format orphan may outlive its lane. Insert directly in the archive so a crash cannot
+    // leave an archived lane's recovered mail in the live index, or hand it to a new address owner.
+    const archived = target.archivedAt !== null;
     this.database.prepare(`
-      INSERT INTO message(
+      INSERT INTO ${archived ? "message_archive" : "message"}(
         id,request_key,sender_lane_id,sender_label,target_lane_id,kind,reply_to,relative_path,
-        content_sha256,state,created_at,resolved_at,ack_lane_id,ack_generation,notification_state
-      ) VALUES(?,?,?,?,?,?,?,?,?,'pending',?,NULL,NULL,NULL,'pending')
+        content_sha256,state,created_at,resolved_at,ack_lane_id,ack_generation,notification_state${archived ? ",archived_at" : ""}
+      ) VALUES(?,?,?,?,?,?,?,?,?,'pending',?,NULL,NULL,NULL,'pending'${archived ? ",?" : ""})
     `).run(
       input.id,
       input.requestKey,
       senderId,
       fromOutside ? input.senderLane : null,
-      targetId,
+      target.id,
       input.kind,
       input.replyTo,
       input.relativePath,
       input.contentSha256,
       input.createdAt,
+      ...(archived ? [target.archivedAt] : []),
     );
-    return this.requireMessage(input.id);
+    if (!archived) return this.requireMessage(input.id);
+    return mapMessage(this.database.prepare(`${messageSelect("message_archive")} WHERE m.id=?`).get(input.id) as MessageRow);
   }
 
   message(id: string): MessageRecord | undefined {
@@ -447,6 +459,16 @@ export class RouterStateStore {
   messageByRequestKey(requestKey: string): MessageRecord | undefined {
     const row = this.database.prepare(`${MESSAGE_SELECT} WHERE m.request_key=?`).get(requestKey) as MessageRow | undefined;
     return row ? mapMessage(row) : undefined;
+  }
+
+  /** A retry keeps its identity after ack or archive, without changing the live send/read contract. */
+  messageRequestByKey(requestKey: string): StoredMessageRequest | undefined {
+    for (const archived of [false, true]) {
+      const select = archived ? messageSelect("message_archive") : MESSAGE_SELECT;
+      const row = this.database.prepare(`${select} WHERE m.request_key=?`).get(requestKey) as MessageRow | undefined;
+      if (row) return { message: mapMessage(row), targetLaneId: row.target_lane_id, archived };
+    }
+    return undefined;
   }
 
   allMessages(): MessageRecord[] {
@@ -593,15 +615,19 @@ const BINDING_SELECT = `
  * message would sit in the table while every read, the pump included, behaved as if it were not
  * there. The label stands in for the address, so `senderLane` means the same thing to every reader.
  */
-const MESSAGE_SELECT = `
-  SELECT m.id,m.request_key,COALESCE(s.address,m.sender_label) AS sender_lane,t.address AS target_lane,
+const MESSAGE_SELECT = messageSelect("message");
+
+function messageSelect(table: "message" | "message_archive"): string {
+  return `
+  SELECT m.id,m.request_key,m.target_lane_id,COALESCE(s.address,m.sender_label) AS sender_lane,t.address AS target_lane,
     m.kind,m.reply_to,m.relative_path,m.content_sha256,m.state,m.created_at,m.resolved_at,
     a.address AS ack_lane,m.ack_generation,m.notification_state
-  FROM message m
+  FROM ${table} m
   LEFT JOIN lane s ON s.id=m.sender_lane_id
   JOIN lane t ON t.id=m.target_lane_id
   LEFT JOIN lane a ON a.id=m.ack_lane_id
 `;
+}
 
 function mapLane(row: LaneRow): LaneRecord {
   return {

@@ -1,5 +1,7 @@
 # 从 lane 之外给一条 lane 捎话：`lane-router-lane tell`
 
+2026-10-17：内部投递已按[用户消息投递底座计划](../plans/2026-10-17-tell-user-delivery.md)抽取为进程内服务。本文的 CLI/HTTP 输入、固定模板、目标状态与响应契约不变；模板和参数校验由 `TellAdapter` 持有，Core 接收完整正文，不再承担讨论业务。
+
 **状态：** 用户 2026-10-12 定稿（含「存量入口一起加守卫」的两次裁定：先三处，impl 实现时又报两处，用户再裁并入），交 `lane-router/impl` 实现。需求来自 `vikunja/main`（2026-10-12，用户在那条 lane 里同意了方向），需求原文在 `H:\xd_projects_h\req_manage_study\docs\plans\2026-10-12-lane-router-tell-request.md`。审过后由 `lane-router/impl` 实现，`vikunja/main` 按本稿第三节的接口接入。
 
 **一句话：** 加一条本机命令，让以用户身份运行的本地程序把一条**固定格式**的消息放进某条 lane 的收件箱，并拿回目标 lane 的状态。消息头上的发送方写成 `user:<来源>`，不是任何 lane 的地址；存储上用一列 `sender_label` 承载，而不是伪造一条 lane。

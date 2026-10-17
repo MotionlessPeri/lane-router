@@ -13,7 +13,7 @@ import { MailboxStore } from "../../src/router/mailbox-store.js";
 import { NotificationPump } from "../../src/router/notification-pump.js";
 import { RouterCore } from "../../src/router/router-core.js";
 import { RouterStateStore } from "../../src/router/state-store.js";
-import { parseTellInput, tellBody, TellInputError } from "../../src/router/tell.js";
+import { parseTellInput, tellBody, TellAdapter, TellInputError } from "../../src/router/tell.js";
 import type { BackendName, BindingRecord, CallerContext } from "../../src/router/types.js";
 
 const roots: string[] = [];
@@ -54,7 +54,11 @@ function setup(backendName: BackendName = "codex") {
     newId: (kind) => `${kind}-${++sequence}`,
     now: () => ++now,
   });
-  return { root, database, state, mailbox, backend, core };
+  let requestSequence = 0;
+  const teller = new TellAdapter({
+    delivery: core, latestProjectCwd: (project) => state.latestProjectCwd(project), newRequestKey: () => `tell:${++requestSequence}`,
+  });
+  return { root, database, state, mailbox, backend, core, tell: teller.tell.bind(teller) };
 }
 
 type Setup = ReturnType<typeof setup>;
@@ -99,7 +103,7 @@ describe("telling a lane from outside", () => {
       const x = setup();
       try {
         prepare(x);
-        const result = await x.core.tell({ address: "alpha/one", ...told });
+        const result = await x.tell({ address: "alpha/one", ...told });
 
         expect(result).toEqual({
           delivered: true, messageId: expect.any(String),
@@ -127,7 +131,7 @@ describe("telling a lane from outside", () => {
       const x = setup();
       try {
         prepare(x);
-        const result = await x.core.tell({ address: "alpha/one", ...told });
+        const result = await x.tell({ address: "alpha/one", ...told });
         expect(result).toEqual({
           delivered: false, messageId: null,
           target: { address: "alpha/one", state: label },
@@ -150,7 +154,7 @@ describe("telling a lane from outside", () => {
         try {
           bindLane(x, "alpha/one");
           x.backend.restoreState = presence;
-          const result = await x.core.tell({ address: "alpha/one", ...told });
+          const result = await x.tell({ address: "alpha/one", ...told });
 
           expect(result.target).toEqual({ address: "alpha/one", state: expected });
           expect(result.delivered).toBe(true);
@@ -170,7 +174,7 @@ describe("telling a lane from outside", () => {
     const x = setup();
     try {
       bindLane(x, "alpha/one");
-      const result = await x.core.tell({ address: "alpha/one", ...told });
+      const result = await x.tell({ address: "alpha/one", ...told });
       expect(x.backend.notifications).toHaveLength(1);
       expect(x.backend.notifications[0]!.messages).toEqual([
         { id: result.messageId, sender: "user:vikunja", summary: `用户想讨论：${told.subject}` },
@@ -184,10 +188,22 @@ describe("telling a lane from outside", () => {
     try {
       bindLane(x, "alpha/one");
       x.backend.restoreState = "offline";
-      await x.core.tell({ address: "alpha/one", origin: "vikunja", subject: "任务 #37 扩容" });
-      await x.core.tell({ address: "alpha/one", origin: "vikunja", subject: "任务 #38 回滚" });
+      await x.tell({ address: "alpha/one", origin: "vikunja", subject: "任务 #37 扩容" });
+      await x.tell({ address: "alpha/one", origin: "vikunja", subject: "任务 #38 回滚" });
       const summaries = x.backend.notifications.at(-1)!.messages.map((message) => message.summary);
       expect(summaries).toEqual(["用户想讨论：任务 #37 扩容", "用户想讨论：任务 #38 回滚"]);
+    } finally { x.database.close(); }
+  });
+
+  it("keeps identical deliberate tell calls as two messages", async () => {
+    const x = setup();
+    try {
+      bindLane(x, "alpha/one");
+      const first = await x.tell({ address: "alpha/one", ...told });
+      const second = await x.tell({ address: "alpha/one", ...told });
+      expect(first.messageId).not.toBe(second.messageId);
+      expect(messageRows(x)).toBe(2);
+      expect(pendingFiles(x)).toBe(2);
     } finally { x.database.close(); }
   });
 
@@ -198,7 +214,7 @@ describe("telling a lane from outside", () => {
     try {
       bindLane(x, "alpha/one");
       x.backend.restoreState = "offline";
-      const result = await x.core.tell({ address: "alpha/one", ...told });
+      const result = await x.tell({ address: "alpha/one", ...told });
 
       await expect(x.core.archiveLane("alpha/one")).rejects.toThrow(/1 unread message\(s\) from user:vikunja/u);
       const caller = { backend: "codex" as const, conversationId: "conversation-alpha/one", requestKey: "ack:1" };
@@ -216,7 +232,7 @@ describe("the working-directory hint", () => {
       bindLane(x, "alpha/old", { cwd: "E:/projects/old", activeAt: 10 });
       bindLane(x, "alpha/new", { cwd: "E:/projects/new", activeAt: 20 });
       bindLane(x, "beta/elsewhere", { cwd: "E:/projects/beta", activeAt: 99 });
-      const result = await x.core.tell({ address: "alpha/missing", ...told });
+      const result = await x.tell({ address: "alpha/missing", ...told });
       expect(result.project).toEqual({ cwdHint: "E:/projects/new" });
     } finally { x.database.close(); }
   });
@@ -229,7 +245,7 @@ describe("the working-directory hint", () => {
       const gone = x.state.activeBindingForLane("alpha/gone")!;
       x.state.deactivateBinding(gone.id, gone.generation, 40);
       x.state.archiveLane("alpha/gone", 40);
-      const result = await x.core.tell({ address: "alpha/gone", ...told });
+      const result = await x.tell({ address: "alpha/gone", ...told });
       expect(result).toMatchObject({ delivered: false, target: { state: "archived" }, project: { cwdHint: "E:/projects/newest" } });
     } finally { x.database.close(); }
   });
@@ -239,7 +255,7 @@ describe("the working-directory hint", () => {
     try {
       bindLane(x, "alpha/one");
       bindLane(x, "beta/other", { cwd: "E:/projects/beta", activeAt: 10 });
-      expect((await x.core.tell({ address: "alpha/one", ...told })).project).toEqual({ cwdHint: null });
+      expect((await x.tell({ address: "alpha/one", ...told })).project).toEqual({ cwdHint: null });
     } finally { x.database.close(); }
   });
 });
@@ -280,7 +296,7 @@ describe("telling a lane through the command line and a real Router", () => {
   async function startRouter(x: Setup) {
     const server = new LocalRouterServer({
       tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "tell-e2e",
-      tell: (input) => x.core.tell(input),
+      tell: (input) => x.tell(input),
     });
     const discovery = await server.start();
     const dataRoot = mkdtempSync(join(tmpdir(), "lane-router-tell-cli-"));

@@ -1,0 +1,51 @@
+# tell 用户消息投递底座抽取
+
+本次把「可信宿主代表用户把完整正文交给 lane」放入 Core 的进程内接口；现有 tell 保留为固定主题模板的适配入口。入箱成功仅表示消息已持久保存，不表示 agent 已读取或处理。
+
+## 范围与基线
+
+- 基于 `86c05c865fa537d58504f92262fdb576bdf5b5cc`，分支 `refactor/tell-user-delivery-20261017`。
+- 隔离树：`C:/Users/KrabsXD/.config/superpowers/worktrees/lane-router/tell-user-delivery-20261017`。原仓已有修改、原仓 `dist` 和运行中 Router 均不属于本次工作。
+- 仅使用临时测试数据库、mailbox 和假后端；构建仅在隔离树运行。禁止真实模型、真实 lane、真实配置/库、部署和推送。
+- 不实现议题业务、通用公开发送入口、插件机制或第二套队列；不改 DSH/NativeHost 白名单及旧 send/ack 外部契约。
+
+## 接口与归属
+
+`UserMessageDelivery` 是明确的进程内端口，由 `RouterCore.deliverUserMessage` 实现。输入包含稳定 `laneId`（推荐）或当前地址、显式的可信用户来源、完整正文与调用者持久请求标识。来源类型说明调用前已取得用户授权；它不是新鉴权机制，也不向现有 HTTP/MCP 暴露。
+
+Core 验证输入、固定目标身份、持久入箱、去重并复用通知泵。返回入箱结果与目标状态；不导入 `tell.ts`，不理解主题、链接或准备讨论指令。普通文本和多行正文逐字保存。
+
+`TellAdapter` 负责再次解析旧输入、生成 `tellBody`、给每次旧调用生成新请求标识、映射旧 `TellResult` 并取得 `cwdHint`。`main.ts` 将 `/lanes/tell` 接到该适配器。现有 CLI、HTTP 参数限制、响应结构、守卫和模板末句保持原义；现有契约测试只调整内部接线。
+
+## 同一请求的持久语义
+
+1. 通用请求使用独立的 request-key 前缀，复用现有 message 索引；完成 mailbox 文件后绑定请求键，未入箱的 missing/archived 拒收不占键。不增加数据库表或 schema 版本。
+2. 同 key 必须匹配来源、正文与目标稳定身份，匹配时返回原 message ID；差异明确拒绝。通知失败、ack、重启及归档都不产生新副本。
+3. 在查重前复用 mailbox 对账的内部可选 request-key 筛选，只解析、收养和验证当前请求的文件/索引；无关孤儿或损坏文件不能影响本次投递。启动无筛选对账保持现有行为；不建立第二份请求账本。
+4. 仅新通用投递文件增加可选 `target_lane_id` 恢复头。旧文件继续可读，旧 send 文件与对外记录不增加字段。恢复带 ID 的文件时按 ID 插入，不能重新按被复用的地址寻址。
+5. 查询重试同时覆盖 live/archive 索引。新恢复文件的原 lane 已归档时，直接归入既有 archive 索引并移动到该 lane 的 archive 目录；不能进入新 lane 收件箱。稳定 ID 目标始终指向原 lane；地址目标已换主人时，同 key 重试报目标冲突。
+
+## 实施与验证
+
+一个交付单元完成以下内容：
+
+1. 在新树完成依赖安装与实际全套基线，原始输出放仓库外私人目录。
+2. 先新增完整正文、输入校验、同 key 重试/冲突、通知失败、重启与文件先写窗口、归档/地址复用的失败测试。旧 tell 的状态、通知、ack、模板、CLI/HTTP/guard 测试继续承担兼容验证。
+3. 实现通用端口、必要的稳定恢复元数据、归档请求读取和 tell 适配接线。只改相关源码、测试与本计划；`docs/README.md` 索引由主协调更新。
+4. 运行相关回归、`npm test`、`npm run typecheck`、隔离树 `npm run build`，自查完整 diff 后本地提交。默认超时的已知 native 测试资源波动如出现，只做一次 CLI `--maxWorkers=2 --testTimeout=30000` 复验，不修改配置。
+5. 主协调安排独立计划与结果审查。审查发现由主协调分类，范围扩大先报告；最终交付列出 commit、验收证据与未验现场范围。
+
+原始日志目录：`D:/my_projects/_agent_private/lane-router/tell-user-delivery-20261017/`。现场部署、真实模型遵循模板、生产库/配置验收不在本次验证内。
+
+## 已执行的验证
+
+| 检查 | 结果 |
+|---|---|
+| 新树基线 | 默认全套 701 通过、1 个 native 重启用例 5 秒超时；限 2 worker / 30 秒全套 62 文件、702 测试通过。 |
+| 新行为红绿 | 通用接口未实现时 14 条测试失败，首版实现后通过；归档文件已移动但路径未入索引的中断窗口另有 ENOENT 红测，定向修复后同输入通过。 |
+| 相关接口回归 | 用户投递、tell、mailbox、state、tell guard、lane launcher、local transport 共 7 文件、145 测试通过。 |
+| 最终全套 | 默认 716 通过、2 个 native 用例 5 秒超时；一次 CLI 限 2 worker / 30 秒复验 63 文件、718 测试全部通过（86.75 秒），未改测试配置。 |
+| 类型与构建 | `npm run typecheck`、隔离树 `npm run build` 均退出 0。 |
+| 原仓保护 | 原仓 dirty 清单未变，原仓 `dist/process/local-server.js` 与 `dashboard.html` 的 SHA256 与协调者基线相同。 |
+
+通用投递测试覆盖完整正文、可信来源与输入、目标状态、同 key 重试与冲突、并发、通知失败、ack 后重试、同进程与重启后的文件先写恢复、归档/地址复用，以及无关孤儿不被收养或解析。归档恢复若在移动文件后中断，当前请求重试通过既有幂等 `archiveFile` 完成路径索引；未扩展为新的全库修复机制。

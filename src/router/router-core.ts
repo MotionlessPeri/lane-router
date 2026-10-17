@@ -1,7 +1,7 @@
 import type { BackendRegistry, RestorePresence } from "./backend.js";
 import { isAddressSegment, parseLaneAddress, senderLabel } from "./address.js";
 import type { MailboxStore } from "./mailbox-store.js";
-import { tellBody, type TellInput, type TellResult, type TellTargetState } from "./tell.js";
+import type { UserMessageDelivery, UserMessageInput, UserMessageResult, UserMessageTargetState } from "./user-message.js";
 import type { NotificationPump } from "./notification-pump.js";
 import type { RouterStateStore } from "./state-store.js";
 import type { CallerContext, BackendName, LaneRecord, LaneSetRecord, MessageKind, MessageRecord, ReachSnapshot, ResolvedIdentity } from "./types.js";
@@ -11,6 +11,32 @@ export interface LaneRestoreResult {
   readonly status: "launch_requested" | "skipped_online" | "skipped_launching" | "failed";
   readonly reason?: string;
   readonly message?: string;
+}
+
+function validateUserMessage(input: UserMessageInput): string {
+  const invalid = (message: string): never => { throw new RouterError("INVALID_USER_MESSAGE", message); };
+  if (typeof input !== "object" || input === null) return invalid("User message input is required");
+  if (typeof input.source !== "object" || input.source === null || input.source.kind !== "user"
+    || typeof input.source.origin !== "string") return invalid("A trusted user source is required");
+  let sender: string;
+  try { sender = senderLabel(input.source.origin); }
+  catch (error) { return invalid((error as Error).message); }
+  if (typeof input.body !== "string" || input.body.length === 0) return invalid("User message body must be a non-empty string");
+  if (typeof input.requestKey !== "string" || !input.requestKey.trim() || /[\u0000-\u001f\u007f]/u.test(input.requestKey)) {
+    return invalid("User message request key must be non-empty and contain no control characters");
+  }
+  if (typeof input.target !== "object" || input.target === null
+    || (input.target.laneId === undefined) === (input.target.address === undefined)) {
+    return invalid("Exactly one target lane ID or address is required");
+  }
+  if (input.target.laneId !== undefined) {
+    if (typeof input.target.laneId !== "string" || !input.target.laneId.trim()
+      || /[\u0000-\u001f\u007f]/u.test(input.target.laneId)) return invalid("Target lane ID is invalid");
+  } else {
+    try { parseLaneAddress(input.target.address); }
+    catch (error) { return invalid((error as Error).message); }
+  }
+  return sender;
 }
 
 export interface LaneRestorePort {
@@ -85,7 +111,7 @@ interface RouterCoreDependencies {
   readonly now: () => number;
 }
 
-export class RouterCore {
+export class RouterCore implements UserMessageDelivery {
   constructor(private readonly dependencies: RouterCoreDependencies) {}
 
   directory(project: string): DirectoryEntry[] {
@@ -503,44 +529,59 @@ export class RouterCore {
   }
 
   /**
-   * Put one message into a lane's mailbox on the user's behalf, from a local program that is not a
-   * conversation. Everything after the write is an ordinary message — notified the same way, held
-   * while the lane is offline, read and acked like any other — so this only adds a way in.
-   *
-   * 流程：
-   *   1. 用重开 lane 时已有的那套事实判目标状态，不另造判断
-   *   2. 归档 / 不存在 ⇒ 不写：没有收件箱可放，也不为一条消息造一条 lane
-   *   3. 否则按固定模板写 pending 文件与 message 行，发送方记成 `user:<origin>`
-   *   4. 走现有通知泵；回报目标状态与项目的工作目录提示
+   * Deliver a complete user-authored body from a trusted in-process caller. The file and index
+   * retain the request identity before any notification can yield or fail. Retrying therefore
+   * repairs that write window and returns the same message, including after ack or archive.
    */
-  async tell(input: TellInput): Promise<TellResult> {
+  async deliverUserMessage(input: UserMessageInput): Promise<UserMessageResult> {
     const state = this.dependencies.state;
-    const address = parseLaneAddress(input.address);
-
-    // 步骤 1: the same facts `open` decides from, so a caller is told exactly what `open` would see.
-    const info = await this.resumeInfo(address.address);
-    const targetState: TellTargetState =
-      info.state === "bound" ? (info.restorePresence === "online" ? "online" : "offline") : info.state;
-    const project = { cwdHint: state.latestProjectCwd(address.project) };
-
-    // 步骤 2
-    if (targetState === "archived" || targetState === "missing") {
-      return { delivered: false, messageId: null, target: { address: address.address, state: targetState }, project };
+    const sender = validateUserMessage(input);
+    const requestKey = `user-message:${input.requestKey}`;
+    this.dependencies.mailbox.reconcile(state, requestKey);
+    const lane = input.target.laneId === undefined
+      ? state.lane(input.target.address) ?? state.archivedLaneAt(input.target.address)
+      : state.laneById(input.target.laneId);
+    let targetState: UserMessageTargetState;
+    if (!lane) targetState = "missing";
+    else if (lane.archivedAt !== null) targetState = "archived";
+    else {
+      const binding = state.activeBindingForLane(lane.address);
+      targetState = binding === undefined ? "unbound"
+        : this.dependencies.backends.find(binding.backend)?.restorePresence(binding) === "online" ? "online" : "offline";
     }
-
-    // 步骤 3: a fresh request key per call. Each call is one deliberate act by the user; there is no
-    // retrying transport between the command and the Router to dedupe against.
+    const target = {
+      laneId: lane?.id ?? input.target.laneId ?? null,
+      address: lane?.address ?? input.target.address ?? null,
+      state: targetState,
+    };
+    const existing = state.messageRequestByKey(requestKey);
+    if (existing) {
+      let relativePath = existing.message.relativePath;
+      if (existing.archived && relativePath.replaceAll("\\", "/").includes("/pending/")) {
+        // A previous retry may have moved the recovered orphan and stopped before indexing its
+        // archive path. The archive move accepts its existing destination, including after restart.
+        relativePath = this.dependencies.mailbox.archiveFile(existing.targetLaneId, relativePath).relativePath;
+        state.updateArchivedMessagePath(existing.message.id, relativePath);
+      }
+      if (!lane || existing.targetLaneId !== lane.id || existing.message.senderLane !== sender
+        || this.dependencies.mailbox.readBody(relativePath) !== input.body) {
+        throw new RouterError("USER_MESSAGE_REQUEST_CONFLICT", "User message request key already names a different body, source or target");
+      }
+      if (!existing.archived && existing.message.state === "pending") await this.dependencies.pump.notifyLane(lane.address);
+      return { delivered: true, messageId: existing.message.id, target };
+    }
+    if (!lane || lane.archivedAt !== null) {
+      return { delivered: false, messageId: null, target };
+    }
     const id = this.dependencies.newId("message");
     const message = {
-      id, requestKey: `tell:${id}`, senderLane: senderLabel(input.origin), targetLane: address.address,
-      kind: "normal" as const, replyTo: null, createdAt: this.dependencies.now(), body: tellBody(input),
+      id, requestKey, senderLane: sender, targetLane: lane.address, targetLaneId: lane.id,
+      kind: "normal" as const, replyTo: null, createdAt: this.dependencies.now(), body: input.body,
     };
     const file = this.dependencies.mailbox.writePending(message);
     state.insertMessage({ ...message, relativePath: file.relativePath, contentSha256: file.contentSha256 });
-
-    // 步骤 4
-    await this.dependencies.pump.notifyLane(address.address);
-    return { delivered: true, messageId: id, target: { address: address.address, state: targetState }, project };
+    await this.dependencies.pump.notifyLane(lane.address);
+    return { delivered: true, messageId: id, target };
   }
 
   /**
