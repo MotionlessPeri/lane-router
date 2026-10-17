@@ -147,7 +147,7 @@
 - [x] HTTP 测试先红：`GET /issues` 静态页、`GET /issues/api/threads` 列表、`GET /issues/api/threads/:id` 详情；`POST /issues/api/threads/:id/replies`、`/read`、`/close` 写入已有议题。列表/详情可分页，默认待我处理，保留全部/结束历史浏览；不加 create/arbitrary-target。
 - [x] 实现相邻 `IssuesHttp` handler，复用 JSON 限额与现有 origin/action header/token 规则；只提取两 handler 实际共同使用的校验。读响应提供当前进程 action token，写请求拒绝跨源、缺 token、坏 JSON/类型和额外身份字段。网页不能调用机器 `/rpc` 冒充 agent，未知路径不读取正文。
 - [x] 状态结果保留业务错误码；已结束/键冲突/目标不可用按事实返回，保存失败不成功，超时用同键重试/历史确认。CLI 使用现有 loopback RPC，不另建协议或修改 `tell`。首次模块未装配为不存在，已装配但不可用明确报错。
-- [ ] 运行 `npm test -- tests/modules/issues/cli.test.ts tests/modules/issues/http.test.ts tests/process/lane-launcher.test.ts tests/process/dashboard-http.test.ts tests/process/dashboard-http-contract.test.ts tests/process/tell-guard.test.ts tests/process/local-transport.test.ts`；类型检查，独立审查后提交。
+- [x] 运行 `npm test -- tests/modules/issues/cli.test.ts tests/modules/issues/http.test.ts tests/process/lane-launcher.test.ts tests/process/dashboard-http.test.ts tests/process/dashboard-http-contract.test.ts tests/process/tell-guard.test.ts tests/process/local-transport.test.ts`；类型检查，独立审查后提交。
 
 **U3 完成条件：** 工具目录、各适配和已有入口回归均通过；通信-only 与模块故障路径实测于 fixture；汇总结果后继续 U4。新工具刷新是否真可用仍留给外部真实客户端验收，不用 schema 测试冒充。
 

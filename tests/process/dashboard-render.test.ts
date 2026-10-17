@@ -155,6 +155,12 @@ test("hostile text in a snapshot is shown, not run", async () => {
   expect(document.querySelectorAll("script")).toHaveLength(1);
 });
 
+test("the dashboard links to the issue inbox alongside its existing launcher", async () => {
+  const document = await render();
+  expect(document.querySelector('header a[href="/issues"]')?.textContent).toContain("议题");
+  expect(document.querySelector("#launcher")).not.toBeNull();
+});
+
 test("the launcher starts with nothing selected and submits one protected request", async () => {
   const { document, calls } = await renderLauncher();
   const checkboxes = [...document.querySelectorAll("input[data-lane-checkbox]")];

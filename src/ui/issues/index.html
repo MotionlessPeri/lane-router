@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>议题收件箱 · Lane Router</title>
+<style>
+  :root { color-scheme: light dark; --bg: light-dark(#f7f8fa, #15181e); --panel: light-dark(#fff, #1c2028); --text: light-dark(#202938, #edf0f6); --muted: light-dark(#667083, #aab3c3); --line: light-dark(#e2e6ed, #353c49); --hover: light-dark(#edf1f7, #29313e); --active: light-dark(#e9effc, #25334d); --blue: light-dark(#355ca8, #aac6ff); --warm: light-dark(#875b14, #efc478); }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.65 system-ui, "Microsoft YaHei", sans-serif; overflow-wrap: anywhere; }
+  button, textarea, select { font: inherit; color: inherit; }
+  button, select { cursor: pointer; }
+  button { border: 1px solid var(--line); border-radius: 7px; padding: 6px 11px; background: var(--panel); }
+  button:hover { background: var(--hover); }
+  button:disabled { opacity: .5; cursor: default; }
+  :focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+  a { color: var(--blue); }
+  header { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header strong { font-weight: 600; }
+  header small { margin-left: auto; color: var(--muted); }
+  main { max-width: 1280px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 23px; font-weight: 550; margin: 0 0 6px; }
+  h2 { font-size: 18px; font-weight: 550; margin: 0 0 5px; }
+  p { margin: 6px 0; }
+  .muted, .meta { color: var(--muted); }
+  .meta { font-size: 12px; }
+  .warning { color: var(--warm); }
+  #filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 20px 0 12px; }
+  #filters button { border-color: transparent; background: transparent; }
+  #filters [aria-pressed="true"] { background: var(--text); color: var(--panel); }
+  #refresh { margin-left: auto; }
+  #list-status { min-height: 24px; margin-bottom: 10px; }
+  .columns { display: grid; grid-template-columns: minmax(245px, 31%) minmax(0, 1fr); min-height: 590px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .list-panel { border-right: 1px solid var(--line); padding: 12px; }
+  .topic { display: block; width: 100%; text-align: left; padding: 16px 13px; margin-bottom: 6px; border-color: transparent; background: transparent; border-radius: 9px; }
+  .topic[aria-current="true"] { background: var(--active); border-color: var(--line); }
+  .topic-title, .topic-meta { display: block; }
+  .topic-title { font-weight: 550; margin: 5px 0; }
+  .topic-meta { color: var(--muted); font-size: 12px; }
+  .badge { display: inline-block; margin-right: 9px; font-size: 12px; color: var(--muted); }
+  .badge.ask { color: var(--warm); }
+  .badge.unread { color: var(--blue); }
+  #issue-detail { min-width: 0; background: var(--panel); padding: 24px; }
+  .detail-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 16px; }
+  #close-issue { white-space: nowrap; }
+  .empty { padding: 24px 12px; color: var(--muted); }
+  #questions { margin-top: 12px; font-size: 12px; color: var(--muted); }
+  .question { margin: 5px 0; }
+  #history { display: grid; gap: 22px; padding: 22px 0; }
+  .entry { border-left: 2px solid var(--line); padding-left: 13px; }
+  .entry.user { border-color: var(--blue); }
+  .entry-body { white-space: pre-wrap; margin-top: 7px; }
+  .entry-head { font-size: 12px; color: var(--muted); }
+  .delivery { margin-top: 8px; font-size: 12px; color: var(--muted); }
+  #compose { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 18px; }
+  #compose label { display: block; margin-bottom: 7px; }
+  #reply-question { width: 100%; padding: 7px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+  #reply-body { width: 100%; min-height: 100px; padding: 11px; resize: vertical; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .compose-bottom { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+  .primary { background: var(--text); color: var(--panel); border-color: var(--text); }
+  .primary:hover { background: var(--text); opacity: .9; }
+  #close-confirmation { padding: 13px; margin-top: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+  #close-confirmation p { margin-bottom: 10px; }
+  #operation-status { white-space: pre-wrap; margin-top: 12px; }
+  #operation-recovery { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  [hidden] { display: none !important; }
+  @media (max-width: 680px) {
+    header, main { padding: 14px; }
+    .columns { grid-template-columns: minmax(0, 1fr); }
+    .list-panel { border-right: 0; border-bottom: 1px solid var(--line); }
+    #issue-detail { padding: 16px; }
+    .detail-head { flex-wrap: wrap; }
+    #reply-body { font-size: 16px; }
+  }
+  @media (pointer: coarse) { button, select { min-height: 44px; } }
+</style>
+</head>
+<body>
+<header><strong>Lane Router</strong><a href="/dashboard">运行看板</a><small>议题从 TUI 发起 · 本页可直接继续讨论</small></header>
+<main>
+  <h1>议题收件箱</h1>
+  <p class="muted">集中查看答复与问题。看不懂可以继续追问，一轮回复不会自动结束议题。</p>
+  <nav id="filters" aria-label="议题筛选">
+    <button type="button" data-filter="attention" aria-pressed="true">待我处理</button>
+    <button type="button" data-filter="open" aria-pressed="false">进行中</button>
+    <button type="button" data-filter="all" aria-pressed="false">全部</button>
+    <button type="button" data-filter="closed" aria-pressed="false">已结束</button>
+    <button type="button" id="refresh">刷新</button>
+  </nav>
+  <p id="list-status" class="meta" role="status">正在读取议题…</p>
+  <div class="columns">
+    <nav class="list-panel" aria-label="议题列表"><div id="thread-list"></div><button type="button" id="load-threads" hidden>加载更多议题</button></nav>
+    <section id="issue-detail" aria-label="议题详情">
+      <p id="detail-empty" class="empty">选择一个议题，查看完整讨论。</p>
+      <div id="detail-content" hidden>
+        <div class="detail-head"><div><h2 id="detail-title"></h2><p id="detail-meta" class="meta"></p></div><button type="button" id="close-issue">结束议题</button></div>
+        <p id="detail-status" class="meta" role="status"></p>
+        <div id="questions" aria-label="问题状态"></div>
+        <div id="history" aria-label="讨论历史"></div>
+        <button type="button" id="load-history" hidden>继续加载历史</button>
+        <p id="read-status" class="meta" role="status"></p>
+        <div id="compose"></div>
+        <div id="close-confirmation" hidden role="group" aria-label="确认结束议题">
+          <p>确定结束这个议题吗？历史将保留，结束后不能继续回复。已保存的输入仍会交给 lane 处理。</p>
+          <button type="button" id="confirm-close" class="primary">确认结束</button>
+          <button type="button" id="cancel-close">取消</button>
+        </div>
+        <p id="operation-status" role="status"></p>
+        <div id="operation-recovery" hidden><button type="button" id="retry-operation">用同一操作重试</button><button type="button" id="check-history">查看后端历史</button></div>
+      </div>
+    </section>
+  </div>
+</main>
+<script>
+(() => {
+  "use strict";
+  const PAGE_SIZE = 100;
+  const views = new Map();
+  let filter = "attention", selectedId = null, actionToken = null;
+  let listItems = [], listCursor = null, listPages = 1, listVersion = 0, listLoading = false;
+  const byId = id => document.getElementById(id);
+  const node = (tag, className, text) => {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
+  };
+  const ownerText = owner => (owner.address || owner.laneId) + (owner.state === "archived" ? " · 已归档" : owner.state === "missing" ? " · 已缺失" : "");
+  const time = value => new Date(value).toLocaleString("zh-CN", { hour12: false });
+  const questionLabels = { waiting_user: "待我回答", waiting_lane: "等待 lane", answered: "已回答", not_needed: "无需回答" };
+  function viewFor(id) {
+    if (!views.has(id)) views.set(id, { detail: null, entries: [], through: 0, hasMore: false, version: 0, loading: false,
+      draft: "", questionId: "", operation: null, notice: "", warning: false, confirmClose: false, readAck: 0, reads: new Map(), loadError: "", readError: "" });
+    return views.get(id);
+  }
+
+  async function request(path, init) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(path, { cache: "no-store", ...init, signal: controller.signal });
+      const data = await response.json();
+      if (!response.ok) {
+        const error = new Error((data.error || "请求失败") + "（" + response.status + "）");
+        error.uncertain = response.status >= 500;
+        throw error;
+      }
+      if (init === undefined) actionToken = data.actionToken;
+      return data.result;
+    } finally { clearTimeout(timeout); }
+  }
+  function post(id, action, payload) {
+    return request("/issues/api/threads/" + encodeURIComponent(id) + "/" + action, {
+      method: "POST", headers: { "content-type": "application/json", "x-lane-router-action": "issues-" + (action === "replies" ? "reply" : action) },
+      body: JSON.stringify({ ...payload, actionToken }),
+    });
+  }
+
+  function renderList() {
+    const host = byId("thread-list"); host.replaceChildren();
+    if (!listItems.length) host.append(node("p", "empty", "这里暂时没有议题。"));
+    for (const item of listItems) {
+      const button = node("button", "topic"); button.type = "button";
+      button.dataset.issueId = item.id; button.setAttribute("aria-current", String(item.id === selectedId));
+      // These are facts returned by the list API; reading does not decide whether a question still needs an answer.
+      if (item.status === "closed") button.append(node("span", "badge", "已结束"));
+      for (const reason of item.attentionReasons) {
+        if (reason === "waiting_user") button.append(node("span", "badge ask", "待我回答"));
+        if (reason === "unread_lane_content") button.append(node("span", "badge unread", "未读答复"));
+      }
+      if (item.waitingLaneCount > 0) button.append(node("span", "badge", "等待 lane"));
+      button.append(node("span", "topic-title", item.title), node("span", "topic-meta", ownerText(item.owner)), node("span", "topic-meta", time(item.updatedAt)));
+      button.addEventListener("click", () => selectIssue(item.id)); host.append(button);
+    }
+    byId("load-threads").hidden = !listCursor; byId("load-threads").disabled = listLoading;
+  }
+  async function loadList(more = false) {
+    if (listLoading) return;
+    if (more) listPages++;
+    const version = ++listVersion, requestedFilter = filter;
+    listLoading = true; byId("load-threads").disabled = true;
+    try {
+      let cursor = null; const items = new Map();
+      for (let page = 0; page < listPages; page++) {
+        const query = new URLSearchParams({ filter: requestedFilter, limit: String(PAGE_SIZE) });
+        if (cursor) { query.set("beforeUpdatedAt", String(cursor.updatedAt)); query.set("beforeId", cursor.id); }
+        const result = await request("/issues/api/threads?" + query);
+        if (version !== listVersion) return;
+        for (const item of result.items) items.set(item.id, item);
+        cursor = result.nextCursor;
+        if (!cursor) break;
+      }
+      listItems = [...items.values()]; listCursor = cursor;
+      byId("list-status").textContent = "已刷新 " + time(Date.now()) + " · 每 5 秒读取后端";
+      byId("list-status").className = "meta";
+    } catch (error) {
+      if (version !== listVersion) return;
+      byId("list-status").textContent = "读取失败，列表可能已过期：" + error.message;
+      byId("list-status").className = "meta warning";
+    } finally {
+      if (version === listVersion) { listLoading = false; renderList(); }
+    }
+  }
+
+  function selectIssue(id) {
+    selectedId = id; renderList();
+    const view = viewFor(id);
+    byId("detail-empty").hidden = Boolean(view.detail);
+    byId("detail-empty").textContent = "正在读取议题…";
+    byId("detail-content").hidden = !view.detail;
+    byId("issue-detail").removeAttribute("data-issue-id");
+    if (view.detail) renderDetail(id);
+    void loadDetail(id, false, true);
+  }
+  async function loadDetail(id, more = false, force = false) {
+    const view = viewFor(id);
+    if (view.loading && !force) return;
+    const version = ++view.version;
+    // With an older page still unloaded, polling updates metadata without skipping ahead through history.
+    const metadataOnly = Boolean(view.detail && view.hasMore && !more);
+    const afterSeq = metadataOnly ? 0 : view.through;
+    view.loading = true;
+    if (selectedId === id) byId("load-history").disabled = true;
+    try {
+      const result = await request("/issues/api/threads/" + encodeURIComponent(id) + "?afterSeq=" + afterSeq + "&limit=" + PAGE_SIZE);
+      if (version !== view.version) return;
+      const entries = new Map(view.entries.map(entry => [entry.seq, entry]));
+      for (const entry of result.entries) if (!metadataOnly || entry.seq <= view.through) entries.set(entry.seq, entry);
+      view.entries = [...entries.values()].sort((a, b) => a.seq - b.seq);
+      if (!metadataOnly) { view.through = Math.max(view.through, result.displayedThroughSeq); view.hasMore = result.hasMore; }
+      view.detail = result; view.loadError = "";
+      if (selectedId === id) { renderDetail(id); markRenderedRead(id); }
+    } catch (error) {
+      if (version !== view.version) return;
+      view.loadError = "读取详情失败，所示历史可能已过期：" + error.message;
+      if (selectedId === id) {
+        if (view.detail) renderDetail(id);
+        else byId("detail-empty").textContent = view.loadError;
+      }
+    } finally {
+      if (version === view.version) { view.loading = false; if (selectedId === id) byId("load-history").disabled = false; }
+    }
+  }
+
+  function deliveryText(delivery) {
+    const facts = [delivery.processedAt !== null ? "agent 已确认处理" : delivery.handoffState === "accepted" ? "已入 lane 收件箱，处理未确认" : "已保存，待入箱"];
+    if (delivery.handoffState === "blocked") facts.push("交接受阻");
+    if (delivery.lastTargetState) facts.push("目标状态：" + delivery.lastTargetState);
+    if (delivery.lastError) facts.push(delivery.lastError);
+    return facts.join(" · ");
+  }
+  function renderDetail(id) {
+    if (selectedId !== id) return;
+    const view = viewFor(id), detail = view.detail;
+    if (!detail) return;
+    const closed = detail.thread.status === "closed";
+    byId("detail-empty").hidden = true; byId("detail-content").hidden = false;
+    byId("detail-title").textContent = detail.thread.title;
+    byId("detail-meta").textContent = ownerText(detail.owner) + " · " + (closed ? "已结束" : "进行中") + " · " + id;
+    byId("detail-status").textContent = view.loadError;
+    byId("close-issue").hidden = closed; byId("close-issue").disabled = Boolean(view.operation);
+    const questions = byId("questions"); questions.replaceChildren();
+    for (const question of detail.questions) {
+      const entry = view.entries.find(item => item.id === question.promptEntryId);
+      const label = entry ? "#" + entry.seq + " " + entry.body.slice(0, 60) : question.id;
+      const row = node("p", "question", (questionLabels[question.status] || question.status) + " · " + label + (question.reason ? " · " + question.reason : ""));
+      if (question.answerEntryId) row.append(node("span", null, " · 答复 " + question.answerEntryId));
+      questions.append(row);
+    }
+    const history = byId("history"); history.replaceChildren();
+    for (const entry of view.entries) {
+      const article = node("article", "entry " + (entry.author === "user" ? "user" : ""));
+      article.dataset.entrySeq = String(entry.seq);
+      const source = entry.source === "agent_reported_tui_user" ? "用户（agent 记录的 TUI 原话）" : entry.author === "user" ? "我" : "lane";
+      const kind = { question: "提问", answer: "答复", reply: "回复", event: "记录" }[entry.kind] || entry.kind;
+      article.append(node("div", "entry-head", source + " · " + kind + " · #" + entry.seq + " · " + time(entry.createdAt)), node("div", "entry-body", entry.body));
+      if (entry.relatedEntryId) {
+        const related = view.entries.find(item => item.id === entry.relatedEntryId);
+        article.append(node("div", "meta", "关联 " + (related ? "#" + related.seq : entry.relatedEntryId)));
+      }
+      for (const delivery of detail.deliveries.filter(item => item.entryId === entry.id)) article.append(node("div", "delivery", deliveryText(delivery)));
+      history.append(article);
+    }
+    byId("load-history").hidden = !view.hasMore;
+    byId("read-status").textContent = view.readError;
+    renderCompose(id, closed);
+    byId("close-confirmation").hidden = !view.confirmClose || closed;
+    byId("confirm-close").disabled = Boolean(view.operation);
+    byId("operation-status").textContent = view.notice;
+    byId("operation-status").className = view.warning ? "warning" : "meta";
+    byId("operation-recovery").hidden = !view.operation || view.operation.state !== "uncertain";
+    byId("retry-operation").disabled = Boolean(view.operation && view.operation.state === "sending");
+    // Set readiness only after the entries have actually been placed in the document.
+    byId("issue-detail").dataset.issueId = id;
+  }
+
+  function renderCompose(id, closed) {
+    const host = byId("compose"), view = viewFor(id);
+    if (closed) { host.replaceChildren(node("p", "muted", "议题已结束。讨论历史保留。")); host.removeAttribute("data-for"); return; }
+    if (host.dataset.for !== id) {
+      host.replaceChildren(); host.dataset.for = id;
+      const form = node("form"); form.id = "reply-form";
+      const questionLabel = node("label", null, "回复对象"); questionLabel.htmlFor = "reply-question";
+      const select = node("select"); select.id = "reply-question";
+      select.addEventListener("change", () => { if (!view.operation) view.questionId = select.value; });
+      const bodyLabel = node("label", null, "继续讨论"); bodyLabel.htmlFor = "reply-body";
+      const textarea = node("textarea"); textarea.id = "reply-body"; textarea.placeholder = "写下回复，或直接说哪里还不清楚…";
+      textarea.value = view.draft;
+      textarea.addEventListener("input", () => { if (!view.operation) view.draft = textarea.value; });
+      const bottom = node("div", "compose-bottom");
+      bottom.append(node("span", "meta", "保存后交给原 lane，无需回 TUI 重复。"));
+      const send = node("button", "primary", "发送回复"); send.id = "send-reply"; send.type = "submit"; bottom.append(send);
+      form.append(questionLabel, select, bodyLabel, textarea, bottom);
+      form.addEventListener("submit", event => { event.preventDefault(); startReply(id); }); host.append(form);
+    }
+    const select = byId("reply-question");
+    const options = [["", "继续讨论（不指定问题）"], ...view.detail.questions.map(question => {
+      const entry = view.entries.find(item => item.id === question.promptEntryId);
+      return [question.id, (questionLabels[question.status] || question.status) + " · " + (entry ? "#" + entry.seq + " " + entry.body.slice(0, 50) : question.id)];
+    })];
+    if (select.dataset.options !== JSON.stringify(options)) {
+      select.replaceChildren(); for (const [value, label] of options) { const option = node("option", null, label); option.value = value; select.append(option); }
+      select.dataset.options = JSON.stringify(options); select.value = view.questionId;
+    }
+    byId("reply-body").disabled = Boolean(view.operation); select.disabled = Boolean(view.operation); byId("send-reply").disabled = Boolean(view.operation);
+  }
+
+  function markRenderedRead(id) {
+    if (document.visibilityState === "hidden" || selectedId !== id || byId("issue-detail").dataset.issueId !== id) return;
+    const view = viewFor(id), throughSeq = view.through;
+    if (throughSeq <= Math.max(view.readAck, view.detail.thread.readSeq)) return;
+    if (!view.reads.has(throughSeq)) view.reads.set(throughSeq, { operationKey: crypto.randomUUID(), sending: false });
+    const read = view.reads.get(throughSeq);
+    if (read.sending) return;
+    read.sending = true;
+    post(id, "read", { operationKey: read.operationKey, throughSeq }).then(result => {
+      view.readAck = Math.max(view.readAck, result.readSeq); view.readError = "";
+    }).catch(error => { view.readError = "已读位置未确认，将在下次刷新时重试：" + error.message; }).finally(() => {
+      read.sending = false; if (selectedId === id) byId("read-status").textContent = view.readError;
+    });
+  }
+  function startReply(id) {
+    const view = viewFor(id);
+    if (view.operation || selectedId !== id || view.detail.thread.status === "closed") return;
+    if (!view.draft.trim()) { view.notice = "请先填写回复。"; view.warning = true; renderDetail(id); return; }
+    view.operation = { action: "replies", operationKey: crypto.randomUUID(), payload: { body: view.draft, ...(view.questionId ? { questionId: view.questionId } : {}) }, state: "new" };
+    void runOperation(id);
+  }
+  async function runOperation(id) {
+    const view = viewFor(id), operation = view.operation;
+    if (!operation || operation.state === "sending") return;
+    const wasUncertain = operation.state === "uncertain";
+    operation.state = "sending"; view.notice = "正在保存，请稍候…"; view.warning = false; renderDetail(id);
+    try {
+      const result = await post(id, operation.action, { ...operation.payload, operationKey: operation.operationKey });
+      if (!result || result.issueId !== id || typeof result.entryId !== "string") throw new Error("未取得可核对的保存结果");
+      if (operation.action === "replies") { view.draft = ""; view.questionId = ""; }
+      view.operation = null; view.confirmClose = false; view.warning = false;
+      view.notice = operation.action === "replies" ? "已保存，待入箱。请在历史中查看后续交接与处理事实。" : "议题已结束，历史仍可查看。";
+      // The shared composer can now belong to another issue; only reset this issue's controls.
+      if (selectedId === id) { byId("compose").removeAttribute("data-for"); renderDetail(id); }
+      await loadDetail(id, false, true); void loadList();
+    } catch (error) {
+      if (wasUncertain || error.uncertain !== false) {
+        operation.state = "uncertain"; view.notice = "结果未确定：" + error.message + "。正文和操作已保留，请用同一操作重试，或查看后端历史。确认前不能修改或重新发送。";
+      } else { view.operation = null; view.notice = "保存失败：" + error.message + "。草稿已保留，可修改后重试。"; }
+      view.warning = true; renderDetail(id);
+    }
+  }
+
+  for (const button of document.querySelectorAll("[data-filter]")) button.addEventListener("click", () => {
+    filter = button.dataset.filter; listPages = 1; listCursor = null; listItems = []; listVersion++; listLoading = false;
+    for (const tab of document.querySelectorAll("[data-filter]")) tab.setAttribute("aria-pressed", String(tab === button));
+    renderList(); void loadList();
+  });
+  const refresh = () => { void loadList(); if (selectedId) void loadDetail(selectedId); };
+  byId("refresh").addEventListener("click", refresh);
+  byId("load-threads").addEventListener("click", () => { void loadList(true); });
+  byId("load-history").addEventListener("click", () => { if (selectedId) void loadDetail(selectedId, true); });
+  byId("close-issue").addEventListener("click", () => { if (selectedId) { const view = viewFor(selectedId); if (!view.operation) { view.confirmClose = true; renderDetail(selectedId); } } });
+  byId("cancel-close").addEventListener("click", () => { if (selectedId) { viewFor(selectedId).confirmClose = false; renderDetail(selectedId); } });
+  byId("confirm-close").addEventListener("click", () => {
+    if (!selectedId) return;
+    const view = viewFor(selectedId);
+    if (view.operation || !view.confirmClose || view.detail.thread.status === "closed") return;
+    view.operation = { action: "close", operationKey: crypto.randomUUID(), payload: { body: "用户在议题页面明确确认结束讨论。" }, state: "new" };
+    void runOperation(selectedId);
+  });
+  byId("retry-operation").addEventListener("click", () => { if (selectedId) void runOperation(selectedId); });
+  byId("check-history").addEventListener("click", () => { if (selectedId) void loadDetail(selectedId, false, true); });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState !== "hidden") refresh(); });
+  void loadList();
+  setInterval(() => { if (document.visibilityState !== "hidden") refresh(); }, 5000);
+})();
+</script>
+</body>
+</html>

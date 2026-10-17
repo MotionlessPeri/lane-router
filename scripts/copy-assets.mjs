@@ -4,10 +4,9 @@ import { fileURLToPath } from "node:url";
 
 /**
  * `tsc` emits the files it compiles and nothing else, so anything shipped beside the code has to
- * be carried here. Today that is the dashboard page, which is a real HTML file on purpose: keeping
- * it out of a TypeScript string is what makes it editable as a page.
+ * be carried here. These pages stay real HTML files so they can be edited as pages.
  */
-const ASSETS = ["process/dashboard.html"];
+const ASSETS = ["process/dashboard.html", "ui/issues/index.html"];
 
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 
