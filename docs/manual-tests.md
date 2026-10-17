@@ -869,7 +869,7 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 ## ZCode CLI
 
-ZCode 会话走 Claude Channel 这条已验证的链路：同一个 lane MCP server（ZCode 是标准 MCP client，stdio 注册即得五件工具）、同一套 lifecycle 上报与 join。身份是这条链路唯一的新东西——**ZCode 给 MCP 子进程不传任何会话身份**（initialize 参数与 env 均已实测确认），会话 id 只在 hook 侧存在（stdin 的 `session_id` 与 env 的 `CLAUDE_CODE_SESSION_ID`/`ZCODE_SESSION_ID`）。因此 join key 取共享父进程：同一 app-server 既 spawn 会话的 MCP server 又 spawn 它的 hook，`process.ppid` 相等即配对。
+ZCode 会话走 Claude Channel 这条已验证的链路：同一个 lane MCP server（ZCode 是标准 MCP client，当前 stdio 入口显式提供九项产品工具）、同一套 lifecycle 上报与 join。身份是这条链路唯一的新东西——**ZCode 给 MCP 子进程不传任何会话身份**（initialize 参数与 env 均已实测确认），会话 id 只在 hook 侧存在（stdin 的 `session_id` 与 env 的 `CLAUDE_CODE_SESSION_ID`/`ZCODE_SESSION_ID`）。因此 join key 取共享父进程：同一 app-server 既 spawn 会话的 MCP server 又 spawn 它的 hook，`process.ppid` 相等即配对。
 
 **前提：** 已构建 `dist/`；`~/.zcode/cli/config.json` 同时注册两者（MCP server 见下；hook 必须 `type: "process"`——`type: "command"` 的 shell 会插在中间换掉父进程，join 从此配不上对）；**参与的会话都起于配置之后**（与 Claude 侧同因：MCP/hook 配置在进程启动时载入）。
 
