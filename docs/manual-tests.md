@@ -1,6 +1,109 @@
 # Lane Router V1 手工验证
 
-自动测试覆盖五项工具、文件 mailbox、SQLite 对账、Claude Channel transport、Codex App Server 协议、按需启动与 launcher 参数。下面各项只验证真实 CLI、模型 provider 和交互式 TUI 的边界，不能用 fake backend 结果代替。
+自动测试覆盖通信工具、议题工具与 HTTP/CLI、文件 mailbox、SQLite 对账、Claude Channel transport、Codex App Server 协议、按需启动与 launcher 参数。通信目录保留原五项工具；默认独立产品显式组合九项（五项通信、四项议题）。当前 Claude/ZCode stdio MCP 入口也显式选择九项产品目录，`createLaneMcpServer` 工厂本身默认五项通信目录。Router 的 `issues:false` 控制 Router/Codex 装配，不会动态改变已启动 stdio MCP 的工具列表。下面的现场用例验证真实 CLI、模型 provider、浏览器和交互式 TUI 的边界，不能用 fake backend 或 HappyDOM 结果代替。既有“最后验证”保留当时版本与事实，不表示新版议题功能已经现场通过。
+
+## 用户议题收件箱：使用与操作
+
+议题只收录已完成的用户问题答复（保留原问题），以及需要用户决定的主动提问。由已绑定 lane 的 agent 发布；普通进度、整份 TUI 对话不收录。用户从后台的“议题收件箱”链接或同一 Router 的 `/issues` 打开看板，在既有议题里回复，不在网页创建议题或选择任意收件 lane。正常 TUI 仍是主要工作入口。
+
+默认列表“待我处理”包含等待用户的问题和未读 lane 内容；另可查看进行中、全部、已结束历史。打开详情、翻页或刷新只把实际展示的内容标为已读。**已读不等于回答**；用户要求解释后变为等 lane，lane 给出解释后仍可等待用户确认。答复内容和问题的明确解决分别记录，不能根据“看过了”“工作完成”推断议题结束。
+
+网页回复保存成功后无需回 TUI 重复。**保存、入箱、处理确认是三件事**：保存事务同时持久化正文和交接任务；`pending` 表示尚未确认入箱，`accepted` 表示 core mailbox 已接收，`blocked` 保留原目标不可投递原因；只有 `processedAt` 有值才表示 agent 已记录业务处理回执。在线、通知已发送、普通 `lane_ack` 均不能替代该回执。busy/offline 时保留输入，由原通知泵在后续机会提醒，不自动开 TUI 或反复新建邮件。只有用户可明确结束议题，结束后可查历史，不能继续新增讨论；既有投递仍可补回执。
+
+### 四项议题工具
+
+工具调用身份取自当前已绑定会话，只能读取或修改本 lane 的议题；不用参数指定 owner、backend、generation、source 或 `confirmed`。业务写入均使用非空 `operationKey`；同一操作重试保持同键同内容，同键异内容返回 `OPERATION_CONFLICT`。RPC call ID 不是业务操作键。
+
+| 工具 | 参数与用途 |
+|---|---|
+| `lane_issue_publish` | `operationKey`、`title`、`kind`、`body`。`kind: "answer"` 必须另带 `originalQuestion`；`kind: "question"` 不带该字段。只发布两类议题。 |
+| `lane_issue_read` | 详情使用 `issueId`，可加 `afterSeq`、`limit`；列表不带 `issueId`，可加 `filter`（`attention/open/closed/all`）、`before: {updatedAt,id}`、`limit`，agent 列表默认 `all`。分页上限 200，默认 50。读取不代用户标已读。 |
+| `lane_issue_append` | `operationKey`、`issueId`、`kind`、`body`，可带 `questionId`。`kind` 为 `answer/explanation/question/tui_user`；`explanation` 必须关联问题，新增 `question` 不带旧问题 ID。相关 TUI 用户原话用 `tui_user`，注明来源、原样保存，不产生回声投递。 |
+| `lane_issue_update` | 公共参数为 `operationKey`、`issueId`、`action`。`resolve_question` 另带 `questionId`，`status: "answered"` 需 `answerEntryId`，`status: "not_needed"` 需 `reason`；`record_processed` 另带 `deliveryId`；专门的 `record_tui_close` 另带用户实际结束原话 `body`。没有普通 agent close 或任意状态更新。 |
+
+agent 收到 mailbox 提醒后先读完整正文，使用其中的 `issueId` 调 `lane_issue_read`，查询 `deliveryId` 的处理事实后在原任务内处理。完成业务处理后用 `record_processed` 记录该投递，再用原 `lane_ack` resolve 邮件。重复提醒不等于允许重复业务副作用；这些记录不保证外部业务副作用恰好一次。补答复用 `append`，需要明确解决问题时再用 `resolve_question`。TUI 中用户确实说要结束时才用 `record_tui_close`，不能把文件、资源文本或 agent 自己的总结当成用户结束指令。
+
+### 旧 Codex 会话的 JSON 文件 CLI
+
+新 Codex thread 的动态工具由启动时目录注入；已经存在的 thread 不假设能热刷新。旧会话可在原 Codex 进程中使用 `lane-router-lane issue <publish|read|append|update|record-tui-close> --json-file <path>`，经过同一 loopback RPC、工具解析与业务服务。身份只来自 `CODEX_THREAD_ID` 和当前 cwd；缺失或未绑定时拒绝，不手填其他会话身份。
+
+用 agent 的普通文件编辑工具创建 UTF-8 文件 `issue-publish.json`（不要在 PowerShell 多行字符串中拼 JSON）：
+
+```json
+{
+  "operationKey": "decision-20261018-1",
+  "title": "需要确认方案",
+  "kind": "question",
+  "body": "请选择 A 或 B，并说明取舍。"
+}
+```
+
+```powershell
+lane-router-lane issue publish --json-file ./issue-publish.json
+lane-router-lane issue read --json-file ./issue-read.json
+lane-router-lane issue update --json-file ./issue-processed.json
+lane-router-lane issue record-tui-close --json-file ./issue-tui-close.json
+```
+
+同样用普通编辑工具创建其余文件；把示例 ID 换成实际返回值：
+
+```json
+{"issueId":"<issueId>","afterSeq":0,"limit":50}
+```
+
+```json
+{"operationKey":"processed-1","issueId":"<issueId>","action":"record_processed","deliveryId":"<deliveryId>"}
+```
+
+```json
+{"operationKey":"tui-close-1","issueId":"<issueId>","body":"用户原话：这个议题结束。"}
+```
+
+`record-tui-close` 文件不带 `action`，专门 verb 自己选择该操作；普通 `update` 则按工具契约填写 `action`。保留成功结果和原操作文件，结果未知时用原文件、原键重试，不创建新键猜测重发。
+
+### HTTP、结果未知与历史
+
+`GET /issues` 返回页面。以下 API 的成功读响应为 `{result, actionToken}`，成功写响应为 `{result}`：
+
+| 请求 | 参数 |
+|---|---|
+| `GET /issues/api/threads` | `filter` 默认 `attention`，可选 `limit`；下一页同时带 `beforeUpdatedAt`、`beforeId`。 |
+| `GET /issues/api/threads/:id` | 可选 `afterSeq`、`limit`；详情给出 `displayedThroughSeq` 与 `hasMore`。 |
+| `POST /issues/api/threads/:id/replies` | `operationKey`、`body`，可选 `questionId`。 |
+| `POST /issues/api/threads/:id/read` | `operationKey`、`throughSeq`，只推进实际展示过的边界。 |
+| `POST /issues/api/threads/:id/close` | `operationKey`、`body`，记录用户明确结束。 |
+
+写请求为 `application/json`，正文另带当前读响应的 `actionToken`；`Origin` 必须是当前 Router origin，`x-lane-router-action` 分别为 `issues-reply`、`issues-read`、`issues-close`。token 在进程重启后更新，先重新读取。没有网页 create、任意 target 或浏览器调用机器 `/rpc` 的入口；未知路径不消费正文，首版不扩 DSH/Native Host 白名单。
+
+| HTTP / code | 含义与处理 |
+|---|---|
+| `400 INVALID_INPUT/INVALID_REFERENCE` | 参数、分页或关联有误；修正输入。JSON、类型、大小等协议错误也为 400，未必带业务 code。 |
+| `403` | origin、action header 或 token 校验未通过；不能靠伪造身份绕过。 |
+| `404 ISSUE_NOT_FOUND` | 议题不存在；模块从未装配时整个 `/issues` 入口为 404。 |
+| `409 ISSUE_CLOSED/LANE_UNAVAILABLE/OPERATION_CONFLICT` | 已结束、原 lane 缺失/归档、或同键不同内容；读取历史和事实，不自动改挂同名 lane。 |
+| `503 ISSUES_UNAVAILABLE` | 已装配模块无法打开或恢复，core 可继续用；保留故障库，由受控维护处理。 |
+| `500`、超时、断线、缺失成功结果 | 结果可能已经保存，不能显示确定失败或自动新键发送；保留原键和原正文，重新 GET 历史，并在可用时同键显式重试。 |
+
+页面的发送中/结果未知状态会冻结本次键和内容，切换议题不会把它改成另一份回复。关闭页面不取消已经保存的交接；页面没有浏览器持久投递队列。刷新或重开后以后端历史为准；若原键已不可得，先核对历史，不能直接新建键重发。已结束历史与每轮原文、关联、解决事件和处理事实均保留。
+
+### 停止、恢复、备份与回退
+
+实际路径以实现为准：`dataRoot/router.sqlite` 是 core，`dataRoot/issues.sqlite` 是模块（早期设计草稿的子目录路径不是当前路径）。模块在自己的 `issue_schema_version` 管版本，不改 core schema。默认独立产品显式装配模块；`runRouterProcess({issues:false})` 是进程内装配选项，**不是**现有持久配置或 CLI 热开关。
+
+维护由外部具名操作对话核对准确运行入口、PID/版本、在用配置、备份位置和允许中断窗口后执行。**操作方须先让所有写入方停止提交新写入**，再发起受控关闭并等待完成；当前没有新增自动 stop-ingress 机制。`main` 的实际资源关闭顺序是先等模块 `close()` 停止调度、排空在途交接并关模块库，再关 HTTP server、Host/runtime 和 core 库；不能以该顺序代替前述停写入条件。恢复时在 core mailbox 对账后 `start()` 恢复待交接记录。临时停用通过受控生命周期重新装配通信-only 进程，恢复时重新显式装配；不删数据库、不后台热启第二份模块、不从本手册推断一个不存在的维护命令。
+
+在停止写入并排空后，把两个 SQLite 数据库、相关 `-wal`/`-shm` 状态及 mailbox/core 数据作为**同一一致备份集**保存；若数据库已干净关闭且侧文件消失，记录该事实。不要在运行中随意复制单个主库文件，也不独立丢弃 WAL。恢复/回退前再保留当前一致集，使用同一备份集恢复两库和对应 mailbox/core 数据；回退构建与数据恢复是两个不同动作，不用旧代码强开未来模块版本。只恢复一库可能失去跨库关联：历史保留，原稳定 lane ID 缺失/归档时拒绝误投递，绝不自动改挂同名新 lane。本功能不新增通用 backup 工具。
+
+### 议题功能现场验收（尚未执行）
+
+隔离自动测试已验证真实服务/双库/mailbox、HTTP/RPC/CLI 与 fake backend 的业务往返，以及构建产物 HTML 的 DOM/HTTP 行为；它不证明真实模型、客户端工具刷新、浏览器视觉或在用部署。执行者应记录 candidate commit、构建 manifest、运行入口/内存版本、所选真实 lane、模型额度与中断窗口：
+
+1. 在已批准窗口完成一致备份、受控部署和启动，先检查 core 与历史可读；不要按示例路径覆盖配置、DB 或 token。
+2. 新 Codex thread 核对九项动态工具；旧 Codex thread 使用上述 CLI 同服务往返，不要求动态热刷新。Claude/ZCode 在外部受控刷新 MCP 后核对九项工具并真实发布、查询、补答、处理回执；各记录实际刷新方式与结果。
+3. 真实浏览器打开 `/issues`，观察宽/窄屏列表与详情、文本可读和转义、分页、未读/待回答分离、问题关联、切换草稿、明确结束的取消/确认、关闭历史无回复入口。后台/隐藏期间新内容不标读，重新可见后只推进实际显示内容。
+4. 真实用户发出多行回复，目标 lane 读完整 mailbox 与议题、处理并回执，网页新答复可见，用户结束；另核 busy/offline 保留和恢复。断线时核对结果未知、历史和同键重试不重复入箱。
+
+当前没有真实浏览器视觉/用户交互验收记录（CUA 浏览器不可用）；HappyDOM 不能勾销此项。真实 Codex 新动态工具/旧 CLI、Claude/ZCode 刷新往返、部署/重启和真实模型额度均留给外部具名执行，不能将本节步骤或旧“最后验证”改写成已经通过。
 
 ## Claude Channel
 
@@ -13,16 +116,16 @@
 5. 退出 Claude，再发送一条消息；恢复同一 Claude session 后确认 pending 消息再次得到提醒。
 6. 在旧 turn 运行期间从新对话请求接替同一 lane，确认接替等待 `Stop`，随后 generation 增加且旧 session 不能再发送或 ack。
 
-预期：MCP 只列出 `lane_directory`、`lane_attach_current`、`lane_send`、`lane_ack`、`lane_restore_project`。MCP 进程使用 Claude 自动提供的 `CLAUDE_CODE_SESSION_ID`；hook 的 `session_id` 与它对应。通知不携带消息正文，正文只在 mailbox 文件中。
+预期：五项通信工具为 `lane_directory`、`lane_attach_current`、`lane_send`、`lane_ack`、`lane_restore_project`。`createLaneMcpServer` 工厂默认该五项目录；当前 stdio 入口显式再组合上述四项议题工具，共九项，需按议题现场用例实际刷新验证。`issues:false` 不会把 stdio MCP 已发布目录同步切成五项。MCP 进程使用 Claude 自动提供的 `CLAUDE_CODE_SESSION_ID`；hook 的 `session_id` 与它对应。通知不携带完整正文，完整正文在 mailbox 文件中。
 
 ## Codex remote TUI
 
 前提：已构建 `dist/`，`codex --version` 与实验性 App Server schema 检查通过。
 
-1. 运行 `lane-router-codex`，确认它按需启动 Router process、打开 stock Codex remote TUI，并由本地 adapter 在 TUI 的 `thread/start` 中注入五项 dynamic tools；不得先创建空 thread 再 resume。
+1. 运行 `lane-router-codex`，确认它按需启动 Router process、打开 stock Codex remote TUI，并由本地 adapter 在 TUI 的 `thread/start` 中注入当前装配的 dynamic tools：通信-only 五项，默认独立产品九项；不得先创建空 thread 再 resume。旧 thread 不假设动态工具热刷新，议题操作使用同服务的 JSON 文件 CLI。
 2. 在对话中查询目录、取得用户确认并 attach 一条 lane。
 3. 从另一条 lane 发送 normal 消息。目标 idle 时应由 `turn/start` 唤醒；busy 时应保持 pending，直到 turn 完成事件提供下一次处理机会。
-4. 在目标 busy 时发送 correction，确认 App Server 使用 `turn/steer`，且通知只包含 mailbox 路径和 message ID。
+4. 在目标 busy 时发送 correction，确认 App Server 使用 `turn/steer`；通知包含 mailbox 路径、message ID 及索引/摘要元数据，不包含完整正文。
 5. 退出 TUI 后发送一条消息，确认文件保持 pending。
 6. 运行 `lane-router-codex resume <thread-id>`，确认恢复完整 thread 历史，并再次提醒 pending mailbox。
 

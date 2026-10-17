@@ -6,6 +6,8 @@
 
 **Architecture:** 同进程显式装配议题模块；业务服务、独立 SQLite、工具与 HTTP 适配、UI 分层。复用已实现的 `UserMessageDelivery` 与 mailbox/通知泵，仅补窄的 lane 身份查询和宿主工具组合；通信 core 不依赖议题业务。
 
+**实现路径：** core 为 `dataRoot/router.sqlite`，议题为 `dataRoot/issues.sqlite`；以当前实现为准，不使用早期设计草稿的议题子目录路径。议题模块独立管理版本，不更改 core schema。`issues:false` 仅是进程内显式装配选项，不是持久配置或 CLI 热开关。
+
 **Tech Stack:** 现有 TypeScript/Node.js、`better-sqlite3`、Zod、Vitest、`happy-dom`、原生 HTML/CSS/JavaScript；不加依赖、前端框架或新服务。
 
 ---
@@ -159,24 +161,30 @@
 
 **Files:** 新建 `src/ui/issues/index.html`、`tests/modules/issues/ui.test.ts`；修改模块 `http.ts`、`src/process/dashboard.html`、`scripts/copy-assets.mjs`，扩展 `tests/process/dashboard-render.test.ts`。
 
-- [ ] 先用 `happy-dom` 写失败交互测试：列表/详情切换，未读答复与仍待回答区分，同一议题回复关联，待 lane 状态，明确结束/取消，已结束可查且无回复入口，正文转义，后端保存失败与结果未确定。
-- [ ] 从已选[普通浏览器样稿](../mockups/issue-inbox-layout-browser.html)实现原生 HTML 页面，不复制演示数据/模拟发送/内嵌 React runtime。UI 不导入存储或推导业务状态；提交期间保留同一操作键，后端成功前不清空并显示成功。
-- [ ] 使用普通读取刷新后端列表和选中详情，不新增 WebSocket/SSE。读游标仅推进到本次实际展示序号；后台到达且未展示的新内容保持未读。不存浏览器投递队列，不因缺回执重发。
-- [ ] 原后台只增加进入 `/issues` 的链接；模块 HTTP 按资源路径提供页面，构建脚本复制并读回核对 `ui/issues/index.html`。构建只在隔离树执行。
-- [ ] 运行 UI、HTTP 和旧后台渲染测试，`npm run typecheck`、隔离树 `npm run build`；在构建产物上的隔离 server 请求页面及执行交互，确认不是只从源目录可用。自查并提交。
+- [x] 先用 `happy-dom` 写失败交互测试：列表/详情切换，未读答复与仍待回答区分，同一议题回复关联，待 lane 状态，明确结束/取消，已结束可查且无回复入口，正文转义，后端保存失败与结果未确定。
+- [x] 从已选[普通浏览器样稿](../mockups/issue-inbox-layout-browser.html)实现原生 HTML 页面，不复制演示数据/模拟发送/内嵌 React runtime。UI 不导入存储或推导业务状态；提交期间保留同一操作键，后端成功前不清空并显示成功。
+- [x] 使用普通读取刷新后端列表和选中详情，不新增 WebSocket/SSE。读游标仅推进到本次实际展示序号；后台到达且未展示的新内容保持未读。不存浏览器投递队列，不因缺回执重发。
+- [x] 原后台只增加进入 `/issues` 的链接；模块 HTTP 按资源路径提供页面，构建脚本复制并读回核对 `ui/issues/index.html`。构建只在隔离树执行。
+- [x] 运行 UI、HTTP 和旧后台渲染测试，`npm run typecheck`、隔离树 `npm run build`；在构建产物上的隔离 server 请求页面及执行交互，确认不是只从源目录可用。自查并提交。
+
+Task 7 已完成独立规格/质量审查，无 finding；定向测试为 5 文件、71 项（其中 UI 19 项），质量审查另补跑 UI 19 项通过。隔离编译产物实际 HTTP 返回的页面已执行 HappyDOM 交互，源/产物 HTML 的 SHA-256 均为 `7ef5077a1c116d9bebf5d5cc2a39b874c1a05d43f4ea6aa17cdebd9305d88fda`。这些勾选只表示代码、DOM/HTTP 与资源交付，真实浏览器视觉和用户实际页面观察尚未验；当前 CUA 浏览器不可用，不以 HappyDOM 替代。
 
 ### Task 8：跨适配验收、文档与交付
 
-**Files:** 新建 `tests/e2e/issue-inbox.test.ts`、`tests/fixtures/issues/router.ts`；修改 `docs/manual-tests.md`、`docs/README.md` 及本计划。
+**Files:** 新建 `tests/e2e/issue-inbox.test.ts`；扩展 Task 3 已建立的 `tests/fixtures/issues/router.ts`；修改 `docs/manual-tests.md`、`docs/README.md` 及本计划。
 
-- [ ] 先写端到端失败场景：工具发布 → HTTP 列表/详情 → 用户回复 → 持久入箱 → 假 agent 查询/处理/回执 → 新答复 → 用户结束；另覆盖 TUI 同步、busy/offline、重开双库恢复、HTTP 断线、同名新 lane 隔离。不调用生产 `ensureRouter` 或真实模型。
-- [ ] fixture 使用实际服务、双库、HTTP/CLI/工具组合，只有模型/backend 为假；加入 core-only/损坏模块库启动、worker 退出无残留、资源复制、依赖方向检查。修正本范围问题，保留最初失败与修复后输出。
-- [ ] 完整执行隔离树 `npm test -- --maxWorkers=2 --testTimeout=30000`、`npm run typecheck`、`npm run build`、`git diff --check`。出现失败先核根因，保留原日志，不靠重复到绿掩盖波动，不修改默认配置。结果报告使用实际文件数/测试数，不预填新增数量。
-- [ ] 更新操作说明、工具参数、CLI JSON 示例、错误与状态语义、停止/恢复模块的方法、双库备份及回退边界。备份覆盖两个数据库一致快照及相关 WAL 状态；不增加通用备份命令。单库恢复造成引用缺失时保留历史、拒绝错误投递，不自动改挂。
-- [ ] 给外部部署对话准备准确提交/构建资源清单与 hashes、在用数据保护与回退条件；需要外部实施实际成对备份、受控部署/重启和 Codex 新动态工具/旧 CLI、Claude/ZCode MCP 刷新与真实往返验收。真实模型额度、指定 lane、可接受中断需在该外部操作中确定，不从本对话试探。
+- [x] 先写端到端场景：工具发布 → HTTP 列表/详情 → 用户回复 → 持久入箱 → 假 agent 读完整正文、查询/处理/回执 → 新答复 → 用户结束；另覆盖 TUI 同步、busy/offline、重开双库恢复、HTTP 断线、同名新 lane 隔离。不调用生产 `ensureRouter` 或真实模型。已有行为可直接通过，不删除既有实现伪造红灯。
+- [x] fixture 使用实际服务、双库、HTTP/CLI/工具组合，只有模型/backend 为假；复用 core-only/损坏模块库启动、worker 退出无残留、资源复制、依赖方向检查。修正本范围问题，保留最初失败与修复后输出。
+- [x] 完整执行隔离树 `npm test -- --maxWorkers=2 --testTimeout=30000`、`npm run typecheck`、`npm run build`、`git diff --check`。出现失败先核根因，保留原日志，不靠重复到绿掩盖波动，不修改默认配置。结果报告使用实际文件数/测试数，不预填新增数量。
+- [x] 更新操作说明、工具参数、CLI JSON 示例、错误与状态语义、停止/恢复模块的方法、双库备份及回退边界。备份覆盖两个数据库一致快照及相关 WAL 状态；不增加通用备份命令。单库恢复造成引用缺失时保留历史、拒绝错误投递，不自动改挂。
+- [x] 给外部部署对话准备准确提交/构建资源清单与 hashes、在用数据保护与回退条件；精确候选提交与完整产物 manifest 在本地提交后写入私人交接资料，避免 tracked 文档自引用提交。需要外部实施实际成对备份、受控部署/重启和 Codex 新动态工具/旧 CLI、Claude/ZCode MCP 刷新与真实往返验收。真实模型额度、指定 lane、可接受中断需在该外部操作中确定，不从本对话试探。
 - [ ] 完成独立正确性/范围审查和走查，回报隔离证据、未验现场项与剩余风险。按当前持续实现授权整合已验证的任务自有本地结果；不 push、不部署、不重启，不宣称现场可用。
 
 **U4 完成条件：** 实现与隔离端到端证据齐全，用户确认实际页面交互，交付可由外部对话部署的版本与准确验收步骤；现场通过与否单列，不作为本 lane 已经执行的事实。
+
+Task 8 E2E 共 6 项：首轮完整往返/TUI 两项通过，其余四项在 fixture 重复关闭 server 的清理阶段失败（`Server is not running`）；只修正 fixture 关闭后同组 6 项通过，无产品代码修改或产品 red 声称。HTTP 断线在测试 transport 收到真实服务提交后的响应时销毁消费者 socket，客户端结果未知；重开双库后读取精确原文、同键返回原 entry/delivery ID，最终只有一封邮件。没有生产故障注入 API。启动、worker 生命周期和依赖方向复用既有实际测试，资源复制复用既有构建读回及 compiled UI 证据，不依赖本地旧 `dist` 作为新增测试前提。
+
+Task 8 全套首轮为 80 文件中 79 通过、1 失败，857 项中 855 通过、2 失败；两项旧 dashboard 用例都在 Fetch 发出请求前因 `bad port` 拒绝，尚未执行页面或路由断言。独立诊断在同一真实隔离 server 的端口 6000 复现 Fetch 拒绝，同时 `node:http` 返回 200；原失败分配端口未入日志，不推断其确切值。未改产品、断言或测试配置，原文件定向 10 项通过后完整复跑一次，80 文件、857 项全部通过。类型检查、隔离构建与 diff 检查通过；每次命令和真实 exit 的原始日志均保留在私人交接资料中。
 
 ## 4. 验收对照与范围增量审查
 
@@ -193,4 +201,4 @@
 
 不纳入换号、资源讨论、图交互、动态插件管理、远程多用户、附件、全文搜索、主动通知、自动重开 TUI；不为未纳入项建立未来待办。审查发现若要求这些新能力或改变已确认语义，先报告差异，不将其藏进“修 review”步骤。
 
-状态：计划和连续实现已获用户批准；正在准备隔离工作树与 U1 基线。没有部署或共享重启授权。
+状态：计划和连续实现已获用户批准。隔离树为 `C:/Users/KrabsXD/.config/superpowers/worktrees/lane-router/issue-inbox-20261018`，纳入已批准文档后的起点为 `bb8a726957f9471450e87d6988089e8a889c5b70`；原始代码基线历史保持不变。Tasks 1–7 已实现并通过独立规格/质量审查；Task 8 已完成 E2E、操作文档、隔离全套和构建检查，产物清单与部署交接随本地候选提交提供。最终独立正确性、范围、整体质量及走查由主协调接续，本地整合尚未做。真实浏览器/用户观察、真实客户端工具刷新与模型往返、外部受控部署和重启均未验，没有部署或共享重启授权。

@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 import { vi } from "vitest";
 
+import { bindBuiltinTools } from "../../../src/application/builtin-tools.js";
+import { runIssueCli } from "../../../src/modules/issues/cli.js";
 import { IssuesService, openIssueStore } from "../../../src/modules/issues/index.js";
+import { LocalRouterClient } from "../../../src/process/local-client.js";
+import { LocalRouterServer } from "../../../src/process/local-server.js";
 import { BackendRegistry, type Notification, type PlatformBackend } from "../../../src/router/backend.js";
 import { openRouterDatabase } from "../../../src/router/database.js";
 import { MailboxStore } from "../../../src/router/mailbox-store.js";
@@ -13,6 +17,7 @@ import { NotificationPump } from "../../../src/router/notification-pump.js";
 import { RouterCore } from "../../../src/router/router-core.js";
 import { RouterStateStore } from "../../../src/router/state-store.js";
 import type { CallerContext } from "../../../src/router/types.js";
+import { ToolService } from "../../../src/tools/tool-service.js";
 
 /** Real independent stores and mailbox; only the model backend is a test double. */
 export function setupIssueRouter() {
@@ -75,6 +80,36 @@ export function setupIssueRouter() {
       const target = realpathSync(root);
       if (dirname(target) !== temporaryRoot || !basename(target).startsWith("lane-issue-delivery-")) throw new Error("Unsafe fixture cleanup");
       rmSync(target, { recursive: true, force: true });
+    },
+  };
+}
+
+/** Real loopback RPC/HTTP and ordinary JSON-file CLI over the same composed service. */
+export async function startIssueAdapters(x: ReturnType<typeof setupIssueRouter>) {
+  const tools = new ToolService(x.core);
+  const applicationTools = bindBuiltinTools(tools, x.service);
+  const server = new LocalRouterServer({ tools, applicationTools, issues: { service: x.service },
+    codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: randomUUID() });
+  const { url } = await server.start();
+  let closed = false;
+  const client = new LocalRouterClient(async () => url);
+  const get = (path = "/issues/api/threads") => fetch(`${url}${path}`);
+  const initial = await get();
+  const { actionToken } = await initial.json() as { actionToken: string };
+  return {
+    url, client, get, applicationTools,
+    async close() { if (!closed) { closed = true; await server.close(); } },
+    call: (name: string, input: Record<string, unknown>) => client.call(name, input, x.caller),
+    post: (issueId: string, action: "replies" | "read" | "close", input: object) => fetch(`${url}/issues/api/threads/${issueId}/${action}`, {
+      method: "POST", headers: { origin: url, "content-type": "application/json", "x-lane-router-action": `issues-${action === "replies" ? "reply" : action}` },
+      body: JSON.stringify({ actionToken, ...input }),
+    }),
+    async cli(verb: string, input: object) {
+      const file = join(x.root, `cli-${randomUUID()}.json`);
+      writeFileSync(file, JSON.stringify(input));
+      let output = "";
+      await runIssueCli([verb, "--json-file", file], { client, env: { CODEX_THREAD_ID: x.caller.conversationId }, cwd: x.root, write: text => { output += text; } });
+      return JSON.parse(output) as unknown;
     },
   };
 }
