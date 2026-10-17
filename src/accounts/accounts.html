@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>账号切换 · 本机工作台</title><link rel="stylesheet" href="/accounts.css"><script src="/accounts.js" defer></script></head>
+<body><main>
+  <header><span class="eyebrow">本机工作台</span><h1>账号切换</h1><p>一次授权，同步 Company 与 Codex lane。</p><span id="connection" class="badge">正在连接后台</span></header>
+  <section aria-labelledby="account-title"><div class="section-heading"><div><h2 id="account-title">已授权账号</h2><p>选择账号后，现有回合会先运行完毕。</p></div><button id="add">添加账号</button></div>
+    <div id="profiles" class="profiles" role="radiogroup" aria-label="已授权账号"></div>
+    <p id="empty" class="empty">还没有保存的账号。点击“添加账号”，在官方页面完成授权。</p>
+    <div class="actions"><button id="switch" class="primary" disabled>同步切换</button><button id="reauthorize" disabled>重新授权</button><button id="cancel" hidden>取消等待</button></div>
+  </section>
+  <section aria-labelledby="runtime-title"><h2 id="runtime-title">运行端</h2><div id="consumers" class="consumers"></div></section>
+  <section class="status-box" aria-live="polite"><h2 id="status-title">准备就绪</h2><p id="status-detail">添加或选择一个账号开始。</p><p id="action-error" class="error" hidden></p><button id="cancel-login" hidden>取消授权</button></section>
+  <footer>授权凭据由本机后台与系统凭据库保管。切换保留原会话；运行端离线时会显示未完成。</footer>
+</main></body></html>

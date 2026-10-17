@@ -24,7 +24,8 @@ export interface TurnSteerResult { readonly turnId: string }
 export type ServerMessage =
   | Readonly<{ kind: "response"; id: JsonRpcId; result?: unknown; error?: Readonly<{ code: number; message: string; data?: unknown }> }>
   | Readonly<{ kind: "notification"; method: string; params: Readonly<Record<string, unknown>> }>
-  | Readonly<{ kind: "request"; id: JsonRpcId; method: "item/tool/call"; params: DynamicToolCallParams }>;
+  | Readonly<{ kind: "request"; id: JsonRpcId; method: "item/tool/call"; params: DynamicToolCallParams }>
+  | Readonly<{ kind: "request"; id: JsonRpcId; method: "account/chatgptAuthTokens/refresh"; params: Readonly<Record<string, unknown>> }>;
 
 export function decodeServerMessage(input: unknown): ServerMessage {
   const value = record(input, "message");
@@ -42,6 +43,11 @@ export function decodeServerMessage(input: unknown): ServerMessage {
   if (hasMethod && value.method === "item/tool/call") {
     if (!hasId) throw new ProtocolDecodeError("item/tool/call requires an id");
     return { kind: "request", id: value.id as JsonRpcId, method: "item/tool/call", params: decodeDynamicToolCall(value.params) };
+  }
+  if (hasId && value.method === "account/chatgptAuthTokens/refresh") {
+    const params = record(value.params, "auth refresh params");
+    if (params.reason !== "unauthorized" || (params.previousAccountId !== null && typeof params.previousAccountId !== "string")) throw new ProtocolDecodeError("invalid auth refresh request");
+    return { kind: "request", id: value.id as JsonRpcId, method: "account/chatgptAuthTokens/refresh", params };
   }
   if (hasMethod && !hasId) {
     const params = record(value.params, `${value.method}.params`);

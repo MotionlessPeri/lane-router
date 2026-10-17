@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
  * be carried here. Today that is the dashboard page, which is a real HTML file on purpose: keeping
  * it out of a TypeScript string is what makes it editable as a page.
  */
-const ASSETS = ["process/dashboard.html"];
+const ASSETS = ["process/dashboard.html", "accounts/accounts.html", "accounts/accounts.js", "accounts/accounts.css"];
 
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 

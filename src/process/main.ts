@@ -96,6 +96,7 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
     },
     command: { executable: process.env.CODEX_EXE ?? "codex" },
     capabilityCacheDir: join(dataRoot, "cache"),
+    accountConnectionFile: process.env.LANE_ROUTER_ACCOUNTS_CONNECTION,
   });
   let server: LocalRouterServer | undefined;
   const discoveryPath = join(dataRoot, "discovery.json");
