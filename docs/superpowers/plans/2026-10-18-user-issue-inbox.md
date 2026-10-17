@@ -108,11 +108,11 @@
 
 **Files:** 新建 `src/modules/issues/delivery.ts`、`tests/modules/issues/delivery.test.ts`、`tests/modules/issues/recovery.test.ts`；修改模块 `store.ts`、`service.ts`、`index.ts` 及 fixture。
 
-- [ ] 新增失败测试：保存后未调用投递即退出；core 入箱成功但模块尚未记结果；文件先写/索引中断；通知失败；ACK 后重试；归档后原结果恢复；同名新 lane 不能接收旧回复。
-- [ ] 使用持久库重开、可注入故障点、可控时间验证，不用真实模型或脆弱的固定时长 sleep；实际隔离 `RouterCore`/mailbox 交接至少一条，不能全用假投递掩盖底座契约。
-- [ ] 运行上述两套测试确认红；实现同进程单次消费、启动恢复及有上限的退避间隔。已知归档/missing 等目标拒绝保留记录及原因，不空转；不自动改目标、开 TUI 或新建投递。
-- [ ] 每次调用固定 `target: {laneId}`、来源、正文与请求键；仅未确认入箱的任务重试，成功后由原通知泵负责。关闭时停止调度、等待在途交接可安全收尾，再关模块库。
-- [ ] 运行 `npm test -- tests/modules/issues tests/router/user-message-delivery.test.ts tests/router/mailbox-store.test.ts tests/router/tell.test.ts`；检查并本地提交，不修改旧投递/ACK 契约。
+- [x] 新增失败测试：保存后未调用投递即退出；core 入箱成功但模块尚未记结果；文件先写/索引中断；通知失败；ACK 后重试；归档后原结果恢复；同名新 lane 不能接收旧回复。
+- [x] 使用持久库重开、可注入故障点、可控时间验证，不用真实模型或脆弱的固定时长 sleep；实际隔离 `RouterCore`/mailbox 交接至少一条，不能全用假投递掩盖底座契约。
+- [x] 运行上述两套测试确认红；实现同进程单次消费、启动恢复及有上限的退避间隔。已知归档/missing 等目标拒绝保留记录及原因，不空转；不自动改目标、开 TUI 或新建投递。
+- [x] 每次调用固定 `target: {laneId}`、来源、正文与请求键；仅未确认入箱的任务重试，成功后由原通知泵负责。关闭时停止调度、等待在途交接可安全收尾，再关模块库。
+- [x] 运行 `npm test -- tests/modules/issues tests/router/user-message-delivery.test.ts tests/router/mailbox-store.test.ts tests/router/tell.test.ts`；检查并本地提交，不修改旧投递/ACK 契约。
 
 ### Task 4：回执、关闭与投递竞态
 
