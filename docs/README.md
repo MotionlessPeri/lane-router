@@ -11,3 +11,4 @@
 ## 实施计划
 
 - [后台 HTTP 边界整理](superpowers/plans/2026-10-17-dashboard-http-boundary.md)
+- [tell 用户消息投递底座抽取](superpowers/plans/2026-10-17-tell-user-delivery.md)
