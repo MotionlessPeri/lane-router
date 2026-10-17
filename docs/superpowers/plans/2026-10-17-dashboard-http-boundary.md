@@ -87,7 +87,7 @@ npx vitest run tests/process/dashboard-http-contract.test.ts tests/process/dashb
 
 **Files:** `src/process/http-json.ts`、`src/process/dashboard-http.ts`、`src/process/local-server.ts`、`tests/process/dashboard-http.test.ts`。
 
-- [ ] **Step 1: 提取原有 JSON 实现。**
+- [x] **Step 1: 提取原有 JSON 实现。**
 
 `http-json.ts` 导出以下原实现；不得调整限制、字符串解码、响应 header 或序列化：
 
@@ -107,13 +107,13 @@ export function json(response: ServerResponse, status: number, value: unknown): 
 }
 ```
 
-- [ ] **Step 2: 提取后台处理器。**
+- [x] **Step 2: 提取后台处理器。**
 
 创建 `DashboardHttp`，构造参数为 `router: () => DashboardRouter`、`origin: () => string`、`actionToken: string` 与原有三个可选后台回调（名称、可选性与参数形状沿用原代码）。`handle(request, response): Promise<boolean>` 只在四条方法/URL 匹配时接管并返回 true，未匹配返回 false。GET 仍须 `request.url !== undefined` 并按 `URL.pathname` 匹配；POST 仍按原始 `request.url` 精确匹配。未接线直接返回原 404。
 
 原样移动 page read、`readDashboardAction`、`parseLaneSetsInput` 和 `DashboardLaneSetsInput`。维持四道校验顺序与每个回调的 catch 状态；不要在处理器增加总 catch，解析异常继续流向 `LocalRouterServer.handle` 的旧 400 边界。页面继续相对同目录 `dashboard.html` 读取。
 
-- [ ] **Step 3: 接回总入口。**
+- [x] **Step 3: 接回总入口。**
 
 在构造函数初始化一次 `DashboardHttp`，将实时 discovery 包成只返回 `{ pid, port, instanceId }` 的 callback，origin callback 返回实时 discovery.url；传入已有服务实例 token。总入口仍先处理 DSH/native Host 与 health，在普通路由段委托 `if (await this.dashboard.handle(request, response)) return;`。删除四条旧分支和已迁走 helper。保留原构造 options 和：
 
@@ -122,7 +122,7 @@ import { DashboardHttp, type DashboardLaneSetsInput } from "./dashboard-http.js"
 export type { DashboardLaneSetsInput } from "./dashboard-http.js";
 ```
 
-- [ ] **Step 4: 测未匹配契约并复验。**
+- [x] **Step 4: 测未匹配契约并复验。**
 
 处理器单测用未匹配的 method/query/path 请求和一个一旦迭代便失败的 body，断言返回 false、response 和业务回调均未调用。集成测试继续经 `LocalRouterServer` 验证接线，不依赖私有字段。
 
@@ -133,12 +133,14 @@ npm run typecheck
 
 预期：全部通过，原 `DashboardLaneSetsInput` 导入仍编译。
 
+已取得证据：本任务 Step 4 的受影响测试为 6 文件、100 测试通过；`npm run typecheck` exit 0，现有旧模块类型导入仍编译。`dashboard-http.ts` 与 `http-json.ts` 没有反向服务依赖或数据库、mailbox、backend 访问。
+
 ## Task 3: 整体验证、审查与提交
 
 **Files:** `docs/README.md`、设计文档与本计划；审查修正仅限已批准行为。
 
-- [ ] **Step 1: 同步文档。** 在索引注册计划；将设计状态改为已实现并链接计划。支持范围沿用设计已有清单，不新增运行时注册/权限配置。检查 diff，确认没有 tools、adapters、Router 业务、Host/channel 或 HTML 内容改动。
-- [ ] **Step 2: 运行完整回归与隔离构建。**
+- [x] **Step 1: 同步文档。** 在索引注册计划；将设计状态改为已实现并链接计划。支持范围沿用设计已有清单，不新增运行时注册/权限配置。检查 diff，确认没有 tools、adapters、Router 业务、Host/channel 或 HTML 内容改动。
+- [x] **Step 2: 运行完整回归与隔离构建。**
 
 ```powershell
 npm test -- --reporter=dot
@@ -149,6 +151,29 @@ git diff --check
 
 预期：完整测试通过、typecheck 无诊断、build exit 0，隔离 `dist/process/dashboard.html` 与源码字节一致，且 `dist/process/dashboard-http.js`、`dist/process/http-json.js` 同时存在。用临时 fake `LocalRouterServer` 从隔离构建导入，GET `/dashboard` 返回相同自包含页面；不连接真实 Router 或模型。
 
-- [ ] **Step 3: 独立审查。** 按 `superpowers:requesting-code-review` 请求一个有限时 reviewer 核对 spec、总 diff、测试与范围。先按批准验收项分类发现；修复计划内缺陷后复验相关检查。按 `conversation-walkthrough` 复核职责、错误边界与注释。不实现额外加固或协议改动。
-- [ ] **Step 4: 任务自有本地提交。** 按 `superpowers:verification-before-completion` 核实最新结果、只 stage 本任务明确路径并检查 staged diff；计划与测试可在稳定基线后先提交，结构迁移与最后证据在通过验证后提交。保留工作树供主对话汇合，不合并、不删除、不 push。
-- [ ] **Step 5: 交付。** 返回 commit、工作树、文件职责和范围差异、原始验证命令和实际计数、审查结论及未验证的真实场景。
+实际结果：完整测试为 62 文件、702 测试通过，耗时 47.38 秒；类型检查、隔离构建均 exit 0。构建产物 smoke 检查页面与源码 34,900 字节一致、两个新模块存在、旧类型路径的声明转导出存在；隔离 fake server 的页面与状态均返回 200，页面没有外部资源引用。
+
+- [x] **Step 3: 独立审查。** 按 `superpowers:requesting-code-review` 请求一个有限时 reviewer 核对 spec、总 diff、测试与范围。先按批准验收项分类发现；修复计划内缺陷后复验相关检查。按 `conversation-walkthrough` 复核职责、错误边界与注释。不实现额外加固或协议改动。
+- [x] **Step 4: 任务自有本地提交。** 按 `superpowers:verification-before-completion` 核实最新结果、只 stage 本任务明确路径并检查 staged diff；计划与测试可在稳定基线后先提交，结构迁移与最后证据在通过验证后提交。保留工作树供主对话汇合，不合并、不删除、不 push。
+- [x] **Step 5: 交付。** 返回 commit、工作树、文件职责和范围差异、原始验证命令和实际计数、审查结论及未验证的真实场景。
+
+## 最终验证与审查记录
+
+| 检查 | 实际结果 |
+|---|---|
+| 未改实现的 `npm test -- --reporter=dot` | 59 文件、680 测试通过，42.64 秒 |
+| Task 1 指定的旧行为契约测试命令 | 5 文件、64 测试通过，7.19 秒 |
+| Task 2 指定的受影响测试命令 | 6 文件、100 测试通过，9.05 秒 |
+| 迁移后的首次完整默认测试 | 62 文件、702 测试通过，47.38 秒 |
+| 最终 `npm test -- --reporter=dot --maxWorkers=2 --testTimeout=30000` | 62 文件、702 测试通过，63.26 秒 |
+| `npm run typecheck`、`npm run build`、`git diff --check` | 均 exit 0；构建仅写入本隔离工作树 |
+| 构建产物 fake server smoke | 页面与状态均 200；HTML 与源码 34,900 字节一致且自包含；两个新模块及旧类型路径转导出存在 |
+| 独立计划与最终代码审查 | Approved；没有 Critical、Important 或 Minor 发现 |
+
+重复默认测试曾有一次 699/702 通过：两例新 fixture 被 `fetch` 的 `bad port` 拒绝，一例既有 native 重启测试超过默认 5 秒。查明本机动态端口范围包含 Node `fetch` 禁用端口；临时 HTTP 探针在 10080 复现 `fetch` 拒绝而原生 HTTP 返回 200。因此本任务的后台契约 fixture 改用原生 HTTP，同时准确覆盖缺少 content-type 的情形。修正后相关 2 文件、15 测试通过。
+
+随后默认 5 秒预算、两个 worker 的完整回归为 701/702 通过，唯一失败仍是未修改的 `native-shared-integration.test.ts` 重启测试。该文件单独验证 5/5 通过，重启用例实测 1509ms；超时根因尚未确定。最终完整验证使用上表一次性的 30 秒 CLI 预算通过，未修改仓库测试配置，也不声称修复了既有超时波动。
+
+最终独立审查的候选 tree 为 `e9c77a94d0f922ed0e026a0d48b2adf0cfe7ad48`；之后仅回填本文验收记录与设计源码链接，源码和测试内容保持一致。结构与注释走查确认：工具、业务、Host/channel、身份、重试、HTML 内容和构造选项保持原样，没有新增产品接口、配置、持久状态或信任边界。
+
+本计划保留为此次整理的验收记录。真实模型、真实 lane、共享部署和重启后的现场行为未验证；本任务未执行部署、Router 重启、推送或合并。

@@ -1,3 +1,4 @@
+import { request as httpRequest } from "node:http";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { LocalRouterServer } from "../../src/process/local-server.js";
@@ -5,6 +6,22 @@ import { LocalRouterServer } from "../../src/process/local-server.js";
 type Options = ConstructorParameters<typeof LocalRouterServer>[0];
 const servers: LocalRouterServer[] = [];
 afterEach(async () => { await Promise.all(servers.splice(0).map(server => server.close())); });
+
+// Native HTTP leaves absent headers absent and accepts every OS-assigned loopback port.
+async function httpResponse(url: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}) {
+  const response = await new Promise<import("node:http").IncomingMessage>((resolve, reject) => {
+    const outgoing = httpRequest(url, { method: init.method ?? "GET", headers: init.headers }, resolve);
+    outgoing.once("error", reject);
+    outgoing.end(init.body);
+  });
+  const chunks: Buffer[] = [];
+  for await (const chunk of response) chunks.push(Buffer.from(chunk));
+  const text = Buffer.concat(chunks).toString("utf8");
+  return {
+    status: response.statusCode, headers: new Headers(response.headers as Record<string, string>),
+    text: async () => text, json: async () => JSON.parse(text) as unknown,
+  };
+}
 
 async function fixture(options: Partial<Options> = {}) {
   const call = vi.fn();
@@ -17,12 +34,12 @@ async function fixture(options: Partial<Options> = {}) {
   });
   const discovery = await server.start();
   servers.push(server);
-  const state = async () => (await fetch(`${discovery.url}/dashboard/state`)).json();
+  const state = async () => (await httpResponse(`${discovery.url}/dashboard/state`)).json();
   const { actionToken } = await state() as { actionToken?: string };
   const headers = (action: "open" | "lane-sets") => ({
     origin: discovery.url, "x-lane-router-action": action, "content-type": "application/json",
   });
-  const post = (path: string, body: unknown) => fetch(`${discovery.url}${path}`, {
+  const post = (path: string, body: unknown) => httpResponse(`${discovery.url}${path}`, {
     method: "POST", headers: headers(path === "/dashboard/lane-sets" ? "lane-sets" : "open"),
     body: JSON.stringify({ actionToken, ...body as object }),
   });
@@ -31,11 +48,11 @@ async function fixture(options: Partial<Options> = {}) {
 
 test("dashboard GETs accept query strings and pass the listening Router facts to state", async () => {
   const x = await fixture();
-  const page = await fetch(`${x.discovery.url}/dashboard?probe=1`);
+  const page = await httpResponse(`${x.discovery.url}/dashboard?probe=1`);
   expect(page.status).toBe(200);
   expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
   expect(await page.text()).toContain("<html");
-  const state = await fetch(`${x.discovery.url}/dashboard/state?probe=1`);
+  const state = await httpResponse(`${x.discovery.url}/dashboard/state?probe=1`);
   expect(state.status).toBe(200);
   expect(await state.json()).toEqual({
     router: { pid: process.pid, port: x.discovery.port, instanceId: "http-contract" },
@@ -51,7 +68,7 @@ test("dashboard POSTs match the whole URL and other methods or paths stay absent
     ["GET", "/dashboard/lanes/open"], ["GET", "/dashboard/lane-sets"],
     ["POST", "/dashboard"], ["POST", "/dashboard/state"], ["POST", "/dashboard/unknown"],
   ]) {
-    const response = await fetch(`${x.discovery.url}${path}`, { method });
+    const response = await httpResponse(`${x.discovery.url}${path}`, { method });
     expect(response.status, `${method} ${path}`).toBe(404);
     expect(await response.json()).toEqual({ error: "not found" });
   }
@@ -63,7 +80,7 @@ test("dashboard POSTs match the whole URL and other methods or paths stay absent
 test("unwired dashboard actions return 404 before checking headers or parsing JSON", async () => {
   const x = await fixture({ dashboardState: undefined, dashboardOpen: undefined, dashboardLaneSets: undefined });
   for (const path of ["/dashboard/lanes/open", "/dashboard/lane-sets"]) {
-    const response = await fetch(`${x.discovery.url}${path}`, { method: "POST", body: "{" });
+    const response = await httpResponse(`${x.discovery.url}${path}`, { method: "POST", body: "{" });
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "not found" });
   }
@@ -103,7 +120,7 @@ test.each(["open", "lane-sets"] as const)("%s preserves protection order and exa
     { headers, body: "null", status: 403, error: "action token is invalid" },
   ];
   for (const input of cases) {
-    const response = await fetch(`${x.discovery.url}${path}`, { method: "POST", headers: input.headers, body: input.body });
+    const response = await httpResponse(`${x.discovery.url}${path}`, { method: "POST", headers: input.headers, body: input.body });
     expect(response.status, JSON.stringify(input)).toBe(input.status);
     expect(response.headers.get("content-type")).toBe("application/json");
     expect(response.headers.get("access-control-allow-origin")).toBeNull();
@@ -117,7 +134,7 @@ test.each(["open", "lane-sets"] as const)("%s preserves protection order and exa
 test("malformed JSON still reaches the ordinary HTTP error boundary", async () => {
   const x = await fixture();
   for (const [path, action] of [["/dashboard/lanes/open", "open"], ["/dashboard/lane-sets", "lane-sets"]] as const) {
-    const response = await fetch(`${x.discovery.url}${path}`, { method: "POST", headers: x.headers(action), body: "{" });
+    const response = await httpResponse(`${x.discovery.url}${path}`, { method: "POST", headers: x.headers(action), body: "{" });
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: expect.stringMatching(/JSON|property name/iu) });
   }
@@ -132,10 +149,10 @@ test("JSON keeps the one MiB UTF-8 byte limit, including the exact boundary", as
   const body = base.replace('"padding":""', `"padding":"${"é".repeat(Math.floor(remaining / 2))}${"a".repeat(remaining % 2)}"`);
   expect(Buffer.byteLength(body)).toBe(1024 * 1024);
   expect(body.length).toBeLessThan(1024 * 1024);
-  const accepted = await fetch(`${x.discovery.url}/dashboard/lanes/open`, { method: "POST", headers: x.headers("open"), body });
+  const accepted = await httpResponse(`${x.discovery.url}/dashboard/lanes/open`, { method: "POST", headers: x.headers("open"), body });
   expect(accepted.status).toBe(200);
   expect(await accepted.json()).toEqual({ results: ["opened"] });
-  const refused = await fetch(`${x.discovery.url}/dashboard/lanes/open`, { method: "POST", headers: x.headers("open"), body: `${body} ` });
+  const refused = await httpResponse(`${x.discovery.url}/dashboard/lanes/open`, { method: "POST", headers: x.headers("open"), body: `${body} ` });
   expect(refused.status).toBe(400);
   expect(await refused.json()).toEqual({ error: "request too large" });
   expect(x.dashboardOpen).toHaveBeenCalledExactlyOnceWith({ addresses: ["alpha/a"], override: {} });

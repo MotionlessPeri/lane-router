@@ -1,6 +1,6 @@
 # 后台 HTTP 边界整理设计
 
-状态：用户已在对话中认可结构与范围，本文是供复核的书面稿；尚未开始实现。本文不包含部署或重启授权。
+状态：已按批准范围完成结构迁移与隔离自动验证；执行与验证记录见[实施计划](../plans/2026-10-17-dashboard-http-boundary.md)。本文不包含部署或重启授权。
 
 ## 结论与目的
 
@@ -10,7 +10,7 @@
 
 源码调查基线为 `087d2a79b8d3d6d841d3cd34acccc403dc05138f`。
 
-## 当前结构
+## 整理前结构
 
 | 部分 | 现有职责 | 本轮处理 |
 |---|---|---|
@@ -113,5 +113,5 @@ action token 仍在服务实例创建时生成，生命周期和当前行为一�
 
 - [工具服务](../../../src/tools/tool-service.ts)、[共用参数](../../../src/tools/tool-schema.ts)
 - [Codex 工具适配](../../../src/adapters/codex/dynamic-tools.ts)、[MCP 参数导出](../../../src/mcp/tool-schemas.ts)
-- [HTTP 总入口](../../../src/process/local-server.ts)、[启动装配](../../../src/process/main.ts)
+- [HTTP 总入口](../../../src/process/local-server.ts)、[后台 HTTP 处理](../../../src/process/dashboard-http.ts)、[共用 JSON 读写](../../../src/process/http-json.ts)、[启动装配](../../../src/process/main.ts)
 - [DSH 接入](../../dsh-host-api.md)、[Company native Host 接入](../../native-host-api.md)
