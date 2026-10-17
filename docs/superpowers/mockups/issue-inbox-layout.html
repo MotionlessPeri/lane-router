@@ -1,0 +1,250 @@
+<div id="lane-router-issue-inbox-mockup">
+  <style>
+    #lane-router-issue-inbox-mockup { color-scheme: light dark; }
+    #lane-router-issue-inbox-mockup .ir-app {
+      --ir-bg: light-dark(#f7f8fa, #15181e);
+      --ir-panel: light-dark(#ffffff, #1c2028);
+      --ir-text: light-dark(#202938, #edf0f6);
+      --ir-muted: light-dark(#667083, #aab3c3);
+      --ir-line: light-dark(#e2e6ed, #353c49);
+      --ir-hover: light-dark(#edf1f7, #29313e);
+      --ir-active: light-dark(#e9effc, #25334d);
+      --ir-blue: light-dark(#355ca8, #aac6ff);
+      --ir-warm: light-dark(#875b14, #efc478);
+      --ir-green: light-dark(#286652, #95d7b7);
+      --ir-gap: 20px;
+      background: var(--ir-bg); color: var(--ir-text); border: 1px solid var(--ir-line);
+      border-radius: 14px; font: 14px/1.65 system-ui, "Microsoft YaHei", sans-serif;
+      min-height: 720px; overflow-wrap: anywhere;
+    }
+    #lane-router-issue-inbox-mockup .ir-app * { box-sizing: border-box; }
+    #lane-router-issue-inbox-mockup .ir-app button,
+    #lane-router-issue-inbox-mockup .ir-app textarea { font: inherit; }
+    #lane-router-issue-inbox-mockup .ir-app button { color: inherit; }
+    #lane-router-issue-inbox-mockup .ir-chrome { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--ir-line); background: var(--ir-panel); border-radius: 14px 14px 0 0; }
+    #lane-router-issue-inbox-mockup .ir-brand { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+    #lane-router-issue-inbox-mockup .ir-chrome small { color: var(--ir-muted); margin-left: auto; }
+    #lane-router-issue-inbox-mockup .ir-heading { padding: 22px 22px 12px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+    #lane-router-issue-inbox-mockup .ir-heading h2 { font-size: 21px; line-height: 1.4; font-weight: 500; margin: 0; }
+    #lane-router-issue-inbox-mockup .ir-heading span { color: var(--ir-muted); font-size: 12px; }
+    #lane-router-issue-inbox-mockup .ir-tabs { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 22px 15px; }
+    #lane-router-issue-inbox-mockup .ir-tab { border: 0; border-radius: 7px; padding: 7px 12px; background: transparent; }
+    #lane-router-issue-inbox-mockup .ir-tab[aria-pressed="true"] { background: var(--ir-text); color: var(--ir-panel); }
+    #lane-router-issue-inbox-mockup .ir-tab span { opacity: .75; margin-left: 6px; font-variant-numeric: tabular-nums; }
+    #lane-router-issue-inbox-mockup .ir-tab:hover { background: var(--ir-hover); }
+    #lane-router-issue-inbox-mockup .ir-columns { display: grid; grid-template-columns: minmax(245px, 31%) minmax(0, 1fr); border-top: 1px solid var(--ir-line); min-height: 570px; }
+    #lane-router-issue-inbox-mockup .ir-list { padding: 12px; border-right: 1px solid var(--ir-line); min-width: 0; }
+    #lane-router-issue-inbox-mockup .ir-topic { display: block; width: 100%; text-align: left; border: 1px solid transparent; border-radius: 9px; padding: var(--ir-gap) 13px; background: transparent; margin-bottom: 6px; }
+    #lane-router-issue-inbox-mockup .ir-topic:hover { background: var(--ir-hover); }
+    #lane-router-issue-inbox-mockup .ir-topic.is-active { background: var(--ir-active); border-color: var(--ir-line); }
+    #lane-router-issue-inbox-mockup .ir-topic-title { display: block; font-weight: 500; margin: 6px 0; }
+    #lane-router-issue-inbox-mockup .ir-topic-meta { display: block; font-size: 12px; color: var(--ir-muted); }
+    #lane-router-issue-inbox-mockup .ir-status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ir-muted); }
+    #lane-router-issue-inbox-mockup .ir-status.ask { color: var(--ir-warm); }
+    #lane-router-issue-inbox-mockup .ir-status.new { color: var(--ir-blue); }
+    #lane-router-issue-inbox-mockup .ir-status.wait { color: var(--ir-green); }
+    #lane-router-issue-inbox-mockup .ir-status i { width: 14px; height: 14px; }
+    #lane-router-issue-inbox-mockup .ir-detail { min-width: 0; padding: 22px; background: var(--ir-panel); }
+    #lane-router-issue-inbox-mockup .ir-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 17px; border-bottom: 1px solid var(--ir-line); }
+    #lane-router-issue-inbox-mockup .ir-detail h3 { font-size: 17px; line-height: 1.6; font-weight: 500; margin: 5px 0; }
+    #lane-router-issue-inbox-mockup .ir-subtle { color: var(--ir-muted); font-size: 12px; }
+    #lane-router-issue-inbox-mockup .ir-button { border: 1px solid var(--ir-line); border-radius: 7px; padding: 6px 11px; background: var(--ir-panel); white-space: nowrap; }
+    #lane-router-issue-inbox-mockup .ir-button:hover { background: var(--ir-hover); }
+    #lane-router-issue-inbox-mockup .ir-primary { background: var(--ir-text); color: var(--ir-panel) !important; border-color: var(--ir-text); }
+    #lane-router-issue-inbox-mockup .ir-primary:hover { background: var(--ir-text); opacity: .9; }
+    #lane-router-issue-inbox-mockup .ir-button:disabled { opacity: .5; }
+    #lane-router-issue-inbox-mockup .ir-note { display: flex; gap: 8px; padding: 11px 13px; margin-top: 16px; background: var(--ir-bg); border-radius: 7px; color: var(--ir-muted); font-size: 12px; }
+    #lane-router-issue-inbox-mockup .ir-note i { width: 16px; height: 16px; flex-shrink: 0; margin-top: 2px; }
+    #lane-router-issue-inbox-mockup .ir-thread { display: grid; gap: var(--ir-gap); padding: 20px 0; }
+    #lane-router-issue-inbox-mockup .ir-entry { border-left: 2px solid var(--ir-line); padding-left: 13px; }
+    #lane-router-issue-inbox-mockup .ir-entry.user { border-color: var(--ir-blue); }
+    #lane-router-issue-inbox-mockup .ir-entry-head { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--ir-muted); }
+    #lane-router-issue-inbox-mockup .ir-entry-head strong { font-weight: 500; color: var(--ir-text); }
+    #lane-router-issue-inbox-mockup .ir-entry-body { white-space: pre-wrap; margin-top: 7px; }
+    #lane-router-issue-inbox-mockup .ir-compose { border-top: 1px solid var(--ir-line); padding-top: 15px; }
+    #lane-router-issue-inbox-mockup .ir-compose label { display: block; margin-bottom: 7px; font-weight: 500; }
+    #lane-router-issue-inbox-mockup .ir-compose textarea { width: 100%; min-height: 90px; resize: vertical; padding: 11px; color: var(--ir-text); background: var(--ir-panel); border: 1px solid var(--ir-line); border-radius: 8px; }
+    #lane-router-issue-inbox-mockup .ir-compose-bottom { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+    #lane-router-issue-inbox-mockup .ir-notice { padding: 0 22px 12px; color: var(--ir-muted); font-size: 12px; min-height: 24px; }
+    #lane-router-issue-inbox-mockup .ir-confirm { padding: 12px; margin: 14px 0 0; border: 1px solid var(--ir-line); border-radius: 8px; background: var(--ir-bg); }
+    #lane-router-issue-inbox-mockup .ir-confirm p { margin: 0 0 10px; }
+    #lane-router-issue-inbox-mockup .ir-confirm button { margin-right: 7px; }
+    #lane-router-issue-inbox-mockup .ir-empty { color: var(--ir-muted); padding: 25px 13px; }
+    #lane-router-issue-inbox-mockup .ir-cards { border-top: 1px solid var(--ir-line); padding: 18px 22px 22px; display: grid; gap: 13px; }
+    #lane-router-issue-inbox-mockup .ir-issue-card { border: 1px solid var(--ir-line); border-radius: 9px; background: var(--ir-panel); }
+    #lane-router-issue-inbox-mockup .ir-card-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: var(--ir-gap); border: 0; text-align: left; border-radius: 9px; background: var(--ir-panel); }
+    #lane-router-issue-inbox-mockup .ir-card-toggle i { flex-shrink: 0; }
+    #lane-router-issue-inbox-mockup .ir-card-detail { padding: 0 20px 20px; }
+    #lane-router-issue-inbox-mockup .ir-card-detail .ir-detail-head { padding-top: 7px; }
+    @media (max-width: 680px) {
+      #lane-router-issue-inbox-mockup .ir-columns { grid-template-columns: minmax(0, 1fr); }
+      #lane-router-issue-inbox-mockup .ir-list { border-right: 0; border-bottom: 1px solid var(--ir-line); }
+      #lane-router-issue-inbox-mockup .ir-chrome, #lane-router-issue-inbox-mockup .ir-detail { padding: 14px; }
+      #lane-router-issue-inbox-mockup .ir-heading { padding-left: 14px; }
+      #lane-router-issue-inbox-mockup .ir-tabs { padding-left: 14px; padding-right: 14px; }
+      #lane-router-issue-inbox-mockup .ir-cards { padding: 14px; }
+      #lane-router-issue-inbox-mockup .ir-detail-head { flex-wrap: wrap; }
+      #lane-router-issue-inbox-mockup .ir-app textarea { font-size: 16px; }
+    }
+    @media (pointer: coarse) {
+      #lane-router-issue-inbox-mockup .ir-button,
+      #lane-router-issue-inbox-mockup .ir-tab { min-height: 44px; }
+    }
+  </style>
+  <div class="viz-carousel" aria-label="议题收件箱布局比较" data-previous-label="上一种布局" data-next-label="下一种布局">
+    <section data-variant="列表与详情" aria-label="列表与详情布局">
+      <div class="ir-app" data-layout="split" aria-label="列表与详情样稿"></div>
+    </section>
+    <section data-variant="议题卡片展开" aria-label="议题卡片展开布局" hidden>
+      <div class="ir-app" data-layout="cards" aria-label="议题卡片样稿"></div>
+    </section>
+  </div>
+  <script>
+    (() => {
+      const root = document.getElementById('lane-router-issue-inbox-mockup');
+      const escapeText = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      const initialIssues = () => [
+        {id:'preview', title:'是否先提供一个预览版本？', lane:'lane-router/coordinator-architecture', status:'ask', unread:false,
+          entries:[
+            {who:'lane', label:'lane 提问', time:'14:20', body:'预览版本可以先验证主要流程，但暂时不覆盖所有边界情况。你希望先试用预览版本，还是等完整验收后再使用？'},
+            {who:'user', label:'你 · 来自 TUI', time:'14:23', body:'预览版本会影响我现在正在工作的 lane 吗？'},
+            {who:'lane', label:'lane 补充解释', time:'14:24', body:'不会，这里指独立的演示环境，不替换你正在使用的 Router。你可以先试用，再决定是否继续。'}
+          ]},
+        {id:'graph', title:'图交互库的比较结果', lane:'lane-router/graph-ui-research', status:'answer', unread:true,
+          entries:[
+            {who:'user', label:'你的原问题 · 来自 TUI', time:'13:10', body:'帮我比较适合节点卡片和关系探索的图交互库。'},
+            {who:'lane', label:'lane 答复', time:'14:18', body:'两种用途的侧重点不同：节点卡片重视内容编辑，关系探索重视布局与筛选。下一步可以用同一份示例数据比较交互效果。'}
+          ]},
+        {id:'waiting', title:'原问题的边界说明', lane:'lane-router/coordinator-architecture', status:'wait', unread:false,
+          entries:[
+            {who:'lane', label:'lane 提问', time:'12:40', body:'第一版需要专门的搜索入口吗？'},
+            {who:'user', label:'你 · 看板回复', time:'12:45', body:'先不用。保留完整历史就好。', receipt:'示例状态：后端已保存，lane 离线，待其恢复后处理。'}
+          ]},
+        {id:'closed', title:'议题按 lane 归属', lane:'lane-router/coordinator-architecture', status:'closed', unread:false,
+          entries:[
+            {who:'user', label:'你的原问题 · 来自 TUI', time:'昨天', body:'lane 换会话后，原来的议题还在吗？'},
+            {who:'lane', label:'lane 答复', time:'昨天', body:'议题属于稳定的 lane，同一 lane 的会话轮换不改变归属。'},
+            {who:'user', label:'你结束了议题', time:'昨天', body:'已确认，结束这个议题。'}
+          ]}
+      ];
+      const modes = [
+        {key:'attention', text:'待我处理', test:i => i.status !== 'closed' && (i.status === 'ask' || i.unread)},
+        {key:'waiting', text:'等待 lane', test:i => i.status === 'wait'},
+        {key:'all', text:'全部议题', test:() => true}
+      ];
+      const stateFor = () => ({view:'attention', selected:'preview', confirm:false, notice:'', issues:initialIssues(), compact:false});
+      const instances = [...root.querySelectorAll('.ir-app')].map(app => ({app, layout:app.dataset.layout, state:stateFor()}));
+      const savedState = () => window.openai && window.openai.widgetState;
+      function applySaved(snapshot) {
+        const values = snapshot && (snapshot.privateContent || snapshot);
+        if (!values || !values.layouts) return;
+        for (const instance of instances) {
+          const saved = values.layouts[instance.layout];
+          if (!saved) continue;
+          if (modes.some(m => m.key === saved.view)) instance.state.view = saved.view;
+          if (instance.state.issues.some(i => i.id === saved.selected)) instance.state.selected = saved.selected;
+          if (typeof saved.compact === 'boolean') instance.state.compact = saved.compact;
+        }
+      }
+      function remember(instance) {
+        if (!window.openai || !window.openai.setWidgetState) return;
+        const layouts = Object.fromEntries(instances.map(x => [x.layout, {view:x.state.view, selected:x.state.selected, compact:x.state.compact}]));
+        try {
+          Promise.resolve(window.openai.setWidgetState({modelContent:{lastExploredLayout:instance.layout === 'split' ? '列表与详情' : '议题卡片展开'}, privateContent:{layouts}})).catch(() => {});
+        } catch (_) { /* optional host state does not affect the mockup */ }
+      }
+      function statusMarkup(issue) {
+        if (issue.status === 'ask') return '<span class="ir-status ask"><i data-lucide="circle-help" aria-hidden="true"></i>待你回答 · 已读</span>';
+        if (issue.status === 'wait') return '<span class="ir-status wait"><i data-lucide="clock-3" aria-hidden="true"></i>等待 lane</span>';
+        if (issue.status === 'closed') return '<span class="ir-status"><i data-lucide="check-check" aria-hidden="true"></i>已结束</span>';
+        return issue.unread ? '<span class="ir-status new"><i data-lucide="circle-dot" aria-hidden="true"></i>有新答复</span>' : '<span class="ir-status">答复已读 · 议题未结束</span>';
+      }
+      function detailMarkup(instance, issue) {
+        const composeId = `issue-demo-${instance.layout}-${issue.id}`;
+        return `<div class="ir-detail-head">
+          <div>${statusMarkup(issue)}<h3>${escapeText(issue.title)}</h3><div class="ir-subtle">${escapeText(issue.lane)} · 示例议题</div></div>
+          ${issue.status === 'closed' ? '' : '<button type="button" class="ir-button cursor-interaction" data-action="close">结束议题</button>'}
+        </div>
+        ${instance.state.confirm ? '<div class="ir-confirm" role="group" aria-label="确认结束示例议题"><p>结束后不能再追加讨论，历史会保留。</p><button type="button" class="ir-button cursor-interaction" data-action="confirm-close">模拟结束</button><button type="button" class="ir-button cursor-interaction" data-action="cancel-close">继续讨论</button></div>' : ''}
+        ${issue.status === 'ask' ? '<div class="ir-note"><i data-lucide="message-circle-question" aria-hidden="true"></i><span>这个问题已经读过，但仍在等你回答。可以先追问，不必立刻作决定。</span></div>' : ''}
+        ${issue.status === 'wait' ? '<div class="ir-note"><i data-lucide="clock-3" aria-hidden="true"></i><span>示例状态：回复已由后端保存，等待 lane 处理；不需要回 TUI 重复，也不自动启动离线 lane。</span></div>' : ''}
+        <div class="ir-thread">${issue.entries.map(entry => `<article class="ir-entry ${entry.who === 'user' ? 'user' : ''}"><div class="ir-entry-head"><strong>${escapeText(entry.label)}</strong><span>${escapeText(entry.time)}</span></div><div class="ir-entry-body">${escapeText(entry.body)}</div>${entry.receipt ? `<div class="ir-subtle">${escapeText(entry.receipt)}</div>` : ''}</article>`).join('')}</div>
+        ${issue.status === 'closed' ? '<div class="ir-note">议题已结束。记录保留，不再接受新的讨论追加。</div>' : `<form class="ir-compose" data-reply-form><label for="${composeId}">继续这个议题</label><textarea id="${composeId}" name="reply" placeholder="直接回答、要求解释，或补充条件……" required></textarea><div class="ir-compose-bottom"><span class="ir-subtle">自动关联本议题，无需复述原问题</span><button type="submit" class="ir-button ir-primary cursor-interaction">模拟发送</button></div></form>`}`;
+      }
+      function render(instance) {
+        const {app, state, layout} = instance;
+        app.style.setProperty('--ir-gap', state.compact ? '12px' : '20px');
+        const mode = modes.find(m => m.key === state.view);
+        const filtered = state.issues.filter(mode.test);
+        const selected = state.issues.find(i => i.id === state.selected);
+        const tabs = modes.map(m => `<button type="button" class="ir-tab cursor-interaction" data-view="${m.key}" aria-pressed="${m.key === state.view}">${m.text}<span>${state.issues.filter(m.test).length}</span></button>`).join('');
+        let content;
+        if (layout === 'split') {
+          content = `<div class="ir-columns"><nav class="ir-list" aria-label="议题列表">${filtered.length ? filtered.map(i => `<button type="button" class="ir-topic cursor-interaction ${i.id === state.selected ? 'is-active' : ''}" data-issue="${i.id}" aria-current="${i.id === state.selected ? 'true' : 'false'}">${statusMarkup(i)}<span class="ir-topic-title">${escapeText(i.title)}</span><span class="ir-topic-meta">${escapeText(i.lane)}</span></button>`).join('') : '<div class="ir-empty">这里暂时没有议题。</div>'}</nav><section class="ir-detail" aria-label="议题详情">${selected ? detailMarkup(instance, selected) : '<div class="ir-empty">选择一个议题，查看完整讨论。</div>'}</section></div>`;
+        } else {
+          content = `<div class="ir-cards">${filtered.length ? filtered.map(i => `<section class="ir-issue-card"><button type="button" class="ir-card-toggle cursor-interaction" data-issue="${i.id}" aria-expanded="${i.id === state.selected}"><span>${statusMarkup(i)}<span class="ir-topic-title">${escapeText(i.title)}</span><span class="ir-topic-meta">${escapeText(i.lane)}</span></span><i data-lucide="${i.id === state.selected ? 'chevron-up' : 'chevron-down'}" aria-hidden="true"></i></button>${i.id === state.selected ? `<div class="ir-card-detail">${detailMarkup(instance, i)}</div>` : ''}</section>`).join('') : '<div class="ir-empty">这里暂时没有议题。</div>'}</div>`;
+        }
+        app.innerHTML = `<header class="ir-chrome"><div class="ir-brand"><i data-lucide="waypoints" aria-hidden="true"></i>Lane Router</div><span class="ir-subtle">议题收件箱</span><small>交互样稿 · 演示数据 · 未连接 Router</small></header><div class="ir-heading"><h2>议题收件箱</h2><span>只收与你有关的问题和答复</span></div><nav class="ir-tabs" aria-label="议题视图">${tabs}</nav><div class="ir-notice" role="status" aria-live="polite">${escapeText(state.notice || '样稿中的发送和结束仅演示界面，不会实际保存或投递。')}</div>${content}`;
+        if (globalThis.lucide) lucide.createIcons({attrs:{width:16,height:16}});
+      }
+      for (const instance of instances) {
+        const {app, state} = instance;
+        app.addEventListener('click', event => {
+          const button = event.target.closest('button');
+          if (!button || !app.contains(button)) return;
+          if (button.dataset.view) {
+            state.view = button.dataset.view;
+            const choices = state.issues.filter(modes.find(m => m.key === state.view).test);
+            if (!choices.some(i => i.id === state.selected)) state.selected = choices[0] ? choices[0].id : null;
+            state.confirm = false; state.notice = '';
+          } else if (button.dataset.issue) {
+            const issue = state.issues.find(i => i.id === button.dataset.issue);
+            if (!issue) return;
+            state.selected = instance.layout === 'cards' && state.selected === issue.id ? null : issue.id;
+            state.confirm = false;
+            if (state.selected && issue.unread) {
+              issue.unread = false;
+              if (state.view === 'attention') state.view = 'all';
+              state.notice = '演示：答复已读，保留在全部议题中；整个议题没有结束。';
+            } else state.notice = '';
+          } else if (button.dataset.action) {
+            if (button.dataset.action === 'close') state.confirm = true;
+            if (button.dataset.action === 'cancel-close') state.confirm = false;
+            if (button.dataset.action === 'confirm-close') {
+              const issue = state.issues.find(i => i.id === state.selected);
+              if (issue) { issue.status = 'closed'; issue.unread = false; }
+              state.confirm = false; state.view = 'all'; state.notice = '演示：议题已结束，历史保留。没有向 Router 提交实际操作。';
+            }
+          } else return;
+          render(instance); remember(instance);
+        });
+        app.addEventListener('submit', event => {
+          const form = event.target.closest('[data-reply-form]');
+          if (!form) return;
+          event.preventDefault();
+          const issue = state.issues.find(i => i.id === state.selected);
+          const input = form.querySelector('textarea');
+          const value = input.value.trim();
+          if (!issue || issue.status === 'closed' || !value) return;
+          issue.entries.push({who:'user',label:'你 · 模拟回复',time:'刚刚',body:value,receipt:'仅演示展示效果，未实际保存或投递。'});
+          issue.status = 'wait'; issue.unread = false; state.view = 'waiting'; state.confirm = false;
+          state.notice = '演示：回复后留在原议题，移至等待 lane。此内容没有实际提交。';
+          render(instance); remember(instance);
+        });
+      }
+      applySaved(savedState());
+      instances.forEach(render);
+      window.addEventListener('openai:set_globals', event => {
+        const snapshot = event.detail && event.detail.globals && event.detail.globals.widgetState;
+        if (!snapshot) return;
+        applySaved(snapshot); instances.forEach(render);
+      });
+      if (globalThis.Tweak) {
+        for (const instance of instances) {
+          const tweak = new Tweak({container:instance.app, onChange:() => { instance.app.style.setProperty('--ir-gap', instance.state.compact ? '12px' : '20px'); remember(instance); }});
+          tweak.addToggle(instance.state, 'compact', {label:'紧凑间距'});
+        }
+      }
+    })();
+  </script>
+</div>
