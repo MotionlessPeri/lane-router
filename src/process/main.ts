@@ -171,6 +171,7 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
     }
     server = new LocalRouterServer({
       tools, applicationTools, codex, claude: claudeHub, instanceId: randomUUID(),
+      ...(options.issues === false ? {} : { issues: { service: issues?.service } }),
       nativeHost,
       dsh: { token: dshToken, channel: dshHub, read: (context, messageIds) => core.read(context, { messageIds }),
         handoff: (context, input) => core.handoffDsh(context, input) },

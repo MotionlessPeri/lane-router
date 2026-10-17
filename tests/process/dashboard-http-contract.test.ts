@@ -104,6 +104,18 @@ test("action tokens are published only for wired actions and stay per service in
   expect(openOnly.dashboardOpen).not.toHaveBeenCalled();
 });
 
+test("issues assembly keeps dashboard responses and per-action protection contracts", async () => {
+  const x = await fixture({ issues: { service: { list: () => ({ items: [], nextCursor: null }) } as never, readPage: () => "<html></html>" } });
+  const issues = await httpResponse(`${x.discovery.url}/issues/api/threads`);
+  expect(issues.status).toBe(200);
+  expect(await issues.json()).toEqual({ result: { items: [], nextCursor: null }, actionToken: x.actionToken });
+  const refused = await httpResponse(`${x.discovery.url}/dashboard/lanes/open`, { method: "POST",
+    headers: { ...x.headers("open"), "x-lane-router-action": "issues-reply" }, body: JSON.stringify({ actionToken: x.actionToken, addresses: ["alpha/a"] }) });
+  expect(refused.status).toBe(403); expect(await refused.json()).toEqual({ error: "action header is invalid" });
+  const opened = await x.post("/dashboard/lanes/open", { addresses: ["alpha/a"] });
+  expect(opened.status).toBe(200); expect(await opened.json()).toEqual({ results: ["opened"] });
+});
+
 test.each(["open", "lane-sets"] as const)("%s preserves protection order and exact refusals without acting", async action => {
   const x = await fixture();
   const path = action === "open" ? "/dashboard/lanes/open" : "/dashboard/lane-sets";

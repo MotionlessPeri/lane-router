@@ -9,6 +9,8 @@ import { parseLaneAddress, type LaneAddress } from "../router/address.js";
 import type { ResumeInfo } from "../router/router-core.js";
 import { parseTellInput, type TellInput, type TellResult } from "../router/tell.js";
 import { ensureRouter } from "./ensure-router.js";
+import { LocalRouterClient } from "./local-client.js";
+import { runIssueCli, type IssueCliDependencies } from "../modules/issues/cli.js";
 import {
   awaitChildStart, childEnvironment, newStatusPath, parseTerminalChoice, resolveTerminal,
   spawnTerminal, terminalLaunchScript, wtOnPath, type TerminalChildRequest, type TerminalChoice,
@@ -21,11 +23,15 @@ const USAGE = [
   "  lane-router-lane archive <project>/<lane>",
   "  lane-router-lane list-archived [<project>]",
   "  lane-router-lane tell <project>/<lane> --origin <origin> --subject \"<one line>\" [--link <http(s) url>]",
+  "  lane-router-lane issue <publish|read|append|update|record-tui-close> --json-file <path>",
 ].join("\n");
 
 export interface LaneLaunchDependencies {
   readonly dataRoot?: string;
   readonly cwd?: string;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly issueClient?: IssueCliDependencies["client"];
+  readonly readIssueJsonFile?: IssueCliDependencies["readJsonFile"];
   readonly spawnTerminal?: (request: TerminalChildRequest, environment: NodeJS.ProcessEnv) => Promise<void>;
   readonly startTimeoutMs?: number;
   readonly wtAvailable?: boolean;
@@ -58,6 +64,10 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
   // `tell` is called by programs rather than people, so it keeps its own contract — flags only, one
   // line of JSON on stdout, and an exit code of its own when there was nothing to deliver to.
   if (args[0] === "tell") return tell(args.slice(1), dependencies, dataRoot);
+  if (args[0] === "issue") return runIssueCli(args.slice(1), {
+    client: dependencies.issueClient ?? new LocalRouterClient(() => routerUrl(dataRoot)),
+    env: dependencies.env, cwd: dependencies.cwd, readJsonFile: dependencies.readIssueJsonFile, write: dependencies.write,
+  });
 
   // Step 1: Parse the invocation before touching Router or terminal state.
   const invocation = parseInvocation(args);
@@ -363,7 +373,8 @@ if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToP
   launchLane(process.argv.slice(2)).then((code) => {
     if (typeof code === "number") process.exitCode = code;
   }, (error) => {
-    process.stderr.write(`${error instanceof Error ? error.message : "lane-router-lane failed"}\n`);
+    const code = process.argv[2] === "issue" && typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? `${error.code}: ` : "";
+    process.stderr.write(`${code}${error instanceof Error ? error.message : "lane-router-lane failed"}\n`);
     process.exitCode = 1;
   });
 }

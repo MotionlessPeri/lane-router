@@ -14,6 +14,7 @@ import type { CallerContext, BindingRecord, ReachSnapshot, ResolvedIdentity } fr
 import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
 import type { ToolService } from "../tools/tool-service.js";
 import type { ApplicationTools } from "../application/tool-catalog.js";
+import { IssuesHttp, type IssuesHttpAssembly } from "../modules/issues/http.js";
 import type { NativeHostService } from "./native-host-service.js";
 import type { DashboardOpenOverride } from "./dashboard-lane-opener.js";
 import { DashboardHttp, type DashboardLaneSetsInput } from "./dashboard-http.js";
@@ -361,12 +362,14 @@ export class LocalRouterServer {
   private readonly providerBridges = new Map<string, { bridge: CodexTuiBridge; endpoint: Promise<string> }>();
   private readonly dashboardActionToken = randomUUID();
   private readonly dashboard: DashboardHttp;
+  private readonly issues: IssuesHttp | undefined;
   private codexEndpoint = "";
   readonly claude: ClaudeChannelHub;
 
   constructor(private readonly options: {
     readonly tools: ToolService;
     readonly applicationTools?: ApplicationTools;
+    readonly issues?: IssuesHttpAssembly;
     readonly codex: CodexTuiBridgeHost;
     readonly instanceId: string;
     readonly host?: string;
@@ -443,6 +446,9 @@ export class LocalRouterServer {
       dashboardOpen: options.dashboardOpen,
       dashboardLaneSets: options.dashboardLaneSets,
     });
+    this.issues = options.issues === undefined ? undefined : new IssuesHttp({
+      ...options.issues, origin: () => this.discovery().url, actionToken: this.dashboardActionToken,
+    });
     this.http.on("upgrade", (request, socket, head) => {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       if (url.pathname === "/native-host/v1/channel" && !url.search && this.options.nativeHost) {
@@ -513,6 +519,7 @@ export class LocalRouterServer {
       if (pathname.startsWith("/native-host/v1/")) return await this.handleNativeHost(request, response, pathname);
       if (request.method === "GET" && request.url === "/health") return json(response, 200, this.discovery());
       if (await this.dashboard.handle(request, response)) return;
+      if (await this.issues?.handle(request, response)) return;
       if (request.method === "GET" && request.url !== undefined) {
         const url = new URL(request.url, "http://127.0.0.1");
         if (url.pathname === "/lanes/archived" && this.options.listArchivedLanes) {
@@ -632,7 +639,8 @@ export class LocalRouterServer {
         const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "NATIVE_EXTERNAL_INVALID_REQUEST";
         return json(response, 409, { protocolVersion: 1, error: { code, message: code } });
       }
-      return json(response, 400, { error: error instanceof Error ? error.message : "request failed" });
+      const code = pathname === "/rpc" && typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
+      return json(response, 400, { error: error instanceof Error ? error.message : "request failed", ...(code === undefined ? {} : { code }) });
     }
   }
 

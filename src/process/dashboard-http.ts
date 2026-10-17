@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import type { DashboardRouter } from "../router/dashboard.js";
 import type { DashboardOpenOverride } from "./dashboard-lane-opener.js";
-import { json, readJson } from "./http-json.js";
+import { json, readPageAction } from "./http-json.js";
 
 /** What the board can ask of its sets. The Router's rules on names and lanes are applied later. */
 export type DashboardLaneSetsInput =
@@ -102,17 +102,7 @@ export class DashboardHttp {
    * keep out a process on this machine. Answers the body, or undefined once it has refused.
    */
   private async readDashboardAction(request: IncomingMessage, response: ServerResponse, action: "open" | "lane-sets"): Promise<Record<string, unknown> | undefined> {
-    if (request.headers.origin !== this.options.origin()) return void json(response, 403, { error: "origin is not the Router dashboard" });
-    if (request.headers["x-lane-router-action"] !== action) return void json(response, 403, { error: "action header is invalid" });
-    const contentType = request.headers["content-type"];
-    if (typeof contentType !== "string" || !contentType.toLowerCase().startsWith("application/json")) {
-      return void json(response, 400, { error: "content-type must be application/json" });
-    }
-    const body = await readJson(request);
-    if (typeof body !== "object" || body === null || (body as { actionToken?: unknown }).actionToken !== this.options.actionToken) {
-      return void json(response, 403, { error: "action token is invalid" });
-    }
-    return body as Record<string, unknown>;
+    return readPageAction(request, response, { origin: this.options.origin, actionToken: this.options.actionToken, action });
   }
 }
 

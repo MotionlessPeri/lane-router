@@ -61,6 +61,10 @@ test("standalone explicitly assembles issues after reconciliation and exposes pr
   await x.client.call("lane_attach_current", { address: "fixture/work", role_description: "Fixture role" }, caller);
   const saved = await x.client.call("lane_issue_publish", { operationKey: "publish", title: "Choose", kind: "question", body: "Which?" }, caller) as any;
   expect(await x.client.call("lane_issue_read", { issueId: saved.issueId }, caller)).toMatchObject({ thread: { id: saved.issueId } });
+  const discovery = JSON.parse(readFileSync(join(path, "discovery.json"), "utf8"));
+  const listing = await fetch(`${discovery.url}/issues/api/threads`);
+  expect(listing.status).toBe(200);
+  expect(await listing.json()).toMatchObject({ result: { items: [{ id: saved.issueId }] }, actionToken: expect.any(String) });
   await x.runtime.close();
   expect(fake.events.indexOf("issues-close")).toBeLessThan(fake.events.indexOf("codex-stop"));
   expect(existsSync(join(path, "router.lock"))).toBe(false);
@@ -75,6 +79,8 @@ test("core-only assembly never constructs the module or creates its database", a
   expect(existsSync(join(path, "issues.sqlite"))).toBe(false);
   await expect(x.client.call("lane_directory", { project: "fixture" }, caller)).resolves.toEqual([]);
   await expect(x.client.call("lane_issue_read", {}, caller)).rejects.toThrow(/unknown method/);
+  const discovery = JSON.parse(readFileSync(join(path, "discovery.json"), "utf8"));
+  expect((await fetch(`${discovery.url}/issues/api/threads`)).status).toBe(404);
 });
 
 test.each(["corrupt", "future"])("%s module failure leaves core available and returns ISSUES_UNAVAILABLE without replacement", async kind => {
@@ -85,6 +91,10 @@ test.each(["corrupt", "future"])("%s module failure leaves core available and re
   const x = await boot(path);
   await expect(x.client.call("lane_directory", { project: "fixture" }, caller)).resolves.toEqual([]);
   await expect(x.client.call("lane_issue_read", {}, caller)).rejects.toThrow(/ISSUES_UNAVAILABLE/);
+  await expect(x.client.call("lane_issue_read", {}, caller)).rejects.toMatchObject({ code: "ISSUES_UNAVAILABLE" });
+  const discovery = JSON.parse(readFileSync(join(path, "discovery.json"), "utf8"));
+  const response = await fetch(`${discovery.url}/issues/api/threads`);
+  expect(response.status).toBe(503); expect(await response.json()).toMatchObject({ code: "ISSUES_UNAVAILABLE" });
   expect(readFileSync(databasePath)).toEqual(before);
 });
 

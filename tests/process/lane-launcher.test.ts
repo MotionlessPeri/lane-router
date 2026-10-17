@@ -1,6 +1,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -34,6 +36,35 @@ function fakes(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+test("issue grouping uses only current identity and opens no terminal or lane lifecycle path", async () => {
+  const call = vi.fn(async () => ({ items: [], nextCursor: null }));
+  const write = vi.fn();
+  const deps = fakes({ issueClient: { call }, env: { CODEX_THREAD_ID: "current-thread" }, readIssueJsonFile: () => ({ filter: "all" }), write });
+  expect(await launchLane(["issue", "read", "--json-file", "input.json"], deps)).toBe(0);
+  expect(call).toHaveBeenCalledExactlyOnceWith("lane_issue_read", { filter: "all" }, {
+    backend: "codex", conversationId: "current-thread", cwd: "D:\\caller", requestKey: expect.any(String),
+  });
+  expect(deps.spawnTerminal).not.toHaveBeenCalled(); expect(deps.queryDirectory).not.toHaveBeenCalled(); expect(deps.queryResumeInfo).not.toHaveBeenCalled();
+  expect(JSON.parse(write.mock.calls[0]![0])).toEqual({ items: [], nextCursor: null });
+});
+
+test("executable issue command fails before discovery when CODEX_THREAD_ID is missing", async () => {
+  const result = await new Promise<{ error: any; stdout: string; stderr: string }>(resolve => {
+    execFile(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../../src/process/lane-launcher.ts", import.meta.url)), "issue", "read", "--json-file", "missing.json"],
+      { env: { ...process.env, CODEX_THREAD_ID: "" } }, (error, stdout, stderr) => resolve({ error, stdout, stderr }));
+  });
+  expect(result.error?.code).toBe(1); expect(result.stdout).toBe(""); expect(result.stderr).toContain("CODEX_THREAD_ID is required");
+});
+
+test("executable issue refusal retains the business code on stderr and exits one", async () => {
+  const result = await new Promise<{ error: any; stdout: string; stderr: string }>(resolve => {
+    execFile(process.execPath, ["--import", "tsx", "--import", new URL("../fixtures/issues/cli-error-import.ts", import.meta.url).href,
+      fileURLToPath(new URL("../../src/process/lane-launcher.ts", import.meta.url)), "issue", "read", "--json-file", fileURLToPath(new URL("../fixtures/issues/cli-read.json", import.meta.url))],
+      { env: { ...process.env, CODEX_THREAD_ID: "fixture-thread" } }, (error, stdout, stderr) => resolve({ error, stdout, stderr }));
+  });
+  expect(result.error?.code).toBe(1); expect(result.stdout).toBe(""); expect(result.stderr.trim()).toBe("OPERATION_CONFLICT: Business key conflicts");
+});
 
 test("rejects malformed invocations without spawning or querying", async () => {
   const deps = fakes();

@@ -23,8 +23,9 @@ export class LocalRouterClient {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ method: name, params: args, context }),
     }));
-    const body = await response.json() as { result?: unknown; error?: string };
-    if (!response.ok) throw new Error(body.error ?? `Router request failed (${response.status})`);
+    const body = await response.json() as { result?: unknown; error?: string; code?: string };
+    if (!response.ok) throw Object.assign(new Error(body.error ?? `Router request failed (${response.status})`),
+      typeof body.code === "string" ? { code: body.code } : {});
     return body.result;
   }
 
