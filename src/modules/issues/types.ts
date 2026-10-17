@@ -132,6 +132,8 @@ export interface ReplyIssueInput {
 }
 export interface CloseIssueInput { readonly operationKey: string; readonly issueId: string; readonly body: string }
 export interface ReadIssueInput { readonly operationKey: string; readonly issueId: string; readonly throughSeq: number }
+export interface RecordProcessedInput { readonly operationKey: string; readonly issueId: string; readonly deliveryId: string }
+export interface IssueProcessedResult { readonly issueId: string; readonly deliveryId: string; readonly processedAt: number }
 export interface IssueEntryResult {
   readonly issueId: string;
   readonly entryId: string;

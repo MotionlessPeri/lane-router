@@ -7,8 +7,8 @@ import {
   IssueError,
   type AppendIssueInput, type AttentionReason, type CloseIssueInput, type IssueDetail,
   type IssueEntry, type IssueEntryResult, type IssueHistoryQuery, type IssueList,
-  type IssueListQuery, type IssueOwner, type IssueQuestion, type IssueThread,
-  type PublishIssueInput, type ReadIssueInput, type ReplyIssueInput, type UpdateIssueQuestionInput,
+  type IssueListQuery, type IssueOwner, type IssueProcessedResult, type IssueQuestion, type IssueThread,
+  type PublishIssueInput, type ReadIssueInput, type RecordProcessedInput, type ReplyIssueInput, type UpdateIssueQuestionInput,
 } from "./types.js";
 
 /** Business authority is here; clients display saved facts and never infer completion from delivery. */
@@ -98,6 +98,22 @@ export class IssuesService {
     const normalized = closeInput(input);
     return this.agentWrite(context, "record_tui_close", normalized.operationKey, normalized, normalized.issueId,
       (actor) => this.end(normalized.issueId, normalized.body, "agent_reported_tui_user", actor));
+  }
+
+  /** Processing is an independent saved fact, including for a reply whose issue has since closed. */
+  recordProcessed(context: CallerContext, input: RecordProcessedInput): IssueProcessedResult {
+    fields(input, ["operationKey", "issueId", "deliveryId"]);
+    const operationKey = text(input.operationKey, "operationKey");
+    const issueId = text(input.issueId, "issueId");
+    const deliveryId = text(input.deliveryId, "deliveryId");
+    return this.agentWrite(context, "record_processed", operationKey, { issueId, deliveryId }, issueId, (actor) => {
+      const delivery = this.store.delivery(deliveryId);
+      if (!delivery || delivery.issueId !== issueId || delivery.ownerLaneId !== actor.laneId) reference("Delivery does not belong to this issue and owner");
+      if (delivery.processedAt !== null) throw new IssueError("OPERATION_CONFLICT", "This delivery already has a processing receipt");
+      const processedAt = this.now();
+      this.store.updateDeliveryProcessing(deliveryId, { processedAt, processedByBindingId: actor.bindingId, processedByGeneration: actor.generation });
+      return { issueId, deliveryId, processedAt };
+    }, true);
   }
 
   listForLane(context: CallerContext, query: IssueListQuery = {}): IssueList {
@@ -210,13 +226,13 @@ export class IssuesService {
     return { laneId, address: facts?.address ?? null, state: facts === null ? "missing" : facts.archivedAt === null ? "active" : "archived" };
   }
 
-  private agentWrite<T>(context: CallerContext, operation: string, key: string, payload: object, issueId: string | undefined, work: (actor: LaneCallerIdentity) => T): T {
+  private agentWrite<T>(context: CallerContext, operation: string, key: string, payload: object, issueId: string | undefined, work: (actor: LaneCallerIdentity) => T, allowClosed = false): T {
     const actor = this.options.lanes.resolveCaller(context);
     if (issueId !== undefined) this.requireOwned(issueId, actor.laneId);
     this.options.lanes.assertCurrentCaller(context, actor);
     return this.store.transaction(() => this.operation(`lane:${actor.laneId}`, operation, key, payload, () => {
       this.requireActiveLane(actor.laneId);
-      if (issueId !== undefined) this.requireOpen(this.requireOwned(issueId, actor.laneId));
+      if (issueId !== undefined && !allowClosed) this.requireOpen(this.requireOwned(issueId, actor.laneId));
       return work(actor);
     }));
   }

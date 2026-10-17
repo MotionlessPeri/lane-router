@@ -71,6 +71,27 @@ describe("issue identity and lifecycle", () => {
     expect(() => x.service.append(x.caller, { operationKey: "after", issueId: result.issueId, kind: "tui_user", body: "too late" })).toThrowError(expect.objectContaining({ code: "ISSUE_CLOSED" }));
   });
 
+  for (const closeFirst of [false, true]) {
+    it(`keeps a closed issue unchanged when processing is recorded ${closeFirst ? "after" : "before"} closure`, () => {
+      const x = setup(); const published = publishQuestion(x);
+      const reply = x.service.reply({ operationKey: "reply", issueId: published.issueId, questionId: published.questionId, body: "Proceed." });
+      const input = { operationKey: "processed", issueId: published.issueId, deliveryId: reply.deliveryId! };
+      if (!closeFirst) x.service.recordProcessed(x.caller, input);
+      x.service.close({ operationKey: "close", issueId: published.issueId, body: "Ended." });
+      const closed = x.service.detail(published.issueId);
+      const receipt = x.service.recordProcessed(x.caller, input);
+      const after = x.service.detail(published.issueId);
+      expect(after.deliveries[0]).toMatchObject({ processedAt: receipt.processedAt, processedByBindingId: "binding:lane-one", processedByGeneration: 1 });
+      expect(after.thread).toEqual(closed.thread); expect(after.entries).toEqual(closed.entries); expect(after.questions).toEqual(closed.questions);
+      expect(after.questions[0]?.status).toBe("waiting_lane");
+      expect(x.service.list({ filter: "attention" }).items).toEqual([]);
+      expect(x.service.list({ filter: "closed" }).items[0]?.attentionReasons).toEqual([]);
+      expect(() => x.service.append(x.caller, { operationKey: "new-answer", issueId: published.issueId, kind: "answer", body: "Too late." })).toThrowError(expect.objectContaining({ code: "ISSUE_CLOSED" }));
+      expect(() => x.service.updateQuestion(x.caller, { operationKey: "new-resolution", issueId: published.issueId, questionId: published.questionId!, status: "not_needed", reason: "Too late." })).toThrowError(expect.objectContaining({ code: "ISSUE_CLOSED" }));
+      expect(() => x.service.reply({ operationKey: "new-reply", issueId: published.issueId, body: "Too late." })).toThrowError(expect.objectContaining({ code: "ISSUE_CLOSED" }));
+    });
+  }
+
   it("validates same-issue associations, meaningful answers and actor access before replay", () => {
     const x = setup();
     const first = publishQuestion(x);
