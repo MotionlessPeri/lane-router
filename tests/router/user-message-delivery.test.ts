@@ -120,6 +120,48 @@ describe("trusted in-process user message delivery", () => {
     expect(fileCount(x.root)).toBe(1);
   });
 
+  for (const order of ["user-first", "lane-first"] as const) {
+    it(`keeps a user request separate from a legacy lane send with a colliding raw key (${order})`, async () => {
+      const x = setup();
+      x.state.createLane({ address: "alpha/source", project: "alpha", roleDescription: "source", now: 1 });
+      x.state.createBinding({ id: "binding-source", laneAddress: "alpha/source", backend: "codex",
+        conversationId: "conversation-source", generation: 1, startup: {}, now: 2 });
+      const userInput = { ...x.input, requestKey: `host-key#${x.lane.address}`, body: "user body" };
+      const context = { backend: "codex" as const, conversationId: "conversation-source", requestKey: "user-message:host-key" };
+      const laneInput = { target: x.lane.address, kind: "normal" as const, body: "lane body" };
+      const user = () => x.core.deliverUserMessage(userInput);
+      const lane = async () => (await x.core.send(context, laneInput))[0]!;
+      let userId: string;
+      let laneId: string;
+      if (order === "user-first") { userId = (await user()).messageId!; laneId = (await lane()).id; }
+      else { laneId = (await lane()).id; userId = (await user()).messageId!; }
+      expect(userId).not.toBe(laneId);
+      expect(x.mailbox.readBody(x.state.requireMessage(userId).relativePath)).toBe("user body");
+      expect(x.mailbox.readBody(x.state.requireMessage(laneId).relativePath)).toBe("lane body");
+      expect(x.state.requireMessage(userId).senderLane).toBe("user:desktop");
+      expect(x.state.requireMessage(laneId).senderLane).toBe("alpha/source");
+      expect((await user()).messageId).toBe(userId);
+      expect((await lane()).id).toBe(laneId);
+      expect(x.state.allMessages()).toHaveLength(2);
+      expect(fileCount(x.root)).toBe(2);
+    });
+  }
+
+  it("keeps hash, escape literals and distinct UTF-16 request identities separate on delivery and retry", async () => {
+    const x = setup();
+    const requestKeys = ["key#part", "key%23part", "key%2523part", "key\ud800", "key\ud801", "key\ufffd", "key💡"];
+    const ids: string[] = [];
+    for (const requestKey of requestKeys) {
+      const input = { ...x.input, requestKey };
+      const result = await x.core.deliverUserMessage(input);
+      ids.push(result.messageId!);
+      expect((await x.core.deliverUserMessage(input)).messageId).toBe(result.messageId);
+    }
+    expect(new Set(ids).size).toBe(requestKeys.length);
+    expect(x.state.allMessages()).toHaveLength(requestKeys.length);
+    expect(fileCount(x.root)).toBe(requestKeys.length);
+  });
+
   it("retries notification failure without duplicating the durable message", async () => {
     const x = setup();
     x.bind();
@@ -239,6 +281,30 @@ describe("trusted in-process user message delivery", () => {
       .toMatchObject({ delivered: true, messageId: original.id, target: { laneId: x.lane.id, state: "archived" } });
     expect(state.archivedMessage(original.id)!.relativePath).toBe(`archive/${x.lane.id}/${original.id}.md`);
     expect(state.pendingMessages(x.lane.address)).toHaveLength(0);
+    expect(fileCount(x.root)).toBe(1);
+  });
+
+  it("finishes an acknowledged message's archive path after core archive moves its resolved file and indexing fails", async () => {
+    const x = setup();
+    x.bind();
+    const first = await x.core.deliverUserMessage(x.input);
+    await x.core.ack({ backend: "codex", conversationId: "conversation-one", requestKey: "ack" }, { messageIds: [first.messageId!] });
+    expect(x.state.requireMessage(first.messageId!).relativePath).toContain("/resolved/");
+    vi.spyOn(x.backend, "restorePresence").mockReturnValue("offline");
+    vi.spyOn(x.state, "updateArchivedMessagePath").mockImplementationOnce(() => { throw new Error("archive path index failure"); });
+    await expect(x.core.archiveLane(x.lane.address)).rejects.toThrow("archive path index failure");
+    expect(x.state.archivedMessage(first.messageId!)!.relativePath).toContain("/resolved/");
+    x.database.close();
+    const database = openRouterDatabase(x.databasePath);
+    databases.push(database);
+    const state = new RouterStateStore(database);
+    const mailbox = new MailboxStore(x.root);
+    expect(mailbox.reconcile(state)).toEqual({ recovered: 0, moved: 0 });
+    expect(await x.makeCore(state, mailbox).deliverUserMessage(x.input))
+      .toMatchObject({ delivered: true, messageId: first.messageId, target: { laneId: x.lane.id, state: "archived" } });
+    expect(state.archivedMessage(first.messageId!)!.relativePath).toBe(`archive/${x.lane.id}/${first.messageId}.md`);
+    expect(state.allMessages()).toHaveLength(0);
+    expect(database.prepare("SELECT state FROM message_archive WHERE id=?").get(first.messageId)).toEqual({ state: "resolved" });
     expect(fileCount(x.root)).toBe(1);
   });
 });

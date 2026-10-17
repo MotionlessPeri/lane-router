@@ -536,7 +536,9 @@ export class RouterCore implements UserMessageDelivery {
   async deliverUserMessage(input: UserMessageInput): Promise<UserMessageResult> {
     const state = this.dependencies.state;
     const sender = validateUserMessage(input);
-    const requestKey = `user-message:${input.requestKey}`;
+    // Legacy send keys always contain '#'. Encode UTF-16 code units so this namespace has none,
+    // while distinct JS strings (including lone surrogates) remain distinct across UTF-8 storage.
+    const requestKey = `user-message:${Buffer.from(input.requestKey, "utf16le").toString("base64url")}`;
     this.dependencies.mailbox.reconcile(state, requestKey);
     const lane = input.target.laneId === undefined
       ? state.lane(input.target.address) ?? state.archivedLaneAt(input.target.address)
@@ -557,8 +559,8 @@ export class RouterCore implements UserMessageDelivery {
     const existing = state.messageRequestByKey(requestKey);
     if (existing) {
       let relativePath = existing.message.relativePath;
-      if (existing.archived && relativePath.replaceAll("\\", "/").includes("/pending/")) {
-        // A previous retry may have moved the recovered orphan and stopped before indexing its
+      if (existing.archived && !relativePath.replaceAll("\\", "/").startsWith("archive/")) {
+        // An archive may have moved a pending orphan or an acknowledged file before indexing its
         // archive path. The archive move accepts its existing destination, including after restart.
         relativePath = this.dependencies.mailbox.archiveFile(existing.targetLaneId, relativePath).relativePath;
         state.updateArchivedMessagePath(existing.message.id, relativePath);
