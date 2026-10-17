@@ -13,6 +13,7 @@ import { MailboxStore } from "../../src/router/mailbox-store.js";
 import { NotificationPump } from "../../src/router/notification-pump.js";
 import { RouterCore } from "../../src/router/router-core.js";
 import { ToolService } from "../../src/tools/tool-service.js";
+import { LANE_TOOL_NAMES } from "../../src/tools/tool-contract.js";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => cleanups.splice(0).forEach(fn => fn()));
@@ -43,6 +44,18 @@ export async function sharedFixture() {
   await core.attachCurrent({ backend: "codex", conversationId: "second", requestKey: "attach-second" }, { address: "known/second", roleDescription: "Fixture" });
   return { root, db, state, mailbox, backend, target, core, tools, service, permit, socket, register, call };
 }
+
+test("Company native Host rejects tools outside its external send, read and ack contract before dispatch", async () => {
+  const x = await sharedFixture(); await x.register();
+  const call = vi.spyOn(x.tools, "call");
+  const read = vi.spyOn(x.core, "read");
+  for (const name of [...LANE_TOOL_NAMES, "external_lane_directory", "external_lane_restore_project", "unknown"]) {
+    await expect(x.call(`contract-${name}`, name, {})).rejects.toThrow("NATIVE_EXTERNAL_INVALID_REQUEST");
+  }
+  expect(call).not.toHaveBeenCalled();
+  expect(read).not.toHaveBeenCalled();
+  expect(x.state.pendingMessages("known/target")).toEqual([]);
+});
 
 test("native register fixes a distinct S and a connected permit; all historical addresses are refused", async () => {
   const x = await sharedFixture();

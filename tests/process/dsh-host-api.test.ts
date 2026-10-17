@@ -142,6 +142,42 @@ test("DSH endpoints authenticate and derive identity outside request JSON", asyn
   }
 });
 
+test("DSH call accepts only directory, attach, send and ack, leaving read on its Host route", async () => {
+  const fixture = await setup();
+  const post = (method: string, params: Record<string, unknown> = {}) => fetch(`${fixture.discovery.url}/dsh/v1/call`, {
+    method: "POST", headers: headers(), body: JSON.stringify({ method, params, requestKey: `contract-${method}` }),
+  });
+  try {
+    for (const [method, params] of [
+      ["lane_directory", { project: "alpha" }], ["lane_attach_current", { address: "alpha/a" }],
+      ["lane_send", { target: "alpha/a", body: "x", kind: "normal" }], ["lane_ack", { message_ids: ["m1"] }],
+    ] as const) {
+      expect((await post(method, params)).status).toBe(200);
+      expect(fixture.tools.call).toHaveBeenLastCalledWith(method, params, {
+        backend: "dsh", conversationId: "session-1", requestKey: `contract-${method}`,
+      }, expect.any(AbortSignal), { rejectTakeover: true });
+    }
+    fixture.tools.call.mockClear();
+    for (const method of ["lane_restore_project", "lane_read", "external_lane_read", "lane_handoff", "unknown"]) {
+      const response = await post(method);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ protocolVersion: 1, error: { code: "INVALID_REQUEST", message: "method, params, and requestKey are required" } });
+    }
+    expect(fixture.tools.call).not.toHaveBeenCalled();
+    expect(fixture.read).not.toHaveBeenCalled();
+    const read = await fetch(`${fixture.discovery.url}/dsh/v1/read`, {
+      method: "POST", headers: headers(), body: JSON.stringify({ messageIds: ["m1"] }),
+    });
+    expect(read.status).toBe(200);
+    expect(await read.json()).toEqual({ protocolVersion: 1, messages: [] });
+    expect(fixture.read).toHaveBeenCalledWith({ backend: "dsh", conversationId: "session-1", requestKey: expect.any(String) }, ["m1"]);
+    expect(fixture.tools.call).not.toHaveBeenCalled();
+  } finally {
+    await fixture.server.close();
+    await new Promise<void>((resolve) => fixture.upstream.close(() => resolve()));
+  }
+});
+
 test("DSH handoff is a separate authenticated Host endpoint, not an agent tool", async () => {
   const fixture = await setup();
   const url = `${fixture.discovery.url}/dsh/v1/handoff`;

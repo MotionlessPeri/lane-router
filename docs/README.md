@@ -7,3 +7,7 @@
 ## 设计
 
 - [后台 HTTP 边界整理设计](superpowers/specs/2026-10-17-dashboard-http-boundary-design.md)
+
+## 实施计划
+
+- [后台 HTTP 边界整理](superpowers/plans/2026-10-17-dashboard-http-boundary.md)
