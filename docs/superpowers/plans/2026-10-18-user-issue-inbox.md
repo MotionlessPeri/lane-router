@@ -82,11 +82,11 @@
 
 **Files:** 新建 `src/router/lane-access.ts`、`tests/router/lane-access.test.ts`；修改 `src/router/router-core.ts`。
 
-- [ ] 在隔离树保留原始 `git status`、基线全套结果与依赖版本；运行 `npm ci`、`npm test -- --maxWorkers=2 --testTimeout=30000`，先区分既有失败，不改测试配置掩盖它。
-- [ ] 新增失败测试：未绑定/失效 binding 拒绝；joined identity 正确解析；旧地址归档并同名新建后仍按 binding 的 lane ID 判归属；按 ID 查询不误指向新 lane。
-- [ ] 运行 `npm test -- tests/router/lane-access.test.ts`，确认缺少端口的目标失败，而非测试加载/语法失败。
-- [ ] 用既有身份解析、`bindingLaneId`、`laneById`、`activeBindingForLaneId` 实现窄端口；不把 state store 交给模块。
-- [ ] 重跑定向测试与 `tests/router/router-core.test.ts`、`tests/router/lane-archive.test.ts`、`npm run typecheck`；只提交本任务文件。
+- [x] 在隔离树保留原始 `git status`、基线全套结果与依赖版本；运行 `npm ci`、`npm test -- --maxWorkers=2 --testTimeout=30000`，先区分既有失败，不改测试配置掩盖它。
+- [x] 新增失败测试：未绑定/失效 binding 拒绝；joined identity 正确解析；旧地址归档并同名新建后仍按 binding 的 lane ID 判归属；按 ID 查询不误指向新 lane。
+- [x] 运行 `npm test -- tests/router/lane-access.test.ts`，确认缺少端口的目标失败，而非测试加载/语法失败。
+- [x] 用既有身份解析、`bindingLaneId`、`laneById`、`activeBindingForLaneId` 实现窄端口；不把 state store 交给模块。
+- [x] 重跑定向测试与 `tests/router/router-core.test.ts`、`tests/router/lane-archive.test.ts`、`npm run typecheck`；只提交本任务文件。
 
 ### Task 2：模块表、事务与业务服务
 

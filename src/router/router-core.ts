@@ -1,6 +1,7 @@
 import type { BackendRegistry, RestorePresence } from "./backend.js";
 import { isAddressSegment, parseLaneAddress, senderLabel } from "./address.js";
 import type { MailboxStore } from "./mailbox-store.js";
+import type { LaneAccess, LaneAccessFacts, LaneCallerIdentity } from "./lane-access.js";
 import type { UserMessageDelivery, UserMessageInput, UserMessageResult, UserMessageTargetState } from "./user-message.js";
 import type { NotificationPump } from "./notification-pump.js";
 import type { RouterStateStore } from "./state-store.js";
@@ -111,8 +112,34 @@ interface RouterCoreDependencies {
   readonly now: () => number;
 }
 
-export class RouterCore implements UserMessageDelivery {
+export class RouterCore implements UserMessageDelivery, LaneAccess {
   constructor(private readonly dependencies: RouterCoreDependencies) {}
+
+  resolveCaller(context: CallerContext): LaneCallerIdentity {
+    const binding = this.requireCallerBinding(context);
+    const laneId = this.dependencies.state.bindingLaneId(binding.id);
+    if (laneId === undefined) throw new RouterError("NOT_ATTACHED", "The current binding has no lane identity");
+    return { laneId, bindingId: binding.id, generation: binding.generation };
+  }
+
+  assertCurrentCaller(context: CallerContext, expected: LaneCallerIdentity): void {
+    const current = this.resolveCaller(context);
+    if (current.laneId !== expected.laneId || current.bindingId !== expected.bindingId || current.generation !== expected.generation) {
+      throw new RouterError("BINDING_CHANGED", "The current conversation's lane binding changed");
+    }
+  }
+
+  readLane(laneId: string): LaneAccessFacts | null {
+    const state = this.dependencies.state;
+    const lane = state.laneById(laneId);
+    if (!lane) return null;
+    const binding = state.activeBindingForLaneId(laneId);
+    return {
+      laneId: lane.id, address: lane.address, archivedAt: lane.archivedAt,
+      binding: binding ? { bindingId: binding.id, generation: binding.generation, backend: binding.backend } : null,
+      reach: binding ? this.dependencies.backends.find(binding.backend)?.reach(binding) ?? null : null,
+    };
+  }
 
   directory(project: string): DirectoryEntry[] {
     if (!project.trim() || project.includes("/")) throw new RouterError("INVALID_PROJECT", "Project must be one non-empty segment");
