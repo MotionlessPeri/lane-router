@@ -178,7 +178,7 @@ lane-router-lane issue record-tui-close --json-file ./issue-tui-close.json
 5. 退出 Claude，再发送一条消息；恢复同一 Claude session 后确认 pending 消息再次得到提醒。
 6. 在旧 turn 运行期间从新对话请求接替同一 lane，确认接替等待 `Stop`，随后 generation 增加且旧 session 不能再发送或 ack。
 
-预期：五项通信工具为 `lane_directory`、`lane_attach_current`、`lane_send`、`lane_ack`、`lane_restore_project`。`createLaneMcpServer` 工厂默认该五项目录；当前 stdio 入口显式再组合上述四项议题工具，共九项，需按议题现场用例实际刷新验证。`issues:false` 不会把 stdio MCP 已发布目录同步切成五项。MCP 进程使用 Claude 自动提供的 `CLAUDE_CODE_SESSION_ID`；hook 的 `session_id` 与它对应。通知不携带完整正文，完整正文在 mailbox 文件中。
+预期：五项通信工具为 `lane_directory`、`lane_attach_current`、`lane_send`、`lane_ack`、`lane_restore_project`。`createLaneMcpServer` 工厂默认该五项目录；当前 stdio 入口显式再组合上述四项议题工具和四项图工具，共十三项，需按议题与图现场用例实际刷新验证。`issues:false` 不会把 stdio MCP 已发布目录同步切成五项。MCP 进程使用 Claude 自动提供的 `CLAUDE_CODE_SESSION_ID`；hook 的 `session_id` 与它对应。通知不携带完整正文，完整正文在 mailbox 文件中。
 
 ## Codex remote TUI
 
@@ -931,7 +931,7 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 ## ZCode CLI
 
-ZCode 会话走 Claude Channel 这条已验证的链路：同一个 lane MCP server（ZCode 是标准 MCP client，当前 stdio 入口显式提供九项产品工具）、同一套 lifecycle 上报与 join。身份是这条链路唯一的新东西——**ZCode 给 MCP 子进程不传任何会话身份**（initialize 参数与 env 均已实测确认），会话 id 只在 hook 侧存在（stdin 的 `session_id` 与 env 的 `CLAUDE_CODE_SESSION_ID`/`ZCODE_SESSION_ID`）。因此 join key 取共享父进程：同一 app-server 既 spawn 会话的 MCP server 又 spawn 它的 hook，`process.ppid` 相等即配对。
+ZCode 会话走 Claude Channel 这条已验证的链路：同一个 lane MCP server（ZCode 是标准 MCP client，当前 stdio 入口显式提供十三项产品工具）、同一套 lifecycle 上报与 join。身份是这条链路唯一的新东西——**ZCode 给 MCP 子进程不传任何会话身份**（initialize 参数与 env 均已实测确认），会话 id 只在 hook 侧存在（stdin 的 `session_id` 与 env 的 `CLAUDE_CODE_SESSION_ID`/`ZCODE_SESSION_ID`）。因此 join key 取共享父进程：同一 app-server 既 spawn 会话的 MCP server 又 spawn 它的 hook，`process.ppid` 相等即配对。
 
 **前提：** 已构建 `dist/`；`~/.zcode/cli/config.json` 同时注册两者（MCP server 见下；hook 必须 `type: "process"`——`type: "command"` 的 shell 会插在中间换掉父进程，join 从此配不上对）；**参与的会话都起于配置之后**（与 Claude 侧同因：MCP/hook 配置在进程启动时载入）。
 
