@@ -72,10 +72,10 @@ test("login opens official URL in backend, persists metadata only, and does not 
   await expect.poll(() => setup.manager.loginStatus().state).toBe("complete");
   const profiles = setup.manager.listPublic();
   expect(profiles).toHaveLength(1);
-  expect(profiles[0]).toMatchObject({ email: "a***@fixture.invalid", plan: "plus" });
+  expect(profiles[0]).toMatchObject({ email: "alice@fixture.invalid", plan: "plus" });
   expect(setup.manager.desiredProfileId).toBeUndefined();
   const publicText = JSON.stringify({ profiles, status: setup.manager.loginStatus() });
-  for (const value of ["user-a", "workspace-a", "alice@fixture.invalid", setup.root, "auth.openai.com", setup.brokers[0]!.accessToken]) expect(publicText).not.toContain(value);
+  for (const value of ["user-a", "workspace-a", setup.root, "auth.openai.com", setup.brokers[0]!.accessToken]) expect(publicText).not.toContain(value);
   const metadata = await readFile(join(setup.root, "profiles.json"), "utf8");
   expect(metadata).not.toContain(setup.brokers[0]!.accessToken);
   expect(metadata).not.toContain("authUrl");

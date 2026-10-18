@@ -159,6 +159,10 @@ test("the dashboard links to the issue inbox alongside its existing launcher", a
   const document = await render();
   expect(document.querySelector('header a[href="/issues"]')?.textContent).toContain("议题");
   expect(document.querySelector("#launcher")).not.toBeNull();
+  const accounts = document.querySelector('header a[href="http://127.0.0.1:47839/"]');
+  expect(accounts?.textContent).toBe("账号切换");
+  expect(accounts?.getAttribute("target")).toBe("_blank");
+  expect(accounts?.getAttribute("rel")).toContain("noopener");
 });
 
 test("the launcher starts with nothing selected and submits one protected request", async () => {

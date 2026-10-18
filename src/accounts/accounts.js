@@ -1,6 +1,7 @@
 /* The page receives metadata only. Credentials and authorization URLs stay in the backend. */
 (() => {
   const $ = id => document.getElementById(id);
+  const names = { router: "Codex lane", company: "Company" };
   let selected = null, state = null, busy = false;
   const errors = {
     CONSUMER_OFFLINE: "有运行端离线。请启动对应运行端后重试。",
@@ -37,7 +38,14 @@
       button.setAttribute("role", "radio"); button.setAttribute("aria-checked", String(selected === profile.id));
       const title = document.createElement("strong"); title.textContent = profile.email;
       const detail = document.createElement("small"); detail.textContent = `${profile.plan} · 工作区 ${profile.workspace}`;
-      button.append(title, detail); button.disabled = switching || busy;
+      button.append(title, detail);
+      const using = state.consumers.filter(c => c.identity && c.profileId === profile.id && c.state !== "offline");
+      if (using.length) {
+        const current = document.createElement("small"); current.className = "current";
+        current.textContent = using.map(c => names[c.id] || c.id).join("、") + " 正在使用";
+        button.append(current);
+      }
+      button.disabled = switching || busy;
       button.onclick = () => { selected = profile.id; render(); }; $("profiles").append(button);
     }
     $("empty").hidden = profiles.length > 0;
@@ -47,14 +55,23 @@
     $("cancel").hidden = !state.operation?.cancellable || !["validating", "waiting"].includes(state.operation?.phase);
     $("cancel-login").hidden = !logging;
     $("consumers").replaceChildren();
-    const names = { router: "Codex lane", company: "Company" };
-    const labels = { offline: "未连接", connected: "已连接，待同步", waiting: "正在等待回合结束", applying: "正在切换", synced: "账号已核实", failed: "未完成" };
+    const labels = { offline: "未连接", connected: "已连接", waiting: "正在等待回合结束", applying: "正在切换", synced: "账号已核实", failed: "未完成" };
     for (const consumer of state.consumers) {
       const row = document.createElement("div"); row.className = "consumer"; row.dataset.state = consumer.state;
       const title = document.createElement("strong"); title.textContent = names[consumer.id] || consumer.id;
       const detail = document.createElement("p"); detail.textContent = labels[consumer.state] || consumer.state;
-      const account = document.createElement("p"); account.textContent = consumer.identity ? `${consumer.identity.email} · ${consumer.identity.workspace}` : "尚未核实当前账号";
+      const account = document.createElement("p");
+      const profile = profiles.find(p => p.id === consumer.profileId);
+      account.textContent = consumer.identity
+        ? `当前账号：${profile?.email || consumer.identity.email} · 工作区 ${consumer.identity.workspace}`
+        : consumer.state === "offline" ? "运行端未连接，无法读取当前账号。"
+        : consumer.identityError ? "暂时无法读取当前账号。" : "正在读取当前账号…";
       row.append(title, detail, account);
+      if (consumer.identityError) {
+        const error = document.createElement("p"); error.className = "error";
+        error.textContent = consumer.identityError === "AUTH_REQUIRED" ? "运行端未提供账号身份，请检查其登录状态。" : describe(consumer.identityError);
+        row.append(error);
+      }
       if (consumer.error) { const error = document.createElement("p"); error.className = "error"; error.textContent = describe(consumer.error); row.append(error); }
       $("consumers").append(row);
     }
@@ -84,6 +101,7 @@
       $("status-title").textContent = "同步状态待核实";
       $("status-detail").textContent = "无法读取后台状态。恢复连接后会重新核实两个运行端。";
       $("consumers").replaceChildren();
+      for (const current of document.querySelectorAll("#profiles .current")) current.remove();
       const note = document.createElement("p"); note.textContent = "Company 与 Codex lane 的当前账号尚未核实。"; $("consumers").append(note);
       $("switch").disabled = true; $("add").disabled = true; $("reauthorize").disabled = true;
       $("cancel").hidden = true; $("cancel-login").hidden = true;

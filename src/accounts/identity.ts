@@ -18,9 +18,8 @@ export function sameIdentity(a: AccountIdentity, b: AccountIdentity): boolean {
 }
 
 export function publicIdentity(identity: AccountIdentity): PublicIdentity {
-  const [local, domain] = identity.email.split("@");
   return {
-    email: local && domain ? `${local.slice(0, 1)}***@${domain}` : "已授权账号",
+    email: identity.email || "已授权账号",
     workspace: createHash("sha256").update(identity.accountId).digest("hex").slice(0, 10),
     plan: identity.plan,
   };

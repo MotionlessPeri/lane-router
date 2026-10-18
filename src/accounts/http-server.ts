@@ -77,6 +77,7 @@ export class AccountHttpServer {
     try {
       if (request.method === "GET") {
         if (request.url === "/api/state") {
+          this.options.service.observeIdentities();
           json(200, { profiles: this.options.accounts.listPublic(), login: this.options.accounts.loginStatus(), ...this.options.service.snapshot() }); return;
         }
         const asset = ({ "/": ["accounts.html", "text/html"], "/accounts.js": ["accounts.js", "text/javascript"], "/accounts.css": ["accounts.css", "text/css"] } as Record<string, [string, string]>)[request.url ?? ""];

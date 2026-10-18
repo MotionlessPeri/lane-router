@@ -36,3 +36,33 @@ test("a disconnected backend clears a previously complete synchronization claim"
   expect(window.document.body.textContent).not.toContain("账号已核实");
   expect(window.document.getElementById("cancel")!.hidden).toBe(true);
 });
+
+test("current account labels follow runtime identity rather than the selected target, and clear on disconnect", async () => {
+  const window = new Window({ url: "http://127.0.0.1:47839" }); windows.push(window);
+  window.document.write((await readFile(new URL("../../src/accounts/accounts.html", import.meta.url), "utf8")).replace('<script src="/accounts.js" defer></script>', ""));
+  const email = "bob.long.complete.address+workspace@example.invalid";
+  let online = true;
+  const state: any = { profiles: [
+    { id: "profile-a", email: "alice@example.invalid", workspace: "aaaa", plan: "plus" },
+    { id: "profile-b", email, workspace: "bbbb", plan: "pro" },
+  ], login: { state: "complete" }, desiredProfileId: null, operation: null, consumers: [
+    { id: "router", state: "connected", profileId: "profile-b", identity: { email: "已授权账号", workspace: "bbbb", plan: "pro" } },
+    { id: "company", state: "connected", profileId: null, identity: null, identityError: "AUTH_REQUIRED" },
+  ] };
+  const fetcher = vi.fn(async () => { if (!online) throw Error(); return { ok: true, json: async () => state }; });
+  window.fetch = fetcher as any;
+  window.eval(await readFile(new URL("../../src/accounts/accounts.js", import.meta.url), "utf8"));
+  await vi.waitFor(() => expect(window.document.querySelector("#consumers")!.textContent).toContain(`当前账号：${email}`));
+  const profiles = window.document.querySelectorAll("#profiles .profile");
+  expect(profiles[0]!.getAttribute("aria-checked")).toBe("true");
+  expect(profiles[0]!.querySelector(".current")).toBeNull();
+  expect(profiles[1]!.querySelector(".current")?.textContent).toBe("Codex lane 正在使用");
+  expect(window.document.querySelector("#consumers")!.textContent).toContain("运行端未提供账号身份");
+  expect(window.document.querySelector("#consumers")!.textContent).not.toContain("尚未核实当前账号");
+  expect(window.document.querySelector("#status-title")!.textContent).not.toBe("全部已同步");
+  expect(fetcher.mock.calls).toEqual([["/api/state"]]);
+  online = false;
+  await vi.waitFor(() => expect(window.document.getElementById("connection")!.textContent).toBe("后台未连接"), { timeout: 2000 });
+  expect(window.document.querySelector("#profiles .current")).toBeNull();
+  expect(window.document.querySelector("#consumers")!.textContent).not.toContain(email);
+});

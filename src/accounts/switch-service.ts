@@ -8,6 +8,7 @@ interface Consumer {
   identity?: AccountIdentity;
   profileId?: string;
   error?: string;
+  identityError?: string;
   binding?: Promise<void>;
   revision: number;
 }
@@ -47,6 +48,24 @@ export class AccountSwitchService {
     } else {
       // Before the first user selection, connecting the service must not change accounts.
       await Promise.allSettled([...this.consumers.values()].map(c => c.participant.release("startup")));
+      this.observeIdentities();
+    }
+  }
+
+  /** Read current owners without selecting an account, holding work, or refreshing credentials. */
+  observeIdentities(): void {
+    if (this.running) return;
+    for (const consumer of this.consumers.values()) {
+      if (consumer.binding) continue;
+      const revision = consumer.revision;
+      void this.bindExistingIdentity(consumer).then(() => {
+        if (this.consumers.get(consumer.participant.id) === consumer && consumer.revision === revision) consumer.identityError = undefined;
+      }, error => {
+        // An old observation must not clear a replacement or a later successful apply.
+        if (this.running || this.consumers.get(consumer.participant.id) !== consumer || consumer.revision !== revision) return;
+        consumer.identity = undefined; consumer.profileId = undefined;
+        consumer.identityError = safeError(error);
+      });
     }
   }
 
@@ -72,7 +91,10 @@ export class AccountSwitchService {
   async refresh(consumerId: string, previousAccountId: string): Promise<unknown> {
     const consumer = this.consumers.get(consumerId);
     if (consumer?.state === "applying") throw new AccountError("RUNTIME_UNAVAILABLE");
-    if (consumer && !consumer.profileId) await this.bindExistingIdentity(consumer);
+    if (consumer && !consumer.profileId) {
+      await this.bindExistingIdentity(consumer);
+      if (!consumer.profileId) throw new AccountError("AUTH_REQUIRED");
+    }
     if (!consumer?.profileId || !consumer.identity || consumer.identity.accountId !== previousAccountId) throw new AccountError("IDENTITY_MISMATCH");
     const profileId = consumer.profileId;
     const identity = consumer.identity;
@@ -88,7 +110,8 @@ export class AccountSwitchService {
       operation: this.operation ? { ...this.operation } : null,
       consumers: this.options.expected.map(id => {
         const consumer = this.consumers.get(id);
-        return { id, state: consumer?.state ?? "offline", identity: consumer?.identity ? publicIdentity(consumer.identity) : null, error: consumer?.error ?? null };
+        return { id, state: consumer?.state ?? "offline", identity: consumer?.identity ? publicIdentity(consumer.identity) : null,
+          profileId: consumer?.profileId ?? null, identityError: consumer?.identityError ?? null, error: consumer?.error ?? null };
       }),
     };
   }
@@ -127,6 +150,7 @@ export class AccountSwitchService {
           consumer.revision++;
           // A failed response may hide a successful apply. Re-read identity before any refresh.
           consumer.profileId = undefined; consumer.identity = undefined;
+          consumer.identityError = undefined;
           await consumer.participant.apply(operation.id, grant);
           const identity = await consumer.participant.readIdentity();
           this.assertConnected([consumer]);
@@ -161,7 +185,6 @@ export class AccountSwitchService {
       this.assertConnected([consumer]);
       if (consumer.state === "applying" || consumer.revision !== revision) throw new AccountError("IDENTITY_MISMATCH");
       const profileId = this.options.source.findProfile?.(identity);
-      if (!profileId) throw new AccountError("AUTH_REQUIRED");
       consumer.identity = identity; consumer.profileId = profileId;
     })();
     consumer.binding = task.finally(() => { consumer.binding = undefined; });

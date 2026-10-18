@@ -6,8 +6,9 @@ test("identity uses stable user and workspace, never email alone", () => {
   const a = identityFromToken(token());
   expect(sameIdentity(a, identityFromToken(token("workspace-b")))).toBe(false);
   expect(sameIdentity(a, identityFromToken(token("workspace-a", "user-b")))).toBe(false);
-  expect(publicIdentity(a)).toMatchObject({ email: "p***@example.invalid", plan: "plus" });
+  expect(publicIdentity(a)).toMatchObject({ email: "person@example.invalid", plan: "plus" });
   expect(JSON.stringify(publicIdentity(a))).not.toContain("user-a");
+  expect(JSON.stringify(publicIdentity(a))).not.toContain("workspace-a");
 });
 test("invalid token errors never echo credentials; incomplete identity fails closed", () => {
   expect(() => identityFromToken("secret-do-not-echo")).toThrow("INVALID_IDENTITY");

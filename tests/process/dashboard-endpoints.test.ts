@@ -42,9 +42,8 @@ test("the state endpoint answers with the snapshot and the facts only the server
   } finally { await server.close(); }
 });
 
-// Acceptance 5. The page has to work on a machine with no network at all, and every external
-// reference would also be a hole in the same-machine threat model this whole surface rests on.
-test("the page is served as self-contained HTML that reaches for nothing", async () => {
+// The dashboard loads no external resources; account navigation stays on this machine.
+test("the page is self-contained with only the local account-page navigation URL", async () => {
   const server = startServer(() => ({}));
   const discovery = await server.start();
   try {
@@ -53,7 +52,7 @@ test("the page is served as self-contained HTML that reaches for nothing", async
     expect(response.headers.get("content-type")).toMatch(/text\/html/u);
     const page = await response.text();
     expect(page).toMatch(/<html/iu);
-    expect(page).not.toMatch(/https?:\/\//u);
+    expect(page.match(/https?:\/\/[^"'\s<]+/gu)).toEqual(["http://127.0.0.1:47839/"]);
     expect(page).not.toMatch(/<link\b/iu);
     expect(page).not.toMatch(/<script[^>]+\bsrc\b/iu);
   } finally { await server.close(); }
