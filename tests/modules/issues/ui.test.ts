@@ -11,10 +11,10 @@ afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await c
 
 type Call = { path: string; init?: RequestInit; body: any };
 type Intercept = (call: Call, send: () => Promise<Response>) => Promise<Response>;
-async function boot(options: { firstTitle?: string; prepare?: (x: ReturnType<typeof setupIssues>) => void; intercept?: Intercept } = {}) {
+async function boot(options: { firstTitle?: string; firstBody?: string; secondBody?: string; skipMarkdown?: boolean; prepare?: (x: ReturnType<typeof setupIssues>) => void; intercept?: Intercept } = {}) {
   const x = setupIssues(); cleanup.push(() => x.dispose());
-  const first = x.service.publish(x.caller, { operationKey: "first", kind: "question", title: options.firstTitle ?? "Choose", body: "请选 A，或直接追问" });
-  const second = x.service.publish(x.other, { operationKey: "second", kind: "answer", title: "研究答复", originalQuestion: "原来的问题", body: "已有答复" });
+  const first = x.service.publish(x.caller, { operationKey: "first", kind: "question", title: options.firstTitle ?? "Choose", body: options.firstBody ?? "请选 A，或直接追问" });
+  const second = x.service.publish(x.other, { operationKey: "second", kind: "answer", title: "研究答复", originalQuestion: "原来的问题", body: options.secondBody ?? "已有答复" });
   options.prepare?.(x);
   const server = new LocalRouterServer({ tools: { call: vi.fn() } as never,
     codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: randomUUID(), issues: { service: x.service },
@@ -28,7 +28,14 @@ async function boot(options: { firstTitle?: string; prepare?: (x: ReturnType<typ
     return options.intercept ? options.intercept(call, send) : send();
   };
   window.document.write(page);
-  const script = window.document.querySelector("script")?.textContent;
+  for (const asset of window.document.querySelectorAll("script[src]")) {
+    if (options.skipMarkdown) continue;
+    const response = await fetch(new URL(asset.getAttribute("src")!, url));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/javascript; charset=utf-8");
+    new Function("globalThis", "module", "exports", await response.text())(window, undefined, undefined);
+  }
+  const script = window.document.querySelector("script:not([src])")?.textContent;
   expect(script).toBeTruthy();
   let poll = () => {};
   let timerId = 0;
@@ -78,6 +85,73 @@ test("specific questions and continued discussion save through HTTP without clos
   expect(f.calls.filter(c => c.path.endsWith("/replies"))[1]?.body.questionId).toBeUndefined();
 });
 
+test("question and answer history render Markdown headings, lists, tables, links and escaped code", async () => {
+  const markdown = [
+    "## 方案比较", "", "**重点**、*解释*与 `lane_issue_read`。", "", "> 先确认边界", "",
+    "- 第一项", "- 第二项", "", "1. 读取", "2. 回复", "",
+    "| 方案 | 结论 |", "| --- | --- |", "| A | 可行 |", "",
+    '[参考](https://example.com/docs "说明")', "", "```html", '<img src=x onerror="bad()">', "```",
+  ].join("\n");
+  const f = await boot({ firstBody: markdown, secondBody: markdown });
+  for (const id of [f.first.issueId, f.second.issueId]) {
+    await f.selected(id);
+    // An answer thread also contains the original user's question before the lane's answer.
+    const saved = f.x.service.detail(id).entries.find(entry => entry.body === markdown)!;
+    const body = f.query(`#history [data-entry-seq="${saved.seq}"] .entry-body`);
+    expect(body.querySelector("h2")?.textContent).toBe("方案比较");
+    expect(body.querySelector("strong")?.textContent).toBe("重点");
+    expect(body.querySelector("em")?.textContent).toBe("解释");
+    expect(body.querySelector("blockquote")?.textContent).toContain("先确认边界");
+    expect(body.querySelectorAll("ul li")).toHaveLength(2);
+    expect(body.querySelectorAll("ol li")).toHaveLength(2);
+    expect(body.querySelectorAll("table th")).toHaveLength(2);
+    expect(body.querySelector("table td")?.textContent).toBe("A");
+    expect(body.querySelector("a")?.getAttribute("href")).toBe("https://example.com/docs");
+    expect(body.querySelector("a")?.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(body.querySelector("pre code")?.textContent).toBe('<img src=x onerror="bad()">\n');
+    expect(body.querySelector("img")).toBeNull();
+    expect(saved.body).toBe(markdown);
+  }
+});
+
+test("Markdown replies are sent and stored verbatim before the saved history is rendered", async () => {
+  const f = await boot(); await f.selected(f.first.issueId);
+  const markdown = "**我选 A**\n\n```ts\nconst value = '<raw>';\n```";
+  f.change("#reply-body", markdown);
+  expect(f.query("#reply-body").value).toBe(markdown);
+  f.click("#send-reply");
+  await vi.waitFor(() => expect(f.query("#history .entry.user strong")?.textContent).toBe("我选 A"));
+  expect(f.calls.find(c => c.path.endsWith("/replies"))?.body.body).toBe(markdown);
+  expect(f.x.service.detail(f.first.issueId).entries.at(-1)?.body).toBe(markdown);
+  expect(f.query("#history .entry.user pre code").textContent).toBe("const value = '<raw>';\n");
+  expect(f.x.service.detail(f.first.issueId).thread.status).toBe("open");
+});
+
+test("Markdown cannot activate raw HTML, executable links or automatic image loads", async () => {
+  const hostile = [
+    '<img src=x onerror="bad()"><script>bad()</script>',
+    '<iframe src="https://example.com"></iframe>',
+    '[run](javascript:alert%281%29)', '[encoded](java&#x73;cript:alert%281%29)',
+    '[data](data:text/html;base64,PHNjcmlwdD4=)', '[file](file:///C:/private)',
+    '![tracking image](https://example.com/tracker.png)', '[safe](https://example.com/)',
+  ].join("\n\n");
+  const f = await boot({ firstBody: hostile }); await f.selected(f.first.issueId);
+  const history = f.query("#history");
+  expect(history.querySelectorAll("img,script,iframe,svg,object,embed")).toHaveLength(0);
+  expect(history.textContent).toContain('<img src=x onerror="bad()">');
+  const hrefs = [...history.querySelectorAll("a")].map((a: any) => a.getAttribute("href"));
+  expect(hrefs).toContain("https://example.com/");
+  expect(hrefs.some((href: any) => /^(?:javascript|data|file):/i.test(href))).toBe(false);
+});
+
+test("an unavailable Markdown renderer leaves the inbox usable with an explicit plain-text fallback", async () => {
+  const f = await boot({ skipMarkdown: true, firstBody: "**原文仍可读**" }); await f.selected(f.first.issueId);
+  expect(f.query("#history .entry-body").textContent).toBe("**原文仍可读**");
+  expect(f.query("#markdown-status")?.hidden).toBe(false);
+  expect(f.query("#markdown-status")?.textContent).toContain("原文");
+  expect(f.query("#send-reply").disabled).toBe(false);
+});
+
 test("handoff and processed facts remain separate from question status and display unavailable owners", async () => {
   const f = await boot({ prepare(x) {
     const target = x.service.list().items.find(i => i.originKind === "question")!;
@@ -111,6 +185,18 @@ test("explicit close can be cancelled and confirmed with no reason, then history
   f.click('[data-filter="closed"]'); await vi.waitFor(() => expect(f.query("#thread-list").textContent).toContain("Choose"));
 });
 
+test("closing a long discussion moves focus to its confirmation without submitting and cancel restores focus", async () => {
+  const f = await boot({ firstBody: "一段很长的讨论。\n\n".repeat(100) }); await f.selected(f.first.issueId);
+  f.query("#close-issue").focus(); f.click("#close-issue");
+  expect(f.query("#close-confirmation").hidden).toBe(false);
+  expect(f.document.activeElement?.id).toBe("close-confirmation");
+  expect(f.calls.filter(c => c.path.endsWith("/close"))).toHaveLength(0);
+  expect(f.x.service.detail(f.first.issueId).thread.status).toBe("open");
+  f.click("#cancel-close");
+  expect(f.query("#close-confirmation").hidden).toBe(true);
+  expect(f.document.activeElement?.id).toBe("close-issue");
+});
+
 test("backend titles, owners, bodies and reasons are plain text, including archived owners", async () => {
   const hostile = '<img src=x onerror="globalThis.issueInjected=true"><script>bad()</script>';
   const f = await boot({ firstTitle: hostile, prepare(x) {
@@ -123,7 +209,7 @@ test("backend titles, owners, bodies and reasons are plain text, including archi
   await f.selected(f.first.issueId);
   expect(f.query("#detail-title").textContent).toBe(hostile); expect(f.query("#questions").textContent).toContain(hostile);
   expect(f.query("#issue-detail").textContent).toContain(hostile); expect(f.query("#issue-detail").textContent).toContain("已归档");
-  expect(f.document.querySelectorAll("img")).toHaveLength(0); expect(f.document.querySelectorAll("script")).toHaveLength(1);
+  expect(f.document.querySelectorAll("img")).toHaveLength(0); expect(f.document.querySelectorAll("script")).toHaveLength(2);
 });
 
 test("uncertain saved reply freezes one payload and retries the same key after switching threads", async () => {
