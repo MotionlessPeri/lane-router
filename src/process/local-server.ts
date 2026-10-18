@@ -15,6 +15,7 @@ import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
 import type { ToolService } from "../tools/tool-service.js";
 import type { ApplicationTools } from "../application/tool-catalog.js";
 import { IssuesHttp, type IssuesHttpAssembly } from "../modules/issues/http.js";
+import { GraphsHttp, type GraphsHttpAssembly } from "../modules/graphs/http.js";
 import type { NativeHostService } from "./native-host-service.js";
 import type { DashboardOpenOverride } from "./dashboard-lane-opener.js";
 import { DashboardHttp, type DashboardLaneSetsInput } from "./dashboard-http.js";
@@ -363,6 +364,7 @@ export class LocalRouterServer {
   private readonly dashboardActionToken = randomUUID();
   private readonly dashboard: DashboardHttp;
   private readonly issues: IssuesHttp | undefined;
+  private readonly graphs: GraphsHttp | undefined;
   private codexEndpoint = "";
   readonly claude: ClaudeChannelHub;
 
@@ -370,6 +372,7 @@ export class LocalRouterServer {
     readonly tools: ToolService;
     readonly applicationTools?: ApplicationTools;
     readonly issues?: IssuesHttpAssembly;
+    readonly graphs?: GraphsHttpAssembly;
     readonly codex: CodexTuiBridgeHost;
     readonly instanceId: string;
     readonly host?: string;
@@ -449,6 +452,7 @@ export class LocalRouterServer {
     this.issues = options.issues === undefined ? undefined : new IssuesHttp({
       ...options.issues, origin: () => this.discovery().url, actionToken: this.dashboardActionToken,
     });
+    this.graphs = options.graphs === undefined ? undefined : new GraphsHttp(options.graphs);
     this.http.on("upgrade", (request, socket, head) => {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       if (url.pathname === "/native-host/v1/channel" && !url.search && this.options.nativeHost) {
@@ -523,6 +527,7 @@ export class LocalRouterServer {
       if (request.method === "GET" && request.url === "/health") return json(response, 200, this.discovery());
       if (await this.dashboard.handle(request, response)) return;
       if (await this.issues?.handle(request, response)) return;
+      if (await this.graphs?.handle(request, response)) return;
       if (request.method === "GET" && request.url !== undefined) {
         const url = new URL(request.url, "http://127.0.0.1");
         if (url.pathname === "/lanes/archived" && this.options.listArchivedLanes) {

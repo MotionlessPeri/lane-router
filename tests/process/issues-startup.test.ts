@@ -9,6 +9,7 @@ import { CodexBackend } from "../../src/backends/codex-backend.js";
 import { MailboxStore } from "../../src/router/mailbox-store.js";
 import { NotificationPump } from "../../src/router/notification-pump.js";
 import { openIssuesModule, openIssueStore } from "../../src/modules/issues/index.js";
+import { openGraphStore } from "../../src/modules/graphs/index.js";
 
 const fake = vi.hoisted(() => ({ options: [] as any[], stopError: false, modelError: false, moduleStartError: false, moduleCloseError: false, events: [] as string[] }));
 vi.mock("../../src/adapters/codex/codex-runtime.js", () => ({ createCodexRuntime: (options: any) => {
@@ -55,10 +56,13 @@ test("standalone explicitly assembles issues after reconciliation and exposes pr
   const original = MailboxStore.prototype.reconcile;
   vi.spyOn(MailboxStore.prototype, "reconcile").mockImplementation(function (...args) { fake.events.push("reconcile"); return original.apply(this, args); });
   const x = await boot(path);
-  expect(fake.options[0].catalog.definitions).toHaveLength(9);
+  expect(fake.options[0].catalog.definitions).toHaveLength(13);
   expect(fake.events.indexOf("reconcile")).toBeLessThan(fake.events.indexOf("issues-start"));
   expect(existsSync(join(path, "issues.sqlite"))).toBe(true);
+  expect(existsSync(join(path, "graphs.sqlite"))).toBe(true);
   await x.client.call("lane_attach_current", { address: "fixture/work", role_description: "Fixture role" }, caller);
+  const graph = await x.client.call("lane_graph_create", { operationKey: "graph-create", title: "Graph" }, caller) as any;
+  expect(graph.lockValid).toBe(true); expect(graph.viewUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/graphs\//);
   const saved = await x.client.call("lane_issue_publish", { operationKey: "publish", title: "Choose", kind: "question", body: "Which?" }, caller) as any;
   expect(await x.client.call("lane_issue_read", { issueId: saved.issueId }, caller)).toMatchObject({ thread: { id: saved.issueId } });
   const discovery = JSON.parse(readFileSync(join(path, "discovery.json"), "utf8"));
@@ -77,10 +81,24 @@ test("core-only assembly never constructs the module or creates its database", a
   expect(fake.options[0].catalog.definitions).toHaveLength(5);
   expect(vi.mocked(openIssuesModule).mock.calls).toHaveLength(before);
   expect(existsSync(join(path, "issues.sqlite"))).toBe(false);
+  expect(existsSync(join(path, "graphs.sqlite"))).toBe(false);
   await expect(x.client.call("lane_directory", { project: "fixture" }, caller)).resolves.toEqual([]);
   await expect(x.client.call("lane_issue_read", {}, caller)).rejects.toThrow(/unknown method/);
   const discovery = JSON.parse(readFileSync(join(path, "discovery.json"), "utf8"));
   expect((await fetch(`${discovery.url}/issues/api/threads`)).status).toBe(404);
+  await expect(x.client.call("lane_graph_read", {}, caller)).rejects.toThrow(/unknown method/);
+  expect((await fetch(`${discovery.url}/graphs/api/any`)).status).toBe(404);
+});
+
+test.each(["corrupt", "future"])("%s graph module failure leaves core and issues available without replacing graphs", async kind => {
+  const path = root(); const databasePath = join(path, "graphs.sqlite");
+  if (kind === "corrupt") writeFileSync(databasePath, "not a database");
+  else { const store = openGraphStore(databasePath); store.close(); const db = new Database(databasePath); db.prepare("UPDATE graph_schema_version SET version=999").run(); db.close(); }
+  const before = readFileSync(databasePath); const x = await boot(path);
+  await x.client.call("lane_attach_current", { address: "fixture/work", role_description: "Fixture role" }, caller);
+  await expect(x.client.call("lane_graph_read", {}, caller)).rejects.toMatchObject({ code: "GRAPHS_UNAVAILABLE" });
+  await expect(x.client.call("lane_issue_read", {}, caller)).resolves.toBeDefined();
+  expect(readFileSync(databasePath)).toEqual(before);
 });
 
 test.each(["corrupt", "future"])("%s module failure leaves core available and returns ISSUES_UNAVAILABLE without replacement", async kind => {

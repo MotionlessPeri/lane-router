@@ -1,0 +1,2767 @@
+{
+  "schemaVersion": 1,
+  "title": "渲染知识图谱",
+  "description": "从数学与光的原理，到算法、硬件与工程实现。经典概念的选型试验图，不是唯一或完备的渲染学科分类。父子层级用于导航，跨域边表达实际联系；不同实现的具体前提以来源为准。",
+  "groups": [
+    {
+      "id": "group:mathematics",
+      "label": "数学与数值",
+      "summary": "描述、积分与误差的共同语言",
+      "description": "描述、积分与误差的共同语言",
+      "parentId": null,
+      "color": "#8b9dff"
+    },
+    {
+      "id": "group:linear-algebra",
+      "label": "线性代数",
+      "summary": "位置、方向与空间变换",
+      "description": "位置、方向与空间变换",
+      "parentId": "group:mathematics",
+      "color": "#8b9dff"
+    },
+    {
+      "id": "group:probability-calculus",
+      "label": "概率与微积分",
+      "summary": "从积分表达走向随机估计",
+      "description": "从积分表达走向随机估计",
+      "parentId": "group:mathematics",
+      "color": "#8b9dff"
+    },
+    {
+      "id": "group:numerics",
+      "label": "数值计算",
+      "summary": "让数学公式在机器上可靠成立",
+      "description": "让数学公式在机器上可靠成立",
+      "parentId": "group:mathematics",
+      "color": "#8b9dff"
+    },
+    {
+      "id": "group:scene-geometry",
+      "label": "几何与场景",
+      "summary": "表示世界，以及观察它的方式",
+      "description": "表示世界，以及观察它的方式",
+      "parentId": null,
+      "color": "#47c9ee"
+    },
+    {
+      "id": "group:shape-representation",
+      "label": "几何表示",
+      "summary": "表面与物体如何进入渲染器",
+      "description": "表面与物体如何进入渲染器",
+      "parentId": "group:scene-geometry",
+      "color": "#47c9ee"
+    },
+    {
+      "id": "group:camera-projection",
+      "label": "相机与投影",
+      "summary": "从三维场景得到二维图像",
+      "description": "从三维场景得到二维图像",
+      "parentId": "group:scene-geometry",
+      "color": "#47c9ee"
+    },
+    {
+      "id": "group:scene-organization",
+      "label": "场景组织",
+      "summary": "组织对象、引用与多尺度细节",
+      "description": "组织对象、引用与多尺度细节",
+      "parentId": "group:scene-geometry",
+      "color": "#47c9ee"
+    },
+    {
+      "id": "group:light-material",
+      "label": "光与材质",
+      "summary": "光如何被度量、反射和散射",
+      "description": "光如何被度量、反射和散射",
+      "parentId": null,
+      "color": "#f1c56a"
+    },
+    {
+      "id": "group:radiometric-quantities",
+      "label": "光的度量",
+      "summary": "明确计算的物理量",
+      "description": "明确计算的物理量",
+      "parentId": "group:light-material",
+      "color": "#f1c56a"
+    },
+    {
+      "id": "group:surface-scattering",
+      "label": "表面散射",
+      "summary": "给定入射光，预测出射分布",
+      "description": "给定入射光，预测出射分布",
+      "parentId": "group:light-material",
+      "color": "#f1c56a"
+    },
+    {
+      "id": "group:material-texture",
+      "label": "材质与纹理",
+      "summary": "把散射模型变成可变化的外观",
+      "description": "把散射模型变成可变化的外观",
+      "parentId": "group:light-material",
+      "color": "#f1c56a"
+    },
+    {
+      "id": "group:visibility",
+      "label": "可见性与查询",
+      "summary": "确定哪些表面与光路相关",
+      "description": "确定哪些表面与光路相关",
+      "parentId": null,
+      "color": "#5be4bf"
+    },
+    {
+      "id": "group:rasterization",
+      "label": "光栅化",
+      "summary": "从图元找到覆盖的图像样本",
+      "description": "从图元找到覆盖的图像样本",
+      "parentId": "group:visibility",
+      "color": "#5be4bf"
+    },
+    {
+      "id": "group:ray-query",
+      "label": "射线查询",
+      "summary": "沿射线查询场景几何",
+      "description": "沿射线查询场景几何",
+      "parentId": "group:visibility",
+      "color": "#5be4bf"
+    },
+    {
+      "id": "group:acceleration",
+      "label": "加速结构",
+      "summary": "减少查询需要处理的几何",
+      "description": "减少查询需要处理的几何",
+      "parentId": "group:visibility",
+      "color": "#5be4bf"
+    },
+    {
+      "id": "group:light-transport",
+      "label": "光传输与光照",
+      "summary": "计算光在场景中的传播",
+      "description": "计算光在场景中的传播",
+      "parentId": null,
+      "color": "#e796fa"
+    },
+    {
+      "id": "group:surface-transport",
+      "label": "表面光传输",
+      "summary": "描述并估计表面之间的能量交换",
+      "description": "描述并估计表面之间的能量交换",
+      "parentId": "group:light-transport",
+      "color": "#e796fa"
+    },
+    {
+      "id": "group:realtime-lighting",
+      "label": "实时光照方法",
+      "summary": "在帧预算内近似所需光照",
+      "description": "在帧预算内近似所需光照",
+      "parentId": "group:light-transport",
+      "color": "#e796fa"
+    },
+    {
+      "id": "group:participating-media",
+      "label": "参与介质",
+      "summary": "处理体积内部的吸收与散射",
+      "description": "处理体积内部的吸收与散射",
+      "parentId": "group:light-transport",
+      "color": "#e796fa"
+    },
+    {
+      "id": "group:sampling-reconstruction",
+      "label": "采样与重建",
+      "summary": "用有限样本构成稳定图像",
+      "description": "用有限样本构成稳定图像",
+      "parentId": null,
+      "color": "#f39b74"
+    },
+    {
+      "id": "group:integration",
+      "label": "积分估计",
+      "summary": "在预算内估计复杂积分",
+      "description": "在预算内估计复杂积分",
+      "parentId": "group:sampling-reconstruction",
+      "color": "#f39b74"
+    },
+    {
+      "id": "group:sample-distribution",
+      "label": "样本分布",
+      "summary": "控制样本在积分域中的排列",
+      "description": "控制样本在积分域中的排列",
+      "parentId": "group:sampling-reconstruction",
+      "color": "#f39b74"
+    },
+    {
+      "id": "group:image-reconstruction",
+      "label": "过滤与重建",
+      "summary": "从离散信息恢复所需信号",
+      "description": "从离散信息恢复所需信号",
+      "parentId": "group:sampling-reconstruction",
+      "color": "#f39b74"
+    },
+    {
+      "id": "group:gpu-api",
+      "label": "GPU与图形API",
+      "summary": "把算法映射到硬件执行与资源契约",
+      "description": "把算法映射到硬件执行与资源契约",
+      "parentId": null,
+      "color": "#78b3ff"
+    },
+    {
+      "id": "group:execution-model",
+      "label": "并行执行",
+      "summary": "理解 GPU 怎样组织工作",
+      "description": "理解 GPU 怎样组织工作",
+      "parentId": "group:gpu-api",
+      "color": "#78b3ff"
+    },
+    {
+      "id": "group:memory-synchronization",
+      "label": "存储与同步",
+      "summary": "控制资源布局、访问与可见性",
+      "description": "控制资源布局、访问与可见性",
+      "parentId": "group:gpu-api",
+      "color": "#78b3ff"
+    },
+    {
+      "id": "group:graphics-interfaces",
+      "label": "API与着色器",
+      "summary": "通过标准接口提交渲染工作",
+      "description": "通过标准接口提交渲染工作",
+      "parentId": "group:gpu-api",
+      "color": "#78b3ff"
+    },
+    {
+      "id": "group:rendering-systems",
+      "label": "渲染系统与工程",
+      "summary": "组织一帧、验证结果并控制成本",
+      "description": "组织一帧、验证结果并控制成本",
+      "parentId": null,
+      "color": "#c6d981"
+    },
+    {
+      "id": "group:pipeline-architecture",
+      "label": "管线组织",
+      "summary": "安排任务、数据与中间结果",
+      "description": "安排任务、数据与中间结果",
+      "parentId": "group:rendering-systems",
+      "color": "#c6d981"
+    },
+    {
+      "id": "group:performance-validation",
+      "label": "性能与验证",
+      "summary": "找到真实瓶颈并验证结果",
+      "description": "找到真实瓶颈并验证结果",
+      "parentId": "group:rendering-systems",
+      "color": "#c6d981"
+    },
+    {
+      "id": "group:output-display",
+      "label": "图像与显示",
+      "summary": "把渲染结果映射到观察设备",
+      "description": "把渲染结果映射到观察设备",
+      "parentId": "group:rendering-systems",
+      "color": "#c6d981"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "mathematics",
+      "label": "数学与数值",
+      "summary": "描述、积分与误差的共同语言",
+      "description": "描述、积分与误差的共同语言",
+      "kind": "领域",
+      "tags": [
+        "数学",
+        "基础"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Geometry and Transformations",
+          "url": "https://pbr-book.org/4ed/Geometry_and_Transformations"
+        },
+        {
+          "title": "PBRT · Monte Carlo Integration",
+          "url": "https://pbr-book.org/4ed/Monte_Carlo_Integration"
+        }
+      ],
+      "groupId": "group:mathematics"
+    },
+    {
+      "id": "linear-algebra",
+      "label": "线性代数",
+      "summary": "位置、方向与空间变换",
+      "description": "位置、方向与空间变换",
+      "kind": "主题",
+      "tags": [
+        "数学",
+        "基础"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Geometry and Transformations",
+          "url": "https://pbr-book.org/4ed/Geometry_and_Transformations"
+        }
+      ],
+      "groupId": "group:linear-algebra"
+    },
+    {
+      "id": "vectors",
+      "label": "向量与点积",
+      "summary": "描述方向与投影",
+      "description": "向量表达方向、位移与法线。点积表达方向夹角关系，也是许多光照与几何计算的基础。",
+      "kind": "数学",
+      "tags": [
+        "数学",
+        "基础"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Geometry and Transformations",
+          "url": "https://pbr-book.org/4ed/Geometry_and_Transformations"
+        }
+      ],
+      "groupId": "group:linear-algebra"
+    },
+    {
+      "id": "matrices",
+      "label": "矩阵与变换",
+      "summary": "在坐标空间之间转换",
+      "description": "通过矩阵组合旋转、平移与投影。需要始终区分对象、世界、观察和裁剪等坐标空间。",
+      "kind": "数学",
+      "tags": [
+        "数学",
+        "基础"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Geometry and Transformations",
+          "url": "https://pbr-book.org/4ed/Geometry_and_Transformations"
+        }
+      ],
+      "groupId": "group:linear-algebra"
+    },
+    {
+      "id": "frames",
+      "label": "局部坐标系",
+      "summary": "把计算移到合适的基底",
+      "description": "局部基底将表面附近的方向转成方便求值和采样的坐标。法线变换和基底正交性需要单独考虑。",
+      "kind": "数学",
+      "tags": [
+        "数学",
+        "基础"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Geometry and Transformations",
+          "url": "https://pbr-book.org/4ed/Geometry_and_Transformations"
+        }
+      ],
+      "groupId": "group:linear-algebra"
+    },
+    {
+      "id": "probability-calculus",
+      "label": "概率与微积分",
+      "summary": "从积分表达走向随机估计",
+      "description": "从积分表达走向随机估计",
+      "kind": "主题",
+      "tags": [
+        "数学",
+        "基础"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Monte Carlo Integration",
+          "url": "https://pbr-book.org/4ed/Monte_Carlo_Integration"
+        }
+      ],
+      "groupId": "group:probability-calculus"
+    },
+    {
+      "id": "pdf",
+      "label": "概率密度 PDF",
+      "summary": "描述样本出现的密度",
+      "description": "连续样本以概率密度描述。方向、面积和立体角等不同测度下的密度不能直接混用。",
+      "kind": "数学",
+      "tags": [
+        "数学",
+        "基础"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Monte Carlo Integration",
+          "url": "https://pbr-book.org/4ed/Monte_Carlo_Integration"
+        }
+      ],
+      "groupId": "group:probability-calculus"
+    },
+    {
+      "id": "expectation",
+      "label": "期望与方差",
+      "summary": "区分平均结果与波动",
+      "description": "期望描述估计量的平均结果，方差描述其波动。渲染中需要同时关心偏差、方差和计算成本。",
+      "kind": "数学",
+      "tags": [
+        "数学",
+        "基础"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Monte Carlo Integration",
+          "url": "https://pbr-book.org/4ed/Monte_Carlo_Integration"
+        }
+      ],
+      "groupId": "group:probability-calculus"
+    },
+    {
+      "id": "jacobian",
+      "label": "变量替换",
+      "summary": "转换积分变量与测度",
+      "description": "改变采样变量时用雅可比调整密度，避免把面积密度当作方向密度等测度混淆。",
+      "kind": "数学",
+      "tags": [
+        "数学",
+        "基础"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Monte Carlo Integration",
+          "url": "https://pbr-book.org/4ed/Monte_Carlo_Integration"
+        }
+      ],
+      "groupId": "group:probability-calculus"
+    },
+    {
+      "id": "numerics",
+      "label": "数值计算",
+      "summary": "让数学公式在机器上可靠成立",
+      "description": "让数学公式在机器上可靠成立",
+      "kind": "主题",
+      "tags": [
+        "数学",
+        "基础"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Geometry and Transformations",
+          "url": "https://pbr-book.org/4ed/Geometry_and_Transformations"
+        }
+      ],
+      "groupId": "group:numerics"
+    },
+    {
+      "id": "floating-point",
+      "label": "浮点精度",
+      "summary": "有限精度下的运算",
+      "description": "浮点数只能表示有限集合。消去、数量级差异和运算次序会影响几何与光照计算结果。",
+      "kind": "数学",
+      "tags": [
+        "数学",
+        "基础"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Geometry and Transformations",
+          "url": "https://pbr-book.org/4ed/Geometry_and_Transformations"
+        }
+      ],
+      "groupId": "group:numerics"
+    },
+    {
+      "id": "error-bounds",
+      "label": "误差界",
+      "summary": "理解计算结果的可靠范围",
+      "description": "对变换和求交中的误差建立边界，有助于构造可靠的相交测试与射线起点偏移。",
+      "kind": "数学",
+      "tags": [
+        "数学",
+        "基础"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Geometry and Transformations",
+          "url": "https://pbr-book.org/4ed/Geometry_and_Transformations"
+        }
+      ],
+      "groupId": "group:numerics"
+    },
+    {
+      "id": "robust-intersection",
+      "label": "鲁棒求交",
+      "summary": "避免漏交与自相交",
+      "description": "几何测试需要处理边界、一致的判定和舍入误差，不能仅靠一个与场景尺度无关的固定 epsilon。",
+      "kind": "方法",
+      "tags": [
+        "数学",
+        "基础",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Geometry and Transformations",
+          "url": "https://pbr-book.org/4ed/Geometry_and_Transformations"
+        }
+      ],
+      "groupId": "group:numerics"
+    },
+    {
+      "id": "scene-geometry",
+      "label": "几何与场景",
+      "summary": "表示世界，以及观察它的方式",
+      "description": "表示世界，以及观察它的方式",
+      "kind": "领域",
+      "tags": [
+        "对象",
+        "几何"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Shapes",
+          "url": "https://pbr-book.org/4ed/Shapes"
+        },
+        {
+          "title": "PBRT · Cameras and Film",
+          "url": "https://pbr-book.org/4ed/Cameras_and_Film"
+        }
+      ],
+      "groupId": "group:scene-geometry"
+    },
+    {
+      "id": "shape-representation",
+      "label": "几何表示",
+      "summary": "表面与物体如何进入渲染器",
+      "description": "表面与物体如何进入渲染器",
+      "kind": "主题",
+      "tags": [
+        "对象",
+        "几何"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Shapes",
+          "url": "https://pbr-book.org/4ed/Shapes"
+        }
+      ],
+      "groupId": "group:shape-representation"
+    },
+    {
+      "id": "triangles",
+      "label": "三角形网格",
+      "summary": "离散表面的常用表示",
+      "description": "用顶点、索引和逐顶点属性描述表面。渲染时需要连接几何拓扑、法线和材质等信息。",
+      "kind": "对象",
+      "tags": [
+        "对象",
+        "几何"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Shapes",
+          "url": "https://pbr-book.org/4ed/Shapes"
+        }
+      ],
+      "groupId": "group:shape-representation"
+    },
+    {
+      "id": "curves",
+      "label": "曲线与曲面",
+      "summary": "用参数形式描述几何",
+      "description": "参数化几何能表达平滑形状。离散细分和直接求交是不同的处理路径。",
+      "kind": "对象",
+      "tags": [
+        "对象",
+        "几何"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Shapes",
+          "url": "https://pbr-book.org/4ed/Shapes"
+        }
+      ],
+      "groupId": "group:shape-representation"
+    },
+    {
+      "id": "bounds",
+      "label": "包围体",
+      "summary": "用简单形状界定复杂对象",
+      "description": "包围盒等简单形状用于快速排除不可能相关的几何，是可见性裁剪与层次加速的重要组成。",
+      "kind": "对象",
+      "tags": [
+        "对象",
+        "几何"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Shapes",
+          "url": "https://pbr-book.org/4ed/Shapes"
+        }
+      ],
+      "groupId": "group:shape-representation"
+    },
+    {
+      "id": "camera-projection",
+      "label": "相机与投影",
+      "summary": "从三维场景得到二维图像",
+      "description": "从三维场景得到二维图像",
+      "kind": "主题",
+      "tags": [
+        "对象",
+        "几何"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Cameras and Film",
+          "url": "https://pbr-book.org/4ed/Cameras_and_Film"
+        }
+      ],
+      "groupId": "group:camera-projection"
+    },
+    {
+      "id": "perspective",
+      "label": "透视投影",
+      "summary": "距离影响屏幕尺寸",
+      "description": "透视投影将空间点映射到图像平面。视场、近远平面和透视除法共同影响成像与精度。",
+      "kind": "方法",
+      "tags": [
+        "对象",
+        "几何",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Cameras and Film",
+          "url": "https://pbr-book.org/4ed/Cameras_and_Film"
+        }
+      ],
+      "groupId": "group:camera-projection"
+    },
+    {
+      "id": "orthographic",
+      "label": "正交投影",
+      "summary": "保持与距离无关的比例",
+      "description": "正交投影使用平行投影方向，常用于技术视图、阴影和二维界面等场景。",
+      "kind": "方法",
+      "tags": [
+        "对象",
+        "几何",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Cameras and Film",
+          "url": "https://pbr-book.org/4ed/Cameras_and_Film"
+        }
+      ],
+      "groupId": "group:camera-projection"
+    },
+    {
+      "id": "lens",
+      "label": "镜头与景深",
+      "summary": "有限光圈如何影响成像",
+      "description": "有限光圈让不同深度的点形成不同程度的模糊。光圈采样把镜头模型与积分估计联系起来。",
+      "kind": "对象",
+      "tags": [
+        "对象",
+        "几何"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Cameras and Film",
+          "url": "https://pbr-book.org/4ed/Cameras_and_Film"
+        }
+      ],
+      "groupId": "group:camera-projection"
+    },
+    {
+      "id": "scene-organization",
+      "label": "场景组织",
+      "summary": "组织对象、引用与多尺度细节",
+      "description": "组织对象、引用与多尺度细节",
+      "kind": "主题",
+      "tags": [
+        "对象",
+        "几何"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Shapes",
+          "url": "https://pbr-book.org/4ed/Shapes"
+        }
+      ],
+      "groupId": "group:scene-organization"
+    },
+    {
+      "id": "scene-graph",
+      "label": "场景层次",
+      "summary": "组织对象与空间变换",
+      "description": "场景节点可组织对象及其变换关系。用于组织场景的层次和用于快速查询的加速层次职责不同。",
+      "kind": "工程",
+      "tags": [
+        "对象",
+        "几何",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Geometry and Transformations",
+          "url": "https://pbr-book.org/4ed/Geometry_and_Transformations"
+        },
+        {
+          "title": "Khronos · Acceleration Structures",
+          "url": "https://docs.vulkan.org/spec/latest/chapters/accelstructures.html"
+        }
+      ],
+      "groupId": "group:scene-organization"
+    },
+    {
+      "id": "instancing",
+      "label": "实例化",
+      "summary": "共享几何并分别放置",
+      "description": "多个实例共享几何数据，同时保留各自的变换与属性。它连接场景描述、内存管理和查询加速。",
+      "kind": "工程",
+      "tags": [
+        "对象",
+        "几何",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Geometry and Transformations",
+          "url": "https://pbr-book.org/4ed/Geometry_and_Transformations"
+        },
+        {
+          "title": "Khronos · Acceleration Structures",
+          "url": "https://docs.vulkan.org/spec/latest/chapters/accelstructures.html"
+        }
+      ],
+      "groupId": "group:scene-organization"
+    },
+    {
+      "id": "lod",
+      "label": "细节层次 LOD",
+      "summary": "按需求选择表示精度",
+      "description": "依据屏幕尺度或误差选择不同几何细节，在可接受的视觉差异和处理成本之间取舍。",
+      "kind": "方法",
+      "tags": [
+        "对象",
+        "几何",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Shapes",
+          "url": "https://pbr-book.org/4ed/Shapes"
+        }
+      ],
+      "groupId": "group:scene-organization"
+    },
+    {
+      "id": "light-material",
+      "label": "光与材质",
+      "summary": "光如何被度量、反射和散射",
+      "description": "光如何被度量、反射和散射",
+      "kind": "领域",
+      "tags": [
+        "物理",
+        "材质"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Radiometry, Spectra, and Color",
+          "url": "https://pbr-book.org/4ed/Radiometry,_Spectra,_and_Color"
+        },
+        {
+          "title": "PBRT · Reflection Models",
+          "url": "https://pbr-book.org/4ed/Reflection_Models"
+        },
+        {
+          "title": "PBRT · Textures and Materials",
+          "url": "https://pbr-book.org/4ed/Textures_and_Materials"
+        }
+      ],
+      "groupId": "group:light-material"
+    },
+    {
+      "id": "radiometric-quantities",
+      "label": "光的度量",
+      "summary": "明确计算的物理量",
+      "description": "明确计算的物理量",
+      "kind": "主题",
+      "tags": [
+        "物理",
+        "材质"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Radiometry, Spectra, and Color",
+          "url": "https://pbr-book.org/4ed/Radiometry,_Spectra,_and_Color"
+        }
+      ],
+      "groupId": "group:radiometric-quantities"
+    },
+    {
+      "id": "radiance",
+      "label": "辐亮度",
+      "summary": "沿位置与方向描述光",
+      "description": "辐亮度把光的分布与位置、方向联系起来，是描述表面光传输的核心量。",
+      "kind": "概念",
+      "tags": [
+        "物理",
+        "材质",
+        "概念"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Radiometry, Spectra, and Color",
+          "url": "https://pbr-book.org/4ed/Radiometry,_Spectra,_and_Color"
+        }
+      ],
+      "groupId": "group:radiometric-quantities"
+    },
+    {
+      "id": "irradiance",
+      "label": "辐照度",
+      "summary": "单位面积接收到的功率",
+      "description": "辐照度由入射方向上的光汇总而成。方向投影因子说明为什么表面朝向会影响接收到的能量。",
+      "kind": "概念",
+      "tags": [
+        "物理",
+        "材质",
+        "概念"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Radiometry, Spectra, and Color",
+          "url": "https://pbr-book.org/4ed/Radiometry,_Spectra,_and_Color"
+        }
+      ],
+      "groupId": "group:radiometric-quantities"
+    },
+    {
+      "id": "spectrum",
+      "label": "光谱与颜色",
+      "summary": "区分光的物理与颜色表示",
+      "description": "光谱描述不同波长的分布；RGB 是面向特定颜色系统的表示。显示颜色还涉及编码和观察条件。",
+      "kind": "概念",
+      "tags": [
+        "物理",
+        "材质",
+        "概念"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Radiometry, Spectra, and Color",
+          "url": "https://pbr-book.org/4ed/Radiometry,_Spectra,_and_Color"
+        }
+      ],
+      "groupId": "group:radiometric-quantities"
+    },
+    {
+      "id": "surface-scattering",
+      "label": "表面散射",
+      "summary": "给定入射光，预测出射分布",
+      "description": "给定入射光，预测出射分布",
+      "kind": "主题",
+      "tags": [
+        "物理",
+        "材质"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Reflection Models",
+          "url": "https://pbr-book.org/4ed/Reflection_Models"
+        }
+      ],
+      "groupId": "group:surface-scattering"
+    },
+    {
+      "id": "bsdf",
+      "label": "BRDF / BSDF",
+      "summary": "描述表面方向性散射",
+      "description": "BRDF 描述反射，BSDF 更一般地描述表面反射与透射。求值、采样和 PDF 需要相互匹配。",
+      "kind": "概念",
+      "tags": [
+        "物理",
+        "材质",
+        "概念"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Reflection Models",
+          "url": "https://pbr-book.org/4ed/Reflection_Models"
+        }
+      ],
+      "groupId": "group:surface-scattering"
+    },
+    {
+      "id": "microfacet",
+      "label": "微表面模型",
+      "summary": "从微观法线分布描述粗糙表面",
+      "description": "微表面模型把法线分布、菲涅耳与遮蔽等因素组合起来，描述粗糙表面的镜面散射。",
+      "kind": "方法",
+      "tags": [
+        "物理",
+        "材质",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Reflection Models",
+          "url": "https://pbr-book.org/4ed/Reflection_Models"
+        }
+      ],
+      "groupId": "group:surface-scattering"
+    },
+    {
+      "id": "fresnel",
+      "label": "菲涅耳效应",
+      "summary": "反射与透射随角度变化",
+      "description": "界面反射取决于入射角和介质性质。导体和电介质的处理不同，近似公式有各自适用条件。",
+      "kind": "概念",
+      "tags": [
+        "物理",
+        "材质",
+        "概念"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Reflection Models",
+          "url": "https://pbr-book.org/4ed/Reflection_Models"
+        }
+      ],
+      "groupId": "group:surface-scattering"
+    },
+    {
+      "id": "material-texture",
+      "label": "材质与纹理",
+      "summary": "把散射模型变成可变化的外观",
+      "description": "把散射模型变成可变化的外观",
+      "kind": "主题",
+      "tags": [
+        "物理",
+        "材质"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Textures and Materials",
+          "url": "https://pbr-book.org/4ed/Textures_and_Materials"
+        }
+      ],
+      "groupId": "group:material-texture"
+    },
+    {
+      "id": "material-model",
+      "label": "材质参数",
+      "summary": "组织表面模型及其属性",
+      "description": "材质把散射模型与纹理化参数结合起来。参数的物理含义、范围和颜色空间约定需要一致。",
+      "kind": "对象",
+      "tags": [
+        "物理",
+        "材质",
+        "对象"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Textures and Materials",
+          "url": "https://pbr-book.org/4ed/Textures_and_Materials"
+        }
+      ],
+      "groupId": "group:material-texture"
+    },
+    {
+      "id": "texture-filtering",
+      "label": "纹理过滤",
+      "summary": "以像素覆盖范围读取纹理",
+      "description": "采样足迹决定需要的过滤。Mipmap、双线性和各向异性过滤处理不同的缩小和方向性需求。",
+      "kind": "方法",
+      "tags": [
+        "物理",
+        "材质",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Textures and Materials",
+          "url": "https://pbr-book.org/4ed/Textures_and_Materials"
+        }
+      ],
+      "groupId": "group:material-texture"
+    },
+    {
+      "id": "normal-mapping",
+      "label": "法线映射",
+      "summary": "改变局部着色方向",
+      "description": "法线贴图改变着色所用的局部法线。切线空间、基底与几何法线之间的一致性会影响结果。",
+      "kind": "方法",
+      "tags": [
+        "物理",
+        "材质",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Textures and Materials",
+          "url": "https://pbr-book.org/4ed/Textures_and_Materials"
+        }
+      ],
+      "groupId": "group:material-texture"
+    },
+    {
+      "id": "visibility",
+      "label": "可见性与查询",
+      "summary": "确定哪些表面与光路相关",
+      "description": "确定哪些表面与光路相关",
+      "kind": "领域",
+      "tags": [
+        "算法",
+        "几何"
+      ],
+      "sources": [
+        {
+          "title": "Microsoft · Direct3D graphics pipeline",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-graphics-pipeline"
+        },
+        {
+          "title": "PBRT · Bounding Volume Hierarchies",
+          "url": "https://pbr-book.org/4ed/Primitives_and_Intersection_Acceleration/Bounding_Volume_Hierarchies"
+        },
+        {
+          "title": "Khronos · Acceleration Structures",
+          "url": "https://docs.vulkan.org/spec/latest/chapters/accelstructures.html"
+        }
+      ],
+      "groupId": "group:visibility"
+    },
+    {
+      "id": "rasterization",
+      "label": "光栅化",
+      "summary": "从图元找到覆盖的图像样本",
+      "description": "从图元找到覆盖的图像样本",
+      "kind": "主题",
+      "tags": [
+        "算法",
+        "几何"
+      ],
+      "sources": [
+        {
+          "title": "Microsoft · Direct3D graphics pipeline",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-graphics-pipeline"
+        }
+      ],
+      "groupId": "group:rasterization"
+    },
+    {
+      "id": "clipping",
+      "label": "裁剪",
+      "summary": "处理视体边界附近的图元",
+      "description": "在投影管线中裁剪图元，保留符合视体条件的部分。裁剪和逐片元深度测试承担不同工作。",
+      "kind": "方法",
+      "tags": [
+        "算法",
+        "几何",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "Microsoft · Direct3D graphics pipeline",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-graphics-pipeline"
+        }
+      ],
+      "groupId": "group:rasterization"
+    },
+    {
+      "id": "coverage",
+      "label": "覆盖与插值",
+      "summary": "判断覆盖并计算片元属性",
+      "description": "光栅化确定图元覆盖的样本，并插值法线、纹理坐标等属性；透视投影下要注意插值方式。",
+      "kind": "方法",
+      "tags": [
+        "算法",
+        "几何",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "Microsoft · Direct3D graphics pipeline",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-graphics-pipeline"
+        }
+      ],
+      "groupId": "group:rasterization"
+    },
+    {
+      "id": "depth-buffer",
+      "label": "深度缓冲",
+      "summary": "比较投影后的遮挡次序",
+      "description": "深度测试维护每个样本的深度关系。投影形式、精度分布和透明物体处理会影响使用方式。",
+      "kind": "工程",
+      "tags": [
+        "算法",
+        "几何",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "Microsoft · Direct3D graphics pipeline",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-graphics-pipeline"
+        }
+      ],
+      "groupId": "group:rasterization"
+    },
+    {
+      "id": "ray-query",
+      "label": "射线查询",
+      "summary": "沿射线查询场景几何",
+      "description": "沿射线查询场景几何",
+      "kind": "主题",
+      "tags": [
+        "算法",
+        "几何"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Shapes",
+          "url": "https://pbr-book.org/4ed/Shapes"
+        }
+      ],
+      "groupId": "group:ray-query"
+    },
+    {
+      "id": "ray",
+      "label": "射线",
+      "summary": "起点、方向与有效区间",
+      "description": "射线可表示相机观察方向，也可用于阴影和间接光查询。有效距离区间决定查询范围。",
+      "kind": "对象",
+      "tags": [
+        "算法",
+        "几何",
+        "对象"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Shapes",
+          "url": "https://pbr-book.org/4ed/Shapes"
+        }
+      ],
+      "groupId": "group:ray-query"
+    },
+    {
+      "id": "intersection",
+      "label": "几何求交",
+      "summary": "计算射线与表面的交点",
+      "description": "求交需要确定有效交点，并返回用于后续着色的表面位置、法线、参数坐标等信息。",
+      "kind": "方法",
+      "tags": [
+        "算法",
+        "几何",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Shapes",
+          "url": "https://pbr-book.org/4ed/Shapes"
+        }
+      ],
+      "groupId": "group:ray-query"
+    },
+    {
+      "id": "occlusion",
+      "label": "遮挡查询",
+      "summary": "判断两个位置之间是否可见",
+      "description": "遮挡查询常只需要知道有无阻挡，不一定需要完整的最近交点及着色信息。",
+      "kind": "方法",
+      "tags": [
+        "算法",
+        "几何",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Shapes",
+          "url": "https://pbr-book.org/4ed/Shapes"
+        }
+      ],
+      "groupId": "group:ray-query"
+    },
+    {
+      "id": "acceleration",
+      "label": "加速结构",
+      "summary": "减少查询需要处理的几何",
+      "description": "减少查询需要处理的几何",
+      "kind": "主题",
+      "tags": [
+        "算法",
+        "几何"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Bounding Volume Hierarchies",
+          "url": "https://pbr-book.org/4ed/Primitives_and_Intersection_Acceleration/Bounding_Volume_Hierarchies"
+        }
+      ],
+      "groupId": "group:acceleration"
+    },
+    {
+      "id": "bvh",
+      "label": "BVH",
+      "summary": "按包围体层次排除几何",
+      "description": "BVH 以包围体组织图元。查询可跳过不相交子树，构建成本、质量和更新方式需要权衡。",
+      "kind": "方法",
+      "tags": [
+        "算法",
+        "几何",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Bounding Volume Hierarchies",
+          "url": "https://pbr-book.org/4ed/Primitives_and_Intersection_Acceleration/Bounding_Volume_Hierarchies"
+        }
+      ],
+      "groupId": "group:acceleration"
+    },
+    {
+      "id": "sah",
+      "label": "SAH",
+      "summary": "用查询代价估计划分质量",
+      "description": "表面积启发式估计划分后的查询代价，常用于 BVH 构建；高质量构建本身也有计算成本。",
+      "kind": "方法",
+      "tags": [
+        "算法",
+        "几何",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Bounding Volume Hierarchies",
+          "url": "https://pbr-book.org/4ed/Primitives_and_Intersection_Acceleration/Bounding_Volume_Hierarchies"
+        }
+      ],
+      "groupId": "group:acceleration"
+    },
+    {
+      "id": "vk-as",
+      "label": "TLAS / BLAS",
+      "summary": "API 中的实例与几何层次",
+      "description": "Vulkan 加速结构区分实例层和几何层。API 契约并不要求应用知道驱动内部的确切树布局。",
+      "kind": "工程",
+      "tags": [
+        "算法",
+        "几何",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "Khronos · Acceleration Structures",
+          "url": "https://docs.vulkan.org/spec/latest/chapters/accelstructures.html"
+        }
+      ],
+      "groupId": "group:acceleration"
+    },
+    {
+      "id": "light-transport",
+      "label": "光传输与光照",
+      "summary": "计算光在场景中的传播",
+      "description": "计算光在场景中的传播",
+      "kind": "领域",
+      "tags": [
+        "物理",
+        "算法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Light Transport I: Surface Reflection",
+          "url": "https://pbr-book.org/4ed/Light_Transport_I:_Surface_Reflection"
+        },
+        {
+          "title": "PBRT · Light Transport II: Volume Rendering",
+          "url": "https://pbr-book.org/4ed/Light_Transport_II:_Volume_Rendering"
+        },
+        {
+          "title": "Microsoft · Shadow maps",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/dxtecharts/common-techniques-to-improve-shadow-depth-maps"
+        }
+      ],
+      "groupId": "group:light-transport"
+    },
+    {
+      "id": "surface-transport",
+      "label": "表面光传输",
+      "summary": "描述并估计表面之间的能量交换",
+      "description": "描述并估计表面之间的能量交换",
+      "kind": "主题",
+      "tags": [
+        "物理",
+        "算法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Light Transport I: Surface Reflection",
+          "url": "https://pbr-book.org/4ed/Light_Transport_I:_Surface_Reflection"
+        }
+      ],
+      "groupId": "group:surface-transport"
+    },
+    {
+      "id": "rendering-equation",
+      "label": "渲染方程",
+      "summary": "连接入射、散射与出射",
+      "description": "表面渲染方程把自发光与入射光的散射积分相加。它提供问题描述，具体求解需要选择算法。",
+      "kind": "概念",
+      "tags": [
+        "物理",
+        "算法",
+        "概念"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Light Transport I: Surface Reflection",
+          "url": "https://pbr-book.org/4ed/Light_Transport_I:_Surface_Reflection"
+        }
+      ],
+      "groupId": "group:surface-transport"
+    },
+    {
+      "id": "path-tracing",
+      "label": "路径追踪",
+      "summary": "用随机路径估计光传输",
+      "description": "路径追踪通过逐次采样散射方向形成光路。直接光采样、路径终止和采样分布影响估计效率。",
+      "kind": "方法",
+      "tags": [
+        "物理",
+        "算法",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Light Transport I: Surface Reflection",
+          "url": "https://pbr-book.org/4ed/Light_Transport_I:_Surface_Reflection"
+        }
+      ],
+      "groupId": "group:surface-transport"
+    },
+    {
+      "id": "light-sampling",
+      "label": "直接光采样",
+      "summary": "显式寻找光源贡献",
+      "description": "直接对光源进行采样，并结合表面散射与可见性计算贡献，有助于减少单靠散射方向采样的波动。",
+      "kind": "方法",
+      "tags": [
+        "物理",
+        "算法",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Light Transport I: Surface Reflection",
+          "url": "https://pbr-book.org/4ed/Light_Transport_I:_Surface_Reflection"
+        }
+      ],
+      "groupId": "group:surface-transport"
+    },
+    {
+      "id": "realtime-lighting",
+      "label": "实时光照方法",
+      "summary": "在帧预算内近似所需光照",
+      "description": "在帧预算内近似所需光照",
+      "kind": "主题",
+      "tags": [
+        "物理",
+        "算法"
+      ],
+      "sources": [
+        {
+          "title": "Microsoft · Shadow maps",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/dxtecharts/common-techniques-to-improve-shadow-depth-maps"
+        }
+      ],
+      "groupId": "group:realtime-lighting"
+    },
+    {
+      "id": "shadow-map",
+      "label": "阴影映射",
+      "summary": "从光源视角估计遮挡",
+      "description": "先保存光源视角的深度，再将表面投影回该视图比较。分辨率、偏移和过滤会引入不同误差。",
+      "kind": "方法",
+      "tags": [
+        "物理",
+        "算法",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "Microsoft · Shadow maps",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/dxtecharts/common-techniques-to-improve-shadow-depth-maps"
+        }
+      ],
+      "groupId": "group:realtime-lighting"
+    },
+    {
+      "id": "light-probes",
+      "label": "光照探针",
+      "summary": "在离散位置存储光照信息",
+      "description": "探针以空间采样存储近似光照。编码、插值、可见性和更新方式决定它能表达怎样的变化。",
+      "kind": "方法",
+      "tags": [
+        "物理",
+        "算法",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "Microsoft · Shadow maps",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/dxtecharts/common-techniques-to-improve-shadow-depth-maps"
+        }
+      ],
+      "groupId": "group:realtime-lighting"
+    },
+    {
+      "id": "hybrid-rendering",
+      "label": "混合渲染",
+      "summary": "组合不同方法完成一帧",
+      "description": "一帧可将光栅化与射线查询用于不同任务。共享几何、材质和坐标约定是工程上的连接点。",
+      "kind": "工程",
+      "tags": [
+        "物理",
+        "算法",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "Microsoft · Shadow maps",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/dxtecharts/common-techniques-to-improve-shadow-depth-maps"
+        }
+      ],
+      "groupId": "group:realtime-lighting"
+    },
+    {
+      "id": "participating-media",
+      "label": "参与介质",
+      "summary": "处理体积内部的吸收与散射",
+      "description": "处理体积内部的吸收与散射",
+      "kind": "主题",
+      "tags": [
+        "物理",
+        "算法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Volume Scattering",
+          "url": "https://pbr-book.org/4ed/Volume_Scattering"
+        }
+      ],
+      "groupId": "group:participating-media"
+    },
+    {
+      "id": "transmittance",
+      "label": "透射率",
+      "summary": "描述光沿路径保留下来的比例",
+      "description": "透射率描述介质消光后仍沿路径传播的光比例，计算取决于沿途介质密度与消光系数。",
+      "kind": "概念",
+      "tags": [
+        "物理",
+        "算法",
+        "概念"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Volume Scattering",
+          "url": "https://pbr-book.org/4ed/Volume_Scattering"
+        }
+      ],
+      "groupId": "group:participating-media"
+    },
+    {
+      "id": "phase-function",
+      "label": "相位函数",
+      "summary": "描述介质中的方向性散射",
+      "description": "相位函数描述体积散射的方向分布。其归一化、采样和 PDF 与表面模型类似但物理对象不同。",
+      "kind": "概念",
+      "tags": [
+        "物理",
+        "算法",
+        "概念"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Volume Scattering",
+          "url": "https://pbr-book.org/4ed/Volume_Scattering"
+        }
+      ],
+      "groupId": "group:participating-media"
+    },
+    {
+      "id": "volume-integration",
+      "label": "体积积分",
+      "summary": "沿路径累计体积光照贡献",
+      "description": "体积渲染需要估计沿路径的发射、散射和衰减。步进和随机采样具有不同的误差与成本。",
+      "kind": "方法",
+      "tags": [
+        "物理",
+        "算法",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Light Transport II: Volume Rendering",
+          "url": "https://pbr-book.org/4ed/Light_Transport_II:_Volume_Rendering"
+        }
+      ],
+      "groupId": "group:participating-media"
+    },
+    {
+      "id": "sampling-reconstruction",
+      "label": "采样与重建",
+      "summary": "用有限样本构成稳定图像",
+      "description": "用有限样本构成稳定图像",
+      "kind": "领域",
+      "tags": [
+        "数学",
+        "图像"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Monte Carlo Integration",
+          "url": "https://pbr-book.org/4ed/Monte_Carlo_Integration"
+        },
+        {
+          "title": "PBRT · Sampling and Reconstruction",
+          "url": "https://pbr-book.org/4ed/Sampling_and_Reconstruction"
+        }
+      ],
+      "groupId": "group:sampling-reconstruction"
+    },
+    {
+      "id": "integration",
+      "label": "积分估计",
+      "summary": "在预算内估计复杂积分",
+      "description": "在预算内估计复杂积分",
+      "kind": "主题",
+      "tags": [
+        "数学",
+        "图像"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Monte Carlo Integration",
+          "url": "https://pbr-book.org/4ed/Monte_Carlo_Integration"
+        }
+      ],
+      "groupId": "group:integration"
+    },
+    {
+      "id": "monte-carlo",
+      "label": "蒙特卡洛积分",
+      "summary": "通过随机样本估计积分",
+      "description": "用随机样本及其密度构造积分估计量。样本数、分布和单个样本的成本共同影响误差。",
+      "kind": "方法",
+      "tags": [
+        "数学",
+        "图像",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Monte Carlo Integration",
+          "url": "https://pbr-book.org/4ed/Monte_Carlo_Integration"
+        }
+      ],
+      "groupId": "group:integration"
+    },
+    {
+      "id": "importance-sampling",
+      "label": "重要性采样",
+      "summary": "把样本分配到更有贡献的区域",
+      "description": "选择与被积函数相关的采样分布，再用相应 PDF 修正权重。采样分布仍需覆盖有效贡献区域。",
+      "kind": "方法",
+      "tags": [
+        "数学",
+        "图像",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Monte Carlo Integration",
+          "url": "https://pbr-book.org/4ed/Monte_Carlo_Integration"
+        }
+      ],
+      "groupId": "group:integration"
+    },
+    {
+      "id": "mis",
+      "label": "多重重要性采样",
+      "summary": "组合不同采样策略",
+      "description": "MIS 对来自多个策略的样本加权，利用不同分布各自擅长的区域，避免一种策略在某些场景中表现很差。",
+      "kind": "方法",
+      "tags": [
+        "数学",
+        "图像",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Monte Carlo Integration",
+          "url": "https://pbr-book.org/4ed/Monte_Carlo_Integration"
+        }
+      ],
+      "groupId": "group:integration"
+    },
+    {
+      "id": "sample-distribution",
+      "label": "样本分布",
+      "summary": "控制样本在积分域中的排列",
+      "description": "控制样本在积分域中的排列",
+      "kind": "主题",
+      "tags": [
+        "数学",
+        "图像"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Sampling and Reconstruction",
+          "url": "https://pbr-book.org/4ed/Sampling_and_Reconstruction"
+        }
+      ],
+      "groupId": "group:sample-distribution"
+    },
+    {
+      "id": "stratified",
+      "label": "分层采样",
+      "summary": "将积分域分区再采样",
+      "description": "分层采样让样本覆盖不同区间，减少随机聚集。效果与维度、积分域和实际函数变化有关。",
+      "kind": "方法",
+      "tags": [
+        "数学",
+        "图像",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Sampling and Reconstruction",
+          "url": "https://pbr-book.org/4ed/Sampling_and_Reconstruction"
+        }
+      ],
+      "groupId": "group:sample-distribution"
+    },
+    {
+      "id": "low-discrepancy",
+      "label": "低差异序列",
+      "summary": "构造均匀覆盖积分域的序列",
+      "description": "低差异序列用于准蒙特卡洛估计。序列维度分配、扰乱方式和被积函数都会影响实际表现。",
+      "kind": "方法",
+      "tags": [
+        "数学",
+        "图像",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Sampling and Reconstruction",
+          "url": "https://pbr-book.org/4ed/Sampling_and_Reconstruction"
+        }
+      ],
+      "groupId": "group:sample-distribution"
+    },
+    {
+      "id": "pixel-sampling",
+      "label": "像素采样",
+      "summary": "连接连续图像与离散像素",
+      "description": "图像样本还可能包含时间、镜头和光路等维度。像素过滤与各维采样共同决定图像质量。",
+      "kind": "方法",
+      "tags": [
+        "数学",
+        "图像",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Sampling and Reconstruction",
+          "url": "https://pbr-book.org/4ed/Sampling_and_Reconstruction"
+        }
+      ],
+      "groupId": "group:sample-distribution"
+    },
+    {
+      "id": "image-reconstruction",
+      "label": "过滤与重建",
+      "summary": "从离散信息恢复所需信号",
+      "description": "从离散信息恢复所需信号",
+      "kind": "主题",
+      "tags": [
+        "数学",
+        "图像"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Sampling and Reconstruction",
+          "url": "https://pbr-book.org/4ed/Sampling_and_Reconstruction"
+        }
+      ],
+      "groupId": "group:image-reconstruction"
+    },
+    {
+      "id": "aliasing",
+      "label": "混叠",
+      "summary": "采样不足导致错误低频图案",
+      "description": "信号采样不足时，不同频率可能得到难以区分的离散结果。提高采样和过滤分别处理不同方面。",
+      "kind": "概念",
+      "tags": [
+        "数学",
+        "图像",
+        "概念"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Sampling and Reconstruction",
+          "url": "https://pbr-book.org/4ed/Sampling_and_Reconstruction"
+        }
+      ],
+      "groupId": "group:image-reconstruction"
+    },
+    {
+      "id": "reconstruction-filter",
+      "label": "重建滤波",
+      "summary": "组合样本形成图像",
+      "description": "重建核决定样本如何影响像素值。锐度、振铃、模糊和采样噪声之间存在取舍。",
+      "kind": "方法",
+      "tags": [
+        "数学",
+        "图像",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Sampling and Reconstruction",
+          "url": "https://pbr-book.org/4ed/Sampling_and_Reconstruction"
+        }
+      ],
+      "groupId": "group:image-reconstruction"
+    },
+    {
+      "id": "temporal-reuse",
+      "label": "时域累积",
+      "summary": "利用多帧信息提高稳定性",
+      "description": "时域方法使用历史信息时，需要建立样本对应关系，并处理遮挡、运动和历史失效等情况。",
+      "kind": "方法",
+      "tags": [
+        "数学",
+        "图像",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Sampling and Reconstruction",
+          "url": "https://pbr-book.org/4ed/Sampling_and_Reconstruction"
+        }
+      ],
+      "groupId": "group:image-reconstruction"
+    },
+    {
+      "id": "gpu-api",
+      "label": "GPU与图形API",
+      "summary": "把算法映射到硬件执行与资源契约",
+      "description": "把算法映射到硬件执行与资源契约",
+      "kind": "领域",
+      "tags": [
+        "硬件",
+        "代码",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        },
+        {
+          "title": "Khronos · Vulkan specification",
+          "url": "https://docs.vulkan.org/spec/latest/index.html"
+        },
+        {
+          "title": "Microsoft · Direct3D 12",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/direct3d12/direct3d-12-graphics"
+        }
+      ],
+      "groupId": "group:gpu-api"
+    },
+    {
+      "id": "execution-model",
+      "label": "并行执行",
+      "summary": "理解 GPU 怎样组织工作",
+      "description": "理解 GPU 怎样组织工作",
+      "kind": "主题",
+      "tags": [
+        "硬件",
+        "代码",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        }
+      ],
+      "groupId": "group:execution-model"
+    },
+    {
+      "id": "simt",
+      "label": "SIMT与分支",
+      "summary": "并行线程之间共享执行资源",
+      "description": "GPU 常以线程组和执行束组织工作。分支分歧、数据访问和活跃线程比例影响执行效率。",
+      "kind": "工程",
+      "tags": [
+        "硬件",
+        "代码",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        }
+      ],
+      "groupId": "group:execution-model"
+    },
+    {
+      "id": "workgroups",
+      "label": "线程组",
+      "summary": "组织可协作的并行任务",
+      "description": "线程组表达局部协作边界。共享存储和组内同步的使用方式影响算法映射。",
+      "kind": "工程",
+      "tags": [
+        "硬件",
+        "代码",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        }
+      ],
+      "groupId": "group:execution-model"
+    },
+    {
+      "id": "occupancy",
+      "label": "寄存器与占用率",
+      "summary": "理解驻留工作与资源限制",
+      "description": "寄存器、共享存储等资源限制可同时驻留的工作量。更高占用率本身并不总意味着更快。",
+      "kind": "工程",
+      "tags": [
+        "硬件",
+        "代码",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        }
+      ],
+      "groupId": "group:execution-model"
+    },
+    {
+      "id": "memory-synchronization",
+      "label": "存储与同步",
+      "summary": "控制资源布局、访问与可见性",
+      "description": "控制资源布局、访问与可见性",
+      "kind": "主题",
+      "tags": [
+        "硬件",
+        "代码",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "Khronos · Vulkan specification",
+          "url": "https://docs.vulkan.org/spec/latest/index.html"
+        }
+      ],
+      "groupId": "group:memory-synchronization"
+    },
+    {
+      "id": "memory-layout",
+      "label": "数据布局",
+      "summary": "让访问模式匹配存储方式",
+      "description": "数据结构需要考虑连续访问、对齐、缓存和带宽。CPU 上方便的对象布局未必适合 GPU 工作负载。",
+      "kind": "工程",
+      "tags": [
+        "硬件",
+        "代码",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "Khronos · Vulkan specification",
+          "url": "https://docs.vulkan.org/spec/latest/index.html"
+        }
+      ],
+      "groupId": "group:memory-synchronization"
+    },
+    {
+      "id": "barriers",
+      "label": "资源屏障",
+      "summary": "表达执行与内存依赖",
+      "description": "并行命令之间需要明确的资源依赖。执行顺序、可用性与可见性是相关但不同的同步问题。",
+      "kind": "工程",
+      "tags": [
+        "硬件",
+        "代码",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "Khronos · Vulkan specification",
+          "url": "https://docs.vulkan.org/spec/latest/index.html"
+        }
+      ],
+      "groupId": "group:memory-synchronization"
+    },
+    {
+      "id": "resource-binding",
+      "label": "资源绑定",
+      "summary": "把着色器访问连接到具体资源",
+      "description": "资源绑定让着色器访问纹理和缓冲。API 的绑定模型需要与资源生命周期和同步协同。",
+      "kind": "工程",
+      "tags": [
+        "硬件",
+        "代码",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "Khronos · Vulkan specification",
+          "url": "https://docs.vulkan.org/spec/latest/index.html"
+        }
+      ],
+      "groupId": "group:memory-synchronization"
+    },
+    {
+      "id": "graphics-interfaces",
+      "label": "API与着色器",
+      "summary": "通过标准接口提交渲染工作",
+      "description": "通过标准接口提交渲染工作",
+      "kind": "主题",
+      "tags": [
+        "硬件",
+        "代码",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "Khronos · Vulkan specification",
+          "url": "https://docs.vulkan.org/spec/latest/index.html"
+        }
+      ],
+      "groupId": "group:graphics-interfaces"
+    },
+    {
+      "id": "vulkan",
+      "label": "Vulkan",
+      "summary": "显式控制资源与命令",
+      "description": "Vulkan 提供图形与计算工作提交接口，并通过资源、管线、命令与同步等契约连接应用和实现。",
+      "kind": "工程",
+      "tags": [
+        "硬件",
+        "代码",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "Khronos · Vulkan specification",
+          "url": "https://docs.vulkan.org/spec/latest/index.html"
+        }
+      ],
+      "groupId": "group:graphics-interfaces"
+    },
+    {
+      "id": "d3d12",
+      "label": "Direct3D 12",
+      "summary": "显式图形与计算编程接口",
+      "description": "Direct3D 12 通过命令、描述符、管线状态和资源管理等对象组织 GPU 工作。",
+      "kind": "工程",
+      "tags": [
+        "硬件",
+        "代码",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "Microsoft · Direct3D 12",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/direct3d12/direct3d-12-graphics"
+        }
+      ],
+      "groupId": "group:graphics-interfaces"
+    },
+    {
+      "id": "shader-language",
+      "label": "着色器与中间表示",
+      "summary": "把计算表达编译到设备执行",
+      "description": "着色器语言和中间表示连接算法表达与设备执行。编译优化、接口约定和资源布局共同影响结果。",
+      "kind": "工程",
+      "tags": [
+        "硬件",
+        "代码",
+        "工程"
+      ],
+      "sources": [
+        {
+          "title": "Khronos · Vulkan specification",
+          "url": "https://docs.vulkan.org/spec/latest/index.html"
+        }
+      ],
+      "groupId": "group:graphics-interfaces"
+    },
+    {
+      "id": "rendering-systems",
+      "label": "渲染系统与工程",
+      "summary": "组织一帧、验证结果并控制成本",
+      "description": "组织一帧、验证结果并控制成本",
+      "kind": "领域",
+      "tags": [
+        "工程",
+        "代码"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        },
+        {
+          "title": "Microsoft · Direct3D graphics pipeline",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-graphics-pipeline"
+        },
+        {
+          "title": "Khronos · glTF material and color conventions",
+          "url": "https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html"
+        }
+      ],
+      "groupId": "group:rendering-systems"
+    },
+    {
+      "id": "pipeline-architecture",
+      "label": "管线组织",
+      "summary": "安排任务、数据与中间结果",
+      "description": "安排任务、数据与中间结果",
+      "kind": "主题",
+      "tags": [
+        "工程",
+        "代码"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        }
+      ],
+      "groupId": "group:pipeline-architecture"
+    },
+    {
+      "id": "forward-deferred",
+      "label": "前向与延迟着色",
+      "summary": "安排几何与光照计算的顺序",
+      "description": "前向与延迟方案把材质、可见性和光照计算放在不同阶段。透明度、带宽和材质表达影响取舍。",
+      "kind": "工程",
+      "tags": [
+        "工程",
+        "代码"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        }
+      ],
+      "groupId": "group:pipeline-architecture"
+    },
+    {
+      "id": "render-graph",
+      "label": "渲染任务图",
+      "summary": "显式组织任务和资源依赖",
+      "description": "以图表达渲染任务及资源读写，帮助安排执行与生命周期。它描述工程调度，不等同于光传输路径。",
+      "kind": "工程",
+      "tags": [
+        "工程",
+        "代码"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        }
+      ],
+      "groupId": "group:pipeline-architecture"
+    },
+    {
+      "id": "wavefront",
+      "label": "Wavefront路径追踪",
+      "summary": "把不同路径阶段拆成工作队列",
+      "description": "将求交、材质和路径延续等阶段组织为队列，有利于控制 GPU 上不同工作的分歧与数据处理。",
+      "kind": "工程",
+      "tags": [
+        "工程",
+        "代码"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        }
+      ],
+      "groupId": "group:pipeline-architecture"
+    },
+    {
+      "id": "performance-validation",
+      "label": "性能与验证",
+      "summary": "找到真实瓶颈并验证结果",
+      "description": "找到真实瓶颈并验证结果",
+      "kind": "主题",
+      "tags": [
+        "工程",
+        "代码"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        }
+      ],
+      "groupId": "group:performance-validation"
+    },
+    {
+      "id": "profiling",
+      "label": "性能分析",
+      "summary": "定位时间实际花在哪里",
+      "description": "以测量区分 CPU、GPU、带宽和同步等瓶颈。局部计时需要放在完整帧与工作负载背景中理解。",
+      "kind": "工程",
+      "tags": [
+        "工程",
+        "代码"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        }
+      ],
+      "groupId": "group:performance-validation"
+    },
+    {
+      "id": "bandwidth-compute",
+      "label": "计算与带宽",
+      "summary": "理解不同资源限制的取舍",
+      "description": "一个方案可能受计算、存储流量或延迟限制。减少计算却增加流量的修改需要在真实负载中比较。",
+      "kind": "工程",
+      "tags": [
+        "工程",
+        "代码"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        }
+      ],
+      "groupId": "group:performance-validation"
+    },
+    {
+      "id": "reference-render",
+      "label": "参考图与误差",
+      "summary": "用对照解释结果差异",
+      "description": "用高质量参考和可重复场景区分噪声、近似误差和实现错误；选择与问题匹配的比较方式。",
+      "kind": "工程",
+      "tags": [
+        "工程",
+        "代码"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Wavefront Rendering on GPUs",
+          "url": "https://pbr-book.org/4ed/Wavefront_Rendering_on_GPUs"
+        }
+      ],
+      "groupId": "group:performance-validation"
+    },
+    {
+      "id": "output-display",
+      "label": "图像与显示",
+      "summary": "把渲染结果映射到观察设备",
+      "description": "把渲染结果映射到观察设备",
+      "kind": "主题",
+      "tags": [
+        "工程",
+        "代码"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Radiometry, Spectra, and Color",
+          "url": "https://pbr-book.org/4ed/Radiometry,_Spectra,_and_Color"
+        }
+      ],
+      "groupId": "group:output-display"
+    },
+    {
+      "id": "linear-color",
+      "label": "线性颜色空间",
+      "summary": "在正确的数值空间进行计算",
+      "description": "光照与混合运算需要明确颜色编码。sRGB 纹理、数据纹理和渲染结果可能采用不同的读取约定。",
+      "kind": "概念",
+      "tags": [
+        "工程",
+        "代码",
+        "概念"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Radiometry, Spectra, and Color",
+          "url": "https://pbr-book.org/4ed/Radiometry,_Spectra,_and_Color"
+        }
+      ],
+      "groupId": "group:output-display"
+    },
+    {
+      "id": "hdr-exposure",
+      "label": "HDR与曝光",
+      "summary": "表达并控制场景亮度范围",
+      "description": "高动态范围保留较大的亮度变化；曝光调整从场景亮度到图像亮度的整体映射。",
+      "kind": "方法",
+      "tags": [
+        "工程",
+        "代码",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Radiometry, Spectra, and Color",
+          "url": "https://pbr-book.org/4ed/Radiometry,_Spectra,_and_Color"
+        }
+      ],
+      "groupId": "group:output-display"
+    },
+    {
+      "id": "tone-mapping",
+      "label": "色调映射",
+      "summary": "把亮度范围映射到显示范围",
+      "description": "色调映射在目标显示约束下处理高光和对比，颜色变换与最终编码也需要保持一致。",
+      "kind": "方法",
+      "tags": [
+        "工程",
+        "代码",
+        "方法"
+      ],
+      "sources": [
+        {
+          "title": "PBRT · Radiometry, Spectra, and Color",
+          "url": "https://pbr-book.org/4ed/Radiometry,_Spectra,_and_Color"
+        }
+      ],
+      "groupId": "group:output-display"
+    }
+  ],
+  "edges": [
+    {
+      "id": "relation:1",
+      "source": "vectors",
+      "target": "bsdf",
+      "type": "数学基础"
+    },
+    {
+      "id": "relation:2",
+      "source": "frames",
+      "target": "bsdf",
+      "type": "求值坐标"
+    },
+    {
+      "id": "relation:3",
+      "source": "frames",
+      "target": "normal-mapping",
+      "type": "定义基底"
+    },
+    {
+      "id": "relation:4",
+      "source": "matrices",
+      "target": "perspective",
+      "type": "数学基础"
+    },
+    {
+      "id": "relation:5",
+      "source": "matrices",
+      "target": "orthographic",
+      "type": "数学基础"
+    },
+    {
+      "id": "relation:6",
+      "source": "matrices",
+      "target": "instancing",
+      "type": "表达变换"
+    },
+    {
+      "id": "relation:7",
+      "source": "floating-point",
+      "target": "depth-buffer",
+      "type": "精度约束"
+    },
+    {
+      "id": "relation:8",
+      "source": "floating-point",
+      "target": "robust-intersection",
+      "type": "误差来源"
+    },
+    {
+      "id": "relation:9",
+      "source": "error-bounds",
+      "target": "robust-intersection",
+      "type": "提供边界"
+    },
+    {
+      "id": "relation:10",
+      "source": "robust-intersection",
+      "target": "intersection",
+      "type": "正确性要求"
+    },
+    {
+      "id": "relation:11",
+      "source": "jacobian",
+      "target": "light-sampling",
+      "type": "变换密度"
+    },
+    {
+      "id": "relation:12",
+      "source": "pdf",
+      "target": "importance-sampling",
+      "type": "定义权重"
+    },
+    {
+      "id": "relation:13",
+      "source": "pdf",
+      "target": "bsdf",
+      "type": "采样契约"
+    },
+    {
+      "id": "relation:14",
+      "source": "expectation",
+      "target": "monte-carlo",
+      "type": "估计原理"
+    },
+    {
+      "id": "relation:15",
+      "source": "monte-carlo",
+      "target": "path-tracing",
+      "type": "求解方法"
+    },
+    {
+      "id": "relation:16",
+      "source": "monte-carlo",
+      "target": "volume-integration",
+      "type": "估计方法"
+    },
+    {
+      "id": "relation:17",
+      "source": "monte-carlo",
+      "target": "lens",
+      "type": "积分方法"
+    },
+    {
+      "id": "relation:18",
+      "source": "importance-sampling",
+      "target": "light-sampling",
+      "type": "提高效率"
+    },
+    {
+      "id": "relation:19",
+      "source": "importance-sampling",
+      "target": "bsdf",
+      "type": "选择方向"
+    },
+    {
+      "id": "relation:20",
+      "source": "mis",
+      "target": "light-sampling",
+      "type": "组合策略"
+    },
+    {
+      "id": "relation:21",
+      "source": "mis",
+      "target": "bsdf",
+      "type": "组合策略"
+    },
+    {
+      "id": "relation:22",
+      "source": "stratified",
+      "target": "pixel-sampling",
+      "type": "组织样本"
+    },
+    {
+      "id": "relation:23",
+      "source": "low-discrepancy",
+      "target": "path-tracing",
+      "type": "样本来源"
+    },
+    {
+      "id": "relation:24",
+      "source": "pixel-sampling",
+      "target": "aliasing",
+      "type": "采样影响"
+    },
+    {
+      "id": "relation:25",
+      "source": "reconstruction-filter",
+      "target": "aliasing",
+      "type": "信号处理"
+    },
+    {
+      "id": "relation:26",
+      "source": "texture-filtering",
+      "target": "aliasing",
+      "type": "减小混叠"
+    },
+    {
+      "id": "relation:27",
+      "source": "texture-filtering",
+      "target": "coverage",
+      "type": "使用像素足迹"
+    },
+    {
+      "id": "relation:28",
+      "source": "temporal-reuse",
+      "target": "matrices",
+      "type": "建立对应"
+    },
+    {
+      "id": "relation:29",
+      "source": "temporal-reuse",
+      "target": "occlusion",
+      "type": "历史有效性"
+    },
+    {
+      "id": "relation:30",
+      "source": "bounds",
+      "target": "bvh",
+      "type": "包围几何"
+    },
+    {
+      "id": "relation:31",
+      "source": "bvh",
+      "target": "intersection",
+      "type": "加速查询"
+    },
+    {
+      "id": "relation:32",
+      "source": "sah",
+      "target": "bvh",
+      "type": "构建策略"
+    },
+    {
+      "id": "relation:33",
+      "source": "instancing",
+      "target": "vk-as",
+      "type": "实例组织"
+    },
+    {
+      "id": "relation:34",
+      "source": "acceleration",
+      "target": "vk-as",
+      "type": "API中的落地"
+    },
+    {
+      "id": "relation:35",
+      "source": "vk-as",
+      "target": "vulkan",
+      "type": "接口契约"
+    },
+    {
+      "id": "relation:36",
+      "source": "ray",
+      "target": "intersection",
+      "type": "查询输入"
+    },
+    {
+      "id": "relation:37",
+      "source": "triangles",
+      "target": "intersection",
+      "type": "相交对象"
+    },
+    {
+      "id": "relation:38",
+      "source": "triangles",
+      "target": "rasterization",
+      "type": "输入图元"
+    },
+    {
+      "id": "relation:39",
+      "source": "perspective",
+      "target": "clipping",
+      "type": "投影约束"
+    },
+    {
+      "id": "relation:40",
+      "source": "depth-buffer",
+      "target": "shadow-map",
+      "type": "存储可见性"
+    },
+    {
+      "id": "relation:41",
+      "source": "orthographic",
+      "target": "shadow-map",
+      "type": "可用投影"
+    },
+    {
+      "id": "relation:42",
+      "source": "occlusion",
+      "target": "light-sampling",
+      "type": "计算可见性"
+    },
+    {
+      "id": "relation:43",
+      "source": "occlusion",
+      "target": "shadow-map",
+      "type": "近似求解"
+    },
+    {
+      "id": "relation:44",
+      "source": "ray-query",
+      "target": "hybrid-rendering",
+      "type": "组成方法"
+    },
+    {
+      "id": "relation:45",
+      "source": "rasterization",
+      "target": "hybrid-rendering",
+      "type": "组成方法"
+    },
+    {
+      "id": "relation:46",
+      "source": "rasterization",
+      "target": "forward-deferred",
+      "type": "可见性阶段"
+    },
+    {
+      "id": "relation:47",
+      "source": "radiance",
+      "target": "rendering-equation",
+      "type": "描述光量"
+    },
+    {
+      "id": "relation:48",
+      "source": "irradiance",
+      "target": "bsdf",
+      "type": "散射积分"
+    },
+    {
+      "id": "relation:49",
+      "source": "bsdf",
+      "target": "rendering-equation",
+      "type": "描述散射"
+    },
+    {
+      "id": "relation:50",
+      "source": "rendering-equation",
+      "target": "path-tracing",
+      "type": "估计目标"
+    },
+    {
+      "id": "relation:51",
+      "source": "microfacet",
+      "target": "bsdf",
+      "type": "具体模型"
+    },
+    {
+      "id": "relation:52",
+      "source": "fresnel",
+      "target": "microfacet",
+      "type": "界面反射"
+    },
+    {
+      "id": "relation:53",
+      "source": "normal-mapping",
+      "target": "material-model",
+      "type": "局部外观"
+    },
+    {
+      "id": "relation:54",
+      "source": "texture-filtering",
+      "target": "material-model",
+      "type": "参数求值"
+    },
+    {
+      "id": "relation:55",
+      "source": "material-model",
+      "target": "path-tracing",
+      "type": "提供散射"
+    },
+    {
+      "id": "relation:56",
+      "source": "material-model",
+      "target": "forward-deferred",
+      "type": "着色输入"
+    },
+    {
+      "id": "relation:57",
+      "source": "transmittance",
+      "target": "volume-integration",
+      "type": "计算衰减"
+    },
+    {
+      "id": "relation:58",
+      "source": "phase-function",
+      "target": "volume-integration",
+      "type": "描述散射"
+    },
+    {
+      "id": "relation:59",
+      "source": "light-probes",
+      "target": "irradiance",
+      "type": "可存储信息"
+    },
+    {
+      "id": "relation:60",
+      "source": "light-probes",
+      "target": "hybrid-rendering",
+      "type": "光照近似"
+    },
+    {
+      "id": "relation:61",
+      "source": "scene-graph",
+      "target": "instancing",
+      "type": "组织引用"
+    },
+    {
+      "id": "relation:62",
+      "source": "lod",
+      "target": "triangles",
+      "type": "选择精度"
+    },
+    {
+      "id": "relation:63",
+      "source": "lod",
+      "target": "profiling",
+      "type": "质量性能取舍"
+    },
+    {
+      "id": "relation:64",
+      "source": "simt",
+      "target": "wavefront",
+      "type": "执行动机"
+    },
+    {
+      "id": "relation:65",
+      "source": "workgroups",
+      "target": "barriers",
+      "type": "同步边界"
+    },
+    {
+      "id": "relation:66",
+      "source": "occupancy",
+      "target": "profiling",
+      "type": "观察指标"
+    },
+    {
+      "id": "relation:67",
+      "source": "memory-layout",
+      "target": "bvh",
+      "type": "影响遍历效率"
+    },
+    {
+      "id": "relation:68",
+      "source": "memory-layout",
+      "target": "wavefront",
+      "type": "组织队列数据"
+    },
+    {
+      "id": "relation:69",
+      "source": "barriers",
+      "target": "render-graph",
+      "type": "实现依赖"
+    },
+    {
+      "id": "relation:70",
+      "source": "resource-binding",
+      "target": "material-model",
+      "type": "连接材质资源"
+    },
+    {
+      "id": "relation:71",
+      "source": "vulkan",
+      "target": "barriers",
+      "type": "同步契约"
+    },
+    {
+      "id": "relation:72",
+      "source": "d3d12",
+      "target": "resource-binding",
+      "type": "绑定契约"
+    },
+    {
+      "id": "relation:73",
+      "source": "shader-language",
+      "target": "bsdf",
+      "type": "表达求值"
+    },
+    {
+      "id": "relation:74",
+      "source": "shader-language",
+      "target": "workgroups",
+      "type": "表达并行计算"
+    },
+    {
+      "id": "relation:75",
+      "source": "bandwidth-compute",
+      "target": "forward-deferred",
+      "type": "架构取舍"
+    },
+    {
+      "id": "relation:76",
+      "source": "bandwidth-compute",
+      "target": "texture-filtering",
+      "type": "采样成本"
+    },
+    {
+      "id": "relation:77",
+      "source": "profiling",
+      "target": "render-graph",
+      "type": "定位任务成本"
+    },
+    {
+      "id": "relation:78",
+      "source": "wavefront",
+      "target": "path-tracing",
+      "type": "GPU实现方式"
+    },
+    {
+      "id": "relation:79",
+      "source": "reference-render",
+      "target": "path-tracing",
+      "type": "结果对照"
+    },
+    {
+      "id": "relation:80",
+      "source": "reference-render",
+      "target": "hybrid-rendering",
+      "type": "评估近似"
+    },
+    {
+      "id": "relation:81",
+      "source": "spectrum",
+      "target": "linear-color",
+      "type": "颜色表示"
+    },
+    {
+      "id": "relation:82",
+      "source": "linear-color",
+      "target": "material-model",
+      "type": "编码约定"
+    },
+    {
+      "id": "relation:83",
+      "source": "radiance",
+      "target": "hdr-exposure",
+      "type": "场景亮度"
+    },
+    {
+      "id": "relation:84",
+      "source": "hdr-exposure",
+      "target": "tone-mapping",
+      "type": "显示流程"
+    },
+    {
+      "id": "relation:85",
+      "source": "tone-mapping",
+      "target": "reference-render",
+      "type": "比较空间约定"
+    }
+  ]
+}

@@ -1,6 +1,58 @@
 # Lane Router V1 手工验证
 
-自动测试覆盖通信工具、议题工具与 HTTP/CLI、文件 mailbox、SQLite 对账、Claude Channel transport、Codex App Server 协议、按需启动与 launcher 参数。通信目录保留原五项工具；默认独立产品显式组合九项（五项通信、四项议题）。当前 Claude/ZCode stdio MCP 入口也显式选择九项产品目录，`createLaneMcpServer` 工厂本身默认五项通信目录。Router 的 `issues:false` 控制 Router/Codex 装配，不会动态改变已启动 stdio MCP 的工具列表。下面的现场用例验证真实 CLI、模型 provider、浏览器和交互式 TUI 的边界，不能用 fake backend 或 HappyDOM 结果代替。既有“最后验证”保留当时版本与事实，不表示新版议题功能已经现场通过。
+自动测试覆盖通信、议题与图工具、HTTP/CLI、文件 mailbox、SQLite 对账、Claude Channel transport、Codex App Server 协议、按需启动与 launcher 参数。通信目录保留原五项工具；默认独立产品显式组合十三项（五项通信、四项议题、四项图工具）。Claude/ZCode stdio MCP 入口也选择十三项产品目录，`createLaneMcpServer` 工厂本身默认五项通信目录。Router 的 `issues:false` 保留通信-only装配，不启用议题或图模块，也不会动态改变已启动 stdio MCP 的工具列表。下面的现场用例验证真实 CLI、模型 provider、浏览器和交互式 TUI 的边界，不能用 fake backend 或 HappyDOM 结果代替。既有“最后验证”保留当时版本与事实，不表示新增功能已在生产现场通过。
+
+## 图资源：lane 更新，网页查看
+
+在 lane 中要求 agent 新建或打开一张图。图独立于 lane，所有已绑定 lane 共享同一资源集合；不按创建者隐藏或限制写入。agent 创建/申请锁后重读当前图，保存批次，再将返回的 `viewUrl` 交给用户。用户从该地址看图，回到 lane 继续讨论。网页没有讨论区、编辑入口或选择 lane 的流程。
+
+| 工具 | 用途 |
+|---|---|
+| `lane_graph_create` | `operationKey,title,description?`；原子创建空图并持有写锁，返回 `graphId,lockId,lockValid,document,viewUrl`。 |
+| `lane_graph_read` | `{graphId}` 读当前完整图和锁；`{query?,afterId?,limit?}` 查找共享图，默认 50，最多 200 条，按 ID 稳定分页。 |
+| `lane_graph_lock` | `operationKey,graphId,action:"acquire"` 取锁并读最新图；`action:"release"` 另带 `lockId`。 |
+| `lane_graph_apply` | `operationKey,graphId,lockId,changes` 原子修改。支持 `set_graph,upsert_group,upsert_node,upsert_edge,delete_node,delete_edge`。 |
+
+图由普通节点、关系和可选嵌套分组组成，不限定领域或层数。新节点需 `id,label`；新边需 `id,source,target,type`；新分组需 `id,label`。更新省略的字段保持原值，`groupId:null` / `parentId:null` 解除所属分组。分组不能成环，边必须连接真实节点，来源 URL 只接受 HTTP(S)。删除节点时须在同批显式删除或改指关联边，遗漏则整批拒绝，原图和锁不变。没有分组/整图删除或历史回滚。
+
+长写锁没有自动过期或续租，Router 重启后仍保留；同一 lane 的新有效绑定可以接续，旧绑定和其他 lane 不能写。其他 lane 可读已提交内容；获锁遇到 `GRAPH_LOCKED` 时等待后重试。写入、释放用错锁 ID 返回 `LOCK_INVALID`。每次新写操作使用新 `operationKey`，同一结果未知的操作重试复用原键和原内容。同键异内容报 `OPERATION_CONFLICT`。重放不会重新写图或抢回已释放的锁；先检查返回的 `lockValid`，失效时以新键重新获锁并读图。
+
+### 旧 Codex 会话与本机恢复
+
+旧会话可以在当前 Codex 进程下运行同一组工具，身份取自 `CODEX_THREAD_ID`，不能用参数指定其他 lane：
+
+```powershell
+lane-router-lane graph create --json-file create-graph.json
+lane-router-lane graph read --json-file read-graph.json
+lane-router-lane graph lock --json-file lock-graph.json
+lane-router-lane graph apply --json-file edit-graph.json
+```
+
+例如创建文件为 `{"operationKey":"create-rendering-1","title":"渲染知识网络"}`；读取文件为 `{"graphId":"复制返回的ID"}`。编辑文件中 `changes` 可用：
+
+```json
+[
+  {"op":"upsert_node","id":"material","label":"材质","summary":"描述表面散射"},
+  {"op":"upsert_node","id":"bsdf","label":"BSDF"},
+  {"op":"upsert_edge","id":"material-bsdf","source":"material","target":"bsdf","type":"使用"}
+]
+```
+
+持锁 lane 长期不可用时，用户先从读取结果或页面“锁恢复命令”确认当前锁 ID，再执行：
+
+```powershell
+lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
+```
+
+管理命令通过 discovery 找当前 Router，不直改数据库。若锁已经换人，返回 `LOCK_CHANGED`，重新查看后再决定；无锁则返回已解锁。强解只解除锁，不回滚内容。此命令不发布为 agent 工具，HTTP 只接受 loopback、无 Origin 的 JSON 请求；这是本机可信进程管理边界，不是隔离本机任意进程的权限系统。
+
+### 查看与验证
+
+默认全景收起分组，无分组节点直接显示。侧栏可展开/收起或聚焦分组，面包屑返回全景；搜索包含隐藏节点，并展开其祖先。跨组边按当前可见祖先聚合，分组卡显示内部关系数量。空白画布、Esc、侧栏 × 取消选择。拖动、自动排版、相机和展开只影响当前查看，刷新页面后不保留。缩放自动展开默认关闭；开启后按“首层”和“每层增加”设定阈值。
+
+本地复验：`npm run build` 同时构建后端与 React Flow 生产页面；`npm run test:graph-browser` 使用独立临时 core/图库、实际 CLI 可执行文件、真实 HTTP 与 Chromium 验证普通图、渲染知识图、导航/搜索/取消选择、刷新后的增改删和故障展示。截图及 `result.json` 保存在命令输出的仓外目录，可用 `GRAPH_BROWSER_EVIDENCE` 指定位置。该 fixture 的模型 backend 是替身，不能据此声称真实模型客户端已验收。
+
+部署后现场验收仍需：两条真实普通 lane 发现同一图，一条持锁修改、另一条可读且等待；释放后另一条获锁修改；当前模型能使用新增工具，旧会话 CLI 可用；用户浏览返回 URL，确认交互和观感。共享部署/重启由维护者安排，本地实现验证不代替该步骤。
 
 ## 用户议题收件箱：使用与操作
 
