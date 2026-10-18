@@ -14,6 +14,11 @@ describe("router config", () => {
     expect(config).toMatchObject({ nativeHostsFile: "D:/private/permits.json", zcode: { driver: VALID_DRIVER } });
   });
 
+  it("accepts an accounts connection pointer so any launcher can enable the switch gate", async () => {
+    const config = await readRouterConfig({ dataRoot: "unused", configFile: "C:/cfg.json", readFile: async () => JSON.stringify({ accounts: { connectionFile: "E:/deployment/state/connection.json" } }) });
+    expect(config.accounts).toEqual({ connectionFile: "E:/deployment/state/connection.json" });
+  });
+
   it("never echoes unknown configuration keys that might contain a secret", async () => {
     await expect(readRouterConfig({ dataRoot: "unused", readFile: async () => JSON.stringify({ "fixture-secret-key": true }) })).rejects.toThrow("Router config has an invalid shape");
   });
@@ -66,6 +71,7 @@ describe("router config", () => {
   it.each([
     ["invalid JSON", async () => "not json{"],
     ["an unknown top-level section", async () => JSON.stringify({ codex: {} })],
+    ["an unknown accounts field", async () => JSON.stringify({ accounts: { connectionFile: "C:/c.json", token: "x" } })],
     ["an unknown driver field", async () => JSON.stringify({ zcode: { driver: { ...VALID_DRIVER, surprise: 1 } } })],
     ["builtin without personal", async () => JSON.stringify({ zcode: { driver: { ...VALID_DRIVER, builtinPath: "C:/b.json" } } })],
     ["an invalid reasoning level", async () => JSON.stringify({ zcode: { driver: { ...VALID_DRIVER, plan: { ...VALID_DRIVER.plan, reasoningLevel: "medium" } } } })],

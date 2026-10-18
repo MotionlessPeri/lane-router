@@ -36,6 +36,7 @@ export const zcodeDriverConfigSchema = z.object({
 
 export const routerConfigSchema = z.object({
   nativeHostsFile: z.string().trim().min(1).optional(),
+  accounts: z.object({ connectionFile: nonEmpty }).strict().optional(),
   zcode: z.object({ driver: zcodeDriverConfigSchema }).strict().optional(),
 }).strict();
 
