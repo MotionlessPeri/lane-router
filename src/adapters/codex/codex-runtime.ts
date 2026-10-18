@@ -137,7 +137,6 @@ export class CodexRuntime {
     if (this.accountConsumer && (exportsToken || ["account/login/start", "account/logout", "loginApiKey", "loginChatGpt", "logout"].includes(method))) throw new AccountError("ACCOUNT_MANAGED_EXTERNALLY");
     return this.accountGate?.enter(method, admission) ?? (() => {});
   }
-  modelRequestUncertain(): void { this.accountGate?.markUncertain(); }
 
   refreshAccount(params: Readonly<Record<string, unknown>>): Promise<unknown> {
     if (!this.accountConsumer) return Promise.reject(new AccountError("AUTH_REQUIRED"));

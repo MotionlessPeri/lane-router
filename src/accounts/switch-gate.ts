@@ -43,11 +43,7 @@ export class AccountSwitchGate {
   async request<T>(method: string, execute: () => Promise<T>, admission?: string): Promise<T> {
     const finish = this.enter(method, admission);
     try { return await execute(); }
-    catch (error) {
-      const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-      if (modelRequests.has(method) && ["CODEX_APP_SERVER_TIMEOUT", "CODEX_APP_SERVER_DISCONNECTED", "CODEX_PROTOCOL_DECODE"].includes(String(code))) finish.markUncertain?.();
-      throw error;
-    } finally { finish(); }
+    finally { finish(); }
   }
 
   /** A claimed Company input may finish crossing its own Host after preparation starts. */
@@ -62,6 +58,9 @@ export class AccountSwitchGate {
 
   /** A disconnected controller may not release an operation that a replacement owns. */
   hold(): void { this.operation = "startup"; this.prepared = false; this.version++; }
+  /** Identity-level uncertainty only (a half-applied account or a cross-Host admission effect);
+   *  runtime-level unknowns are observable through runtimeIdle and must not land here, because
+   *  nothing short of a process replacement ever clears this state. */
   markUncertain(): void { this.uncertain = true; this.hold(); }
   /** Only the owner observing an actual process replacement may forget old effects. */
   runtimeReplaced(): void {

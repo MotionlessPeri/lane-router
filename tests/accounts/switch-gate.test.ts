@@ -75,8 +75,9 @@ test("uncertain effects revoke even a still-active cross-Host admission", async 
   });
   await expect(f.gate.prepare("next")).rejects.toThrow("RUNTIME_UNAVAILABLE");
 });
-test("an undecodable response cannot release possibly dispatched model work", async () => {
+test("a transport-level failure surfaces its error without fencing the runtime", async () => {
   const f = fixture();
   await expect(f.gate.request("turn/start", async () => { throw Object.assign(new Error("bad protocol"), { code: "CODEX_PROTOCOL_DECODE" }); })).rejects.toThrow();
-  await expect(f.gate.prepare("next")).rejects.toThrow("RUNTIME_UNAVAILABLE");
+  await f.gate.prepare("next");
+  expect(f.gate.isPrepared("next")).toBe(true);
 });

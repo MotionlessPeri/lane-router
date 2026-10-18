@@ -51,5 +51,36 @@ test("TUI review admission is held through its response and auth refresh stays b
   await vi.waitFor(() => expect(messages.some(m => m.id === 12)).toBe(true));
   upstream.send(JSON.stringify({ id: 12 }));
   await vi.waitFor(() => expect(received.some(m => m.id === 12)).toBe(true));
-  await expect(gate.prepare("malformed-response")).rejects.toThrow("RUNTIME_UNAVAILABLE");
+  await gate.prepare("malformed-response");
+  expect(gate.isPrepared("malformed-response")).toBe(true);
+  gate.release("malformed-response");
+});
+
+test("a TUI dropping with in-flight model work does not fence later sessions", async () => {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 }); cleanup.push(() => server.close());
+  await new Promise(resolve => server.once("listening", resolve));
+  const address = server.address(); if (!address || typeof address === "string") throw Error();
+  const sockets: WebSocket[] = [];
+  const messages: any[] = [];
+  server.on("connection", socket => { sockets.push(socket); cleanup.push(() => socket.terminate()); socket.on("message", raw => messages.push(JSON.parse(raw.toString()))); });
+  const gate = new AccountSwitchGate({ pollMs: 1, request: async () => ({ data: [], nextCursor: null }) });
+  const bridge = new CodexTuiBridge({ endpoint: `ws://127.0.0.1:${address.port}`, decorateThreadStart: p => p, claimThread() {}, openThreadClient() {}, closeThreadClient() {}, ownsThread: () => true, dispatchTool: async () => null, observeNotification() {}, admitModelRequest: (method, admission) => gate.enter(method, admission) });
+  const url = await bridge.start(); cleanup.push(() => bridge.close());
+  const first = new WebSocket(url);
+  await new Promise(resolve => first.once("open", resolve));
+  first.send(JSON.stringify({ id: 1, method: "turn/start", params: { threadId: "original" } }));
+  await vi.waitFor(() => expect(messages.some(m => m.id === 1)).toBe(true));
+  first.terminate();
+  await new Promise(resolve => first.once("close", resolve));
+  const second = new WebSocket(url); cleanup.push(() => second.terminate());
+  const received: any[] = []; second.on("message", raw => received.push(JSON.parse(raw.toString())));
+  await new Promise(resolve => second.once("open", resolve));
+  second.send(JSON.stringify({ id: 2, method: "turn/start", params: { threadId: "original" } }));
+  await vi.waitFor(() => expect(messages.some(m => m.id === 2)).toBe(true));
+  expect(received.some(m => m.id === 2 && m.error)).toBe(false);
+  sockets[sockets.length - 1].send(JSON.stringify({ id: 2, result: { turn: { id: "recovered" } } }));
+  await vi.waitFor(() => expect(received.some(m => m.id === 2 && m.result)).toBe(true));
+  await gate.prepare("switch-after-drop");
+  expect(gate.isPrepared("switch-after-drop")).toBe(true);
+  gate.release("switch-after-drop");
 });

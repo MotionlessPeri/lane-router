@@ -14,7 +14,6 @@ export interface CodexTuiBridgeHost {
   dispatchTool(request: DynamicToolCallParams): Promise<unknown>;
   observeNotification(method: string, params: Readonly<Record<string, unknown>>): void;
   admitModelRequest?(method: string, admission?: string, params?: unknown): AccountRequestFinish;
-  modelRequestUncertain?(): void;
   refreshAccount?(params: Readonly<Record<string, unknown>>): Promise<unknown>;
 }
 
@@ -86,7 +85,7 @@ export class CodexTuiBridge {
       const response = parseRecord(raw.toString());
       if (response && isId(response.id) && !response.method) {
         const finish = admissions.get(response.id);
-        try { decodeServerMessage(response); } catch { finish?.markUncertain?.(); }
+        try { decodeServerMessage(response); } catch { /* undecodable responses stay observable through thread reads */ }
         finish?.(); admissions.delete(response.id);
       }
       void this.fromAppServer(raw.toString(), pendingClaims, claimedThreads, upstream, downstream);
@@ -99,7 +98,9 @@ export class CodexTuiBridge {
     const detach = () => {
       if (!attached) return;
       attached = false;
-      for (const finish of admissions.values()) { finish.markUncertain ? finish.markUncertain() : this.host.modelRequestUncertain?.(); finish(); }
+      // In-flight work stays visible to the gate through thread reads; a lost TUI must not
+      // fence the whole runtime behind an uncertainty only a process replacement can clear.
+      for (const finish of admissions.values()) finish();
       admissions.clear();
       this.connections.delete(pair);
       for (const threadId of claimedThreads) this.host.closeThreadClient(threadId);
