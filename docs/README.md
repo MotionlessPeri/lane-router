@@ -8,12 +8,14 @@
 ## 需求
 
 - [用户议题收件箱（问题看板）](superpowers/specs/2026-10-17-user-issue-inbox-requirements.md)
+- [图资源接入需求](superpowers/specs/2026-10-18-graph-resource-requirements.md)
 
 ## 设计
 
 - [后台 HTTP 边界整理设计](superpowers/specs/2026-10-17-dashboard-http-boundary-design.md)
 - [用户议题收件箱架构草案](superpowers/specs/2026-10-17-user-issue-inbox-design.md)
 - [统一账号切换设计](superpowers/specs/2026-10-18-account-switching.md)
+- [图资源接入技术设计](superpowers/specs/2026-10-18-graph-resource-design.md)
 
 ## 界面样稿
 
@@ -25,3 +27,4 @@
 - [tell 用户消息投递底座抽取](superpowers/plans/2026-10-17-tell-user-delivery.md)
 - [用户议题收件箱](superpowers/plans/2026-10-18-user-issue-inbox.md)
 - [统一账号切换](superpowers/plans/2026-10-18-account-switching.md)
+- [图资源接入](superpowers/plans/2026-10-19-graph-resources.md)
