@@ -104,3 +104,16 @@ export async function readPrivateJson(path: string): Promise<unknown> {
     return JSON.parse(await readFile(path, "utf8"));
   } catch { throw new AccountError("STORAGE_UNAVAILABLE"); }
 }
+
+/** Service logs share the private root's ACL and never follow links. */
+export async function openPrivateAppendLog(path: string) {
+  await ensurePrivateDirectory(dirname(path));
+  await rejectLinks(path);
+  const file = await open(path, "a", 0o600);
+  try {
+    const info = await file.stat();
+    if (!info.isFile() || info.nlink !== 1) throw new AccountError("STORAGE_UNAVAILABLE");
+    await restrict(path, false);
+    return file;
+  } catch { await file.close(); throw new AccountError("STORAGE_UNAVAILABLE"); }
+}

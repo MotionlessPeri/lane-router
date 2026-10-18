@@ -16,7 +16,9 @@ export async function startAccountService(options: { root: string; executable: s
   await ensurePrivateDirectory(root);
   const lock = RuntimeLock.acquire(join(root, "service.lock"));
   if (!lock) throw new AccountError("SERVICE_ALREADY_RUNNING");
-  const accounts = new ManagedAccounts({ root, executable: options.executable });
+  const accounts = new ManagedAccounts({ root, executable: options.executable,
+    report: ({ stage, code }) => { process.stderr.write(`account-login stage=${stage} code=${code}\n`); },
+  });
   let http: AccountHttpServer | undefined;
   const connectionFile = join(root, "connection.json");
   try {
@@ -41,7 +43,7 @@ export async function startAccountService(options: { root: string; executable: s
   }
 }
 
-function argumentsForCli(args: string[]) {
+export function argumentsForCli(args: string[]) {
   let root = join(homedir(), ".lane-router-accounts");
   let executable = process.env.CODEX_EXE ?? "codex";
   let port = 47839;

@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { atomicPrivateJson, ensurePrivateDirectory, readPrivateJson } from "../../src/accounts/private-storage.js";
+import { atomicPrivateJson, ensurePrivateDirectory, openPrivateAppendLog, readPrivateJson } from "../../src/accounts/private-storage.js";
 
 const roots: string[] = [];
 vi.setConfig({ testTimeout: 30_000 });
@@ -106,4 +106,23 @@ test("malformed metadata errors cannot include stored content", async () => {
   await writeFile(path, "secret-fixture-invalid-json");
   await expect(readPrivateJson(path)).rejects.toThrow(/^STORAGE_UNAVAILABLE$/);
   expect(await readFile(path, "utf8")).toBe("secret-fixture-invalid-json");
+});
+
+test("private service logs append across restarts and are readable while open", async () => {
+  const directory = await root(); const path = join(directory, "service-stderr.log");
+  const first = await openPrivateAppendLog(path);
+  await first.write("first safe diagnostic\n");
+  expect(await readFile(path, "utf8")).toBe("first safe diagnostic\n");
+  await first.close();
+  const next = await openPrivateAppendLog(path);
+  try { await next.write("second safe diagnostic\n"); }
+  finally { await next.close(); }
+  expect(await readFile(path, "utf8")).toBe("first safe diagnostic\nsecond safe diagnostic\n");
+});
+
+test("private service logs reject hard links without changing the target", async () => {
+  const directory = await root(); const target = join(directory, "original.log"), alias = join(directory, "linked.log");
+  await writeFile(target, "untouched"); await link(target, alias);
+  await expect(openPrivateAppendLog(alias)).rejects.toThrow("STORAGE_UNAVAILABLE");
+  expect(await readFile(target, "utf8")).toBe("untouched");
 });

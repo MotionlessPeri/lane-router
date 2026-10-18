@@ -5,6 +5,7 @@
   "type": "module",
   "bin": {
     "lane-router-accounts": "dist/accounts/main.js",
+    "lane-router-accounts-supervisor": "dist/accounts/supervisor.js",
     "lane-router-codex": "dist/process/codex-launcher.js",
     "lane-router-lane": "dist/process/lane-launcher.js",
     "lane-router-restore-project": "dist/process/project-restore-cli.js",

@@ -12,7 +12,10 @@ export interface ManagedAccountsOptions {
   openUrl?: (url: string) => Promise<void>;
   loginTimeoutMs?: number;
   createClient?: (options: { executable: string; home: string }) => Promise<AccountRpcClient>;
+  /** Fixed stages/codes only: never include RPC bodies, URLs or credentials. */
+  report?: (event: { stage: LoginStage; code: string }) => void;
 }
+type LoginStage = "storage" | "owner-start" | "login-start" | "browser-open" | "authorization" | "identity-read" | "profile-save" | "owner-close";
 export interface LoginStatus { state: "idle" | "starting" | "waiting" | "complete" | "failed" | "cancelled"; error?: string }
 interface StoredProfile { id: string; slot: string; identity: AccountIdentity }
 interface Profile extends StoredProfile {
@@ -101,18 +104,20 @@ export class ManagedAccounts implements AccountSource {
     const operation = this.operation;
     if (!operation) return;
     // Once the metadata transaction starts, complete it before reporting its outcome.
-    if (!operation.committing) { operation.cancelled = true; operation.abort.abort(); await operation.owner?.close(); }
+    if (!operation.committing) { operation.cancelled = true; operation.abort.abort(); await this.closeLoginOwner(operation.owner); }
     await operation.task;
   }
 
   private async runLogin(operation: LoginOperation): Promise<void> {
     const slot = `slot-${randomUUID()}`;
     let accepted = false;
+    let stage: LoginStage = "storage";
     const timer = setTimeout(() => { if (!operation.committing) operation.abort.abort(); }, this.options.loginTimeoutMs ?? 10 * 60_000);
     let removeNotification = () => {}; let removeClose = () => {};
     try {
       const home = join(this.root, "slots", slot);
       await ensurePrivateDirectory(home); this.checkLogin(operation);
+      stage = "owner-start";
       const owner = await this.createClient(home); operation.owner = owner; this.checkLogin(operation);
       let loginId: string | undefined;
       const early: Array<{ loginId: string; success: boolean }> = [];
@@ -127,17 +132,22 @@ export class ManagedAccounts implements AccountSource {
         else if (!loginId && early.length < 16) early.push({ loginId: message.params.loginId, success: message.params.success });
       });
       removeClose = owner.onClose(() => fail(new AccountError("LOGIN_FAILED")));
+      stage = "login-start";
       const response = await this.abortable(owner.request("account/login/start", { type: "chatgpt" }), operation);
       this.checkLogin(operation);
       if (!isRecord(response) || response.type !== "chatgpt" || typeof response.loginId !== "string" || !response.loginId || typeof response.authUrl !== "string") throw new AccountError("LOGIN_FAILED");
       validateOfficialUrl(response.authUrl);
       loginId = response.loginId;
       const received = early.find(event => event.loginId === loginId); if (received) finish(received.success);
+      stage = "browser-open";
       await this.abortable((this.options.openUrl ?? openOfficialUrl)(response.authUrl), operation);
       this.checkLogin(operation); this.status = { state: "waiting" };
+      stage = "authorization";
       if (!await this.abortable(completed, operation)) throw new AccountError("LOGIN_FAILED");
       removeNotification(); removeClose();
+      stage = "identity-read";
       const grant = await this.abortable(this.readGrant(owner, false), operation); this.checkLogin(operation);
+      stage = "profile-save";
       await this.mutate(async () => {
         this.checkLogin(operation);
         const requested = operation.profileId ? this.profiles.get(operation.profileId) : undefined;
@@ -149,20 +159,28 @@ export class ManagedAccounts implements AccountSource {
           await this.persist([...this.profiles.values()].filter(profile => profile !== previous).concat(replacement), this.desired);
           // account/logout can revoke managed OAuth tokens. Retire the owner only;
           // inactive keyring slots remain until a verified local-only cleanup exists.
-          await previous?.owner?.close();
           this.watchOwner(replacement, owner);
           this.profiles.set(replacement.id, replacement); accepted = true;
+          await this.closeLoginOwner(previous?.owner);
         };
         if (previous) await this.serial(previous, install); else await install();
       });
       this.status = { state: "complete" };
     } catch (error) {
       this.status = operation.cancelled ? { state: "cancelled", error: "LOGIN_CANCELLED" } : { state: "failed", error: safeError(error, "LOGIN_FAILED") };
+      this.options.report?.({ stage, code: this.status.error! });
     } finally {
       clearTimeout(timer); removeNotification(); removeClose();
-      if (!accepted) await operation.owner?.close();
+      // Cleanup is part of this detached task: a rejection here used to kill the
+      // service and skip clearing operation, leaving subsequent logins busy.
+      if (!accepted) await this.closeLoginOwner(operation.owner);
       if (this.operation === operation) this.operation = undefined;
     }
+  }
+
+  private async closeLoginOwner(owner?: AccountRpcClient): Promise<void> {
+    try { await owner?.close(); }
+    catch (error) { this.options.report?.({ stage: "owner-close", code: safeError(error, "RUNTIME_UNAVAILABLE") }); }
   }
 
   async grant(profileId: string, refresh = false): Promise<AccessGrant> {

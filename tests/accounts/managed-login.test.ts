@@ -46,10 +46,12 @@ afterEach(async () => { await Promise.all(managers.splice(0).map(manager => mana
 async function fixture(options: { loginTimeoutMs?: number; configure?: (broker: Broker) => void; root?: string } = {}) {
   const root = options.root ?? await mkdtemp(join(tmpdir(), "router-managed-")); if (!options.root) roots.push(root);
   const brokers: Broker[] = []; const homes: string[] = []; const opened: string[] = [];
+  const reports: { stage: string; code: string }[] = [];
   const manager = new ManagedAccounts({ root, executable: "unused-fixture", loginTimeoutMs: options.loginTimeoutMs,
+    report: event => { reports.push(event); },
     openUrl: async url => { opened.push(url); },
     createClient: async ({ home }) => { const broker = new Broker(); options.configure?.(broker); brokers.push(broker); homes.push(home); return broker; },
-  }); managers.push(manager); await manager.initialize(); return { manager, root, brokers, homes, opened };
+  }); managers.push(manager); await manager.initialize(); return { manager, root, brokers, homes, opened, reports };
 }
 async function login(setup: Awaited<ReturnType<typeof fixture>>, profileId?: string) {
   await setup.manager.startLogin(profileId);
@@ -274,4 +276,70 @@ test("shutdown during the metadata transaction also closes the newly installed o
     const closing = setup.manager.close(); release(); await closing;
     expect(setup.brokers.every(broker => broker.closed)).toBe(true);
   } finally { delayed.mockRestore(); }
+});
+
+test("failed second login contains owner cleanup rejection and preserves the first profile", async () => {
+  const setup = await fixture(); const id = await login(setup);
+  const before = await readFile(join(setup.root, "profiles.json"), "utf8");
+  await setup.manager.startLogin();
+  await expect.poll(() => setup.manager.loginStatus().state).toBe("waiting");
+  const owner = setup.brokers[1]!;
+  owner.close = async () => { owner.closed = true; throw new Error("sensitive-cleanup-error"); };
+  owner.complete(false);
+  await expect.poll(() => setup.manager.loginStatus().state).toBe("failed");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(await readFile(join(setup.root, "profiles.json"), "utf8")).toBe(before);
+  expect((await setup.manager.grant(id)).identity.userId).toBe("user-a");
+  expect(JSON.stringify(setup.manager.loginStatus())).not.toContain("sensitive");
+  expect(setup.reports).toContainEqual({ stage: "owner-close", code: "RUNTIME_UNAVAILABLE" });
+  expect(JSON.stringify(setup.reports)).not.toContain("sensitive-cleanup-error");
+  await expect(setup.manager.startLogin()).resolves.toBeUndefined();
+  await setup.manager.cancelLogin();
+});
+
+test("two different accounts can log in consecutively without replacing or selecting the first", async () => {
+  const setup = await fixture(); const first = await login(setup);
+  await setup.manager.startLogin();
+  await expect.poll(() => setup.manager.loginStatus().state).toBe("waiting");
+  setup.brokers[1]!.accessToken = token("user-b", "workspace-b", "bob@fixture.invalid");
+  setup.brokers[1]!.complete();
+  await expect.poll(() => setup.manager.loginStatus().state).toBe("complete");
+  const second = setup.manager.listPublic().find(profile => profile.id !== first)!.id;
+  expect(setup.manager.listPublic()).toHaveLength(2);
+  expect((await setup.manager.grant(first)).identity.userId).toBe("user-a");
+  expect((await setup.manager.grant(second)).identity.userId).toBe("user-b");
+  expect(setup.manager.desiredProfileId).toBeUndefined();
+});
+
+test("persisted replacement remains installed when retiring the previous login owner fails", async () => {
+  const setup = await fixture(); const id = await login(setup);
+  setup.brokers[0]!.close = async () => { throw new Error("sensitive-retirement-error"); };
+  await setup.manager.startLogin(id);
+  await expect.poll(() => setup.manager.loginStatus().state).toBe("waiting");
+  const replacement = token("user-a", "workspace-a", undefined, 1);
+  setup.brokers[1]!.accessToken = replacement; setup.brokers[1]!.complete();
+  await expect.poll(() => setup.manager.loginStatus().state).toBe("complete");
+  const metadata = JSON.parse(await readFile(join(setup.root, "profiles.json"), "utf8"));
+  expect(metadata.profiles[0].slot).toBe(setup.homes[1]!.split(/[\\/]/).at(-1));
+  expect((await setup.manager.grant(id)).accessToken === replacement).toBe(true);
+  expect(setup.brokers[1]!.closed).toBe(false);
+  expect(setup.reports).toContainEqual({ stage: "owner-close", code: "RUNTIME_UNAVAILABLE" });
+});
+
+test.each(["cancel", "failure", "timeout", "exit"])("second login %s leaves metadata and original owner unchanged, retaining the uncommitted slot", async reason => {
+  const setup = await fixture({ loginTimeoutMs: reason === "timeout" ? 500 : 5_000 });
+  const id = await login(setup);
+  const metadata = await readFile(join(setup.root, "profiles.json"), "utf8");
+  await setup.manager.startLogin();
+  await expect.poll(() => setup.manager.loginStatus().state).toBe("waiting");
+  if (reason === "cancel") await setup.manager.cancelLogin();
+  if (reason === "failure") setup.brokers[1]!.complete(false);
+  if (reason === "exit") await setup.brokers[1]!.close();
+  await expect.poll(() => setup.manager.loginStatus().state).toBe(reason === "cancel" ? "cancelled" : "failed");
+  expect(await readFile(join(setup.root, "profiles.json"), "utf8")).toBe(metadata);
+  expect(setup.manager.listPublic()).toHaveLength(1);
+  expect(setup.brokers[0]!.closed).toBe(false);
+  expect((await setup.manager.grant(id)).identity.userId).toBe("user-a");
+  expect(await readdir(join(setup.root, "slots"))).toHaveLength(2);
+  expect(metadata).not.toContain(setup.homes[1]!.split(/[\\/]/).at(-1));
 });
