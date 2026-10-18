@@ -11,6 +11,7 @@ import { parseTellInput, type TellInput, type TellResult } from "../router/tell.
 import { ensureRouter } from "./ensure-router.js";
 import { LocalRouterClient } from "./local-client.js";
 import { runIssueCli, type IssueCliDependencies } from "../modules/issues/cli.js";
+import { runGraphCli, type GraphCliDependencies } from "../modules/graphs/cli.js";
 import {
   awaitChildStart, childEnvironment, newStatusPath, parseTerminalChoice, resolveTerminal,
   spawnTerminal, terminalLaunchScript, wtOnPath, type TerminalChildRequest, type TerminalChoice,
@@ -24,6 +25,8 @@ const USAGE = [
   "  lane-router-lane list-archived [<project>]",
   "  lane-router-lane tell <project>/<lane> --origin <origin> --subject \"<one line>\" [--link <http(s) url>]",
   "  lane-router-lane issue <publish|read|append|update|record-tui-close> --json-file <path>",
+  "  lane-router-lane graph <create|read|lock|apply> --json-file <path>",
+  "  lane-router-lane graph force-unlock --id <id> --expected-lock <lockId>",
 ].join("\n");
 
 export interface LaneLaunchDependencies {
@@ -32,6 +35,8 @@ export interface LaneLaunchDependencies {
   readonly env?: NodeJS.ProcessEnv;
   readonly issueClient?: IssueCliDependencies["client"];
   readonly readIssueJsonFile?: IssueCliDependencies["readJsonFile"];
+  readonly graphClient?: GraphCliDependencies["client"];
+  readonly readGraphJsonFile?: GraphCliDependencies["readJsonFile"];
   readonly spawnTerminal?: (request: TerminalChildRequest, environment: NodeJS.ProcessEnv) => Promise<void>;
   readonly startTimeoutMs?: number;
   readonly wtAvailable?: boolean;
@@ -67,6 +72,10 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
   if (args[0] === "issue") return runIssueCli(args.slice(1), {
     client: dependencies.issueClient ?? new LocalRouterClient(() => routerUrl(dataRoot)),
     env: dependencies.env, cwd: dependencies.cwd, readJsonFile: dependencies.readIssueJsonFile, write: dependencies.write,
+  });
+  if (args[0] === "graph") return runGraphCli(args.slice(1), {
+    client: dependencies.graphClient ?? new LocalRouterClient(() => routerUrl(dataRoot)), resolveUrl: () => routerUrl(dataRoot),
+    env: dependencies.env, cwd: dependencies.cwd, readJsonFile: dependencies.readGraphJsonFile, write: dependencies.write,
   });
 
   // Step 1: Parse the invocation before touching Router or terminal state.
@@ -373,7 +382,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToP
   launchLane(process.argv.slice(2)).then((code) => {
     if (typeof code === "number") process.exitCode = code;
   }, (error) => {
-    const code = process.argv[2] === "issue" && typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? `${error.code}: ` : "";
+    const code = ["issue", "graph"].includes(process.argv[2] ?? "") && typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? `${error.code}: ` : "";
     process.stderr.write(`${code}${error instanceof Error ? error.message : "lane-router-lane failed"}\n`);
     process.exitCode = 1;
   });

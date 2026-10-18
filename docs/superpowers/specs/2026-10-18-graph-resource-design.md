@@ -132,7 +132,7 @@ UI 沿用原型的 React、React Flow 与 D3-Force 版本，保留 React Flow �
 |---|---|
 | 图不存在或引用错误 | `GRAPH_NOT_FOUND` / `INVALID_GRAPH`，不创建替代资源 |
 | 其他 lane 持锁 | `GRAPH_LOCKED`，返回持锁者；保留当前请求意图，稍后重新申请 |
-| 无锁、旧锁 ID或别人的锁 | `GRAPH_LOCK_REQUIRED` / `GRAPH_LOCK_LOST`，不修改任何内容 |
+| 无锁、旧锁 ID或别人的锁 | `LOCK_INVALID`，不修改任何内容 |
 | 绑定失效、归档或地址复用 | 沿用 core 身份错误；不靠参数或同名地址移交写权限 |
 | 任一批内修改或最终图校验失败 | 整批回滚，明确错误及对应实体 ID，锁仍由原 lane 持有 |
 | SQLite 保存失败 | 不确认保存成功，原图和操作结果事务回滚；用户仍可查看之前保存内容 |

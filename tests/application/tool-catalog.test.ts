@@ -18,12 +18,12 @@ test("one catalog publishes, validates and dispatches its composed definitions",
   expect(() => new ToolCatalog([definition, definition])).toThrow(/Duplicate/);
 });
 
-test("product adds four issues while communication arguments, signal and takeover option pass through", async () => {
+test("product adds issue and graph tools while communication arguments, signal and takeover option pass through", async () => {
   const call = vi.fn(async () => "base");
   const tools = bindBuiltinTools({ call } as never);
   const context = { backend: "codex", conversationId: "thread" } as const;
   const signal = new AbortController().signal;
-  expect(productToolCatalog.definitions.map(tool => tool.name)).toEqual([...LANE_TOOL_NAMES, "lane_issue_publish", "lane_issue_read", "lane_issue_append", "lane_issue_update"]);
+  expect(productToolCatalog.definitions.map(tool => tool.name)).toEqual([...LANE_TOOL_NAMES, "lane_issue_publish", "lane_issue_read", "lane_issue_append", "lane_issue_update", "lane_graph_create", "lane_graph_read", "lane_graph_lock", "lane_graph_apply"]);
   expect(communicationToolCatalog.definitions.map(tool => tool.name)).toEqual(LANE_TOOL_NAMES);
   await expect(tools.call("lane_attach_current", { address: "p/a" }, context, signal, { rejectTakeover: true })).resolves.toBe("base");
   expect(call).toHaveBeenCalledWith("lane_attach_current", { address: "p/a" }, context, signal, { rejectTakeover: true });

@@ -33,6 +33,7 @@ import { ToolService } from "../tools/tool-service.js";
 import { bindBuiltinTools, communicationToolCatalog, productToolCatalog } from "../application/builtin-tools.js";
 import type { ApplicationTools } from "../application/tool-catalog.js";
 import { openIssuesModule } from "../modules/issues/index.js";
+import { openGraphs } from "../modules/graphs/index.js";
 import { ClaudeChannelHub, LocalRouterServer } from "./local-server.js";
 import { RuntimeLock } from "./runtime-lock.js";
 
@@ -94,6 +95,8 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
   const catalog = options.issues === false ? communicationToolCatalog : productToolCatalog;
   let applicationTools: ApplicationTools | undefined;
   let issues: ReturnType<typeof openIssuesModule> | undefined;
+  let graphs: ReturnType<typeof openGraphs> | undefined;
+  let graphOrigin: string | undefined;
   let codex: ReturnType<typeof createCodexRuntime> | undefined;
   let server: LocalRouterServer | undefined;
   const discoveryPath = join(dataRoot, "discovery.json");
@@ -104,6 +107,7 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
     // Drain module work while core storage and delivery backends are still available.
     await attempt(() => issues?.close());
     await attempt(() => server?.close());
+    await attempt(() => graphs?.close());
     await attempt(() => nativeHost?.close());
     await attempt(() => codex?.stop());
     await attempt(() => zcodeDriver?.shutdown());
@@ -156,7 +160,11 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
         process.stderr.write(`ISSUES_UNAVAILABLE: ${error instanceof Error ? error.message : "unknown error"}\n`);
       }
     }
-    applicationTools = bindBuiltinTools(tools, issues?.service, catalog);
+    if (options.issues !== false) {
+      try { graphs = openGraphs(join(dataRoot, "graphs.sqlite"), core); }
+      catch (error) { process.stderr.write(`GRAPHS_UNAVAILABLE: ${error instanceof Error ? error.message : "unknown error"}\n`); }
+    }
+    applicationTools = bindBuiltinTools(tools, issues?.service, catalog, graphs?.service, () => graphOrigin);
     if (configuration.nativeHosts !== undefined) nativeHost = new NativeHostService({
       permits: configuration.nativeHosts, state, core, tools, backend: nativeHostBackend,
       attention: lane => pump.onAttentionOpportunity(lane),
@@ -166,13 +174,14 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
       try { await issues.start(); }
       catch (error) {
         await issues.close().catch(() => undefined); issues = undefined;
-        applicationTools = bindBuiltinTools(tools, undefined, catalog);
+        applicationTools = bindBuiltinTools(tools, undefined, catalog, graphs?.service, () => graphOrigin);
         process.stderr.write(`ISSUES_UNAVAILABLE: ${error instanceof Error ? error.message : "unknown error"}\n`);
       }
     }
     server = new LocalRouterServer({
       tools, applicationTools, codex, claude: claudeHub, instanceId: randomUUID(),
       ...(options.issues === false ? {} : { issues: { service: issues?.service } }),
+      ...(options.issues === false ? {} : { graphs: { service: graphs?.service } }),
       nativeHost,
       dsh: { token: dshToken, channel: dshHub, read: (context, messageIds) => core.read(context, { messageIds }),
         handoff: (context, input) => core.handoffDsh(context, input) },
@@ -212,6 +221,7 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
       },
     });
     const discovery = await server.start();
+    graphOrigin = discovery.url;
     writeDiscovery(discoveryPath, discovery);
     for (const backend of [claudeBackend, codex.backend, dshBackend, zcodeBackend]) backend.onAttentionOpportunity((lane) => { void pump.onAttentionOpportunity(lane); });
     await pump.onStartup();
