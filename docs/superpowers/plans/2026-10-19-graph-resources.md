@@ -40,18 +40,22 @@
 
 文件：`src/ui/graphs/`、`vite.graphs.config.ts`、`tsconfig.graphs.json`；修改 `package.json`/lock、后端 tsconfig 的 UI边界和构建资产处理；测试 `tests/graph-view.test.ts`、`tests/graph-browser.mjs`。
 
-- [ ] 先写可见投影测试：任意层级、局部图、跨组聚合不丢边、隐藏搜索目标、返回全景避让、无分组图直接显示。
-- [ ] 迁入原型只读 React Flow、详情与 D3建议加矩形避让，改成正式图模型；保留缩放、搜索、分组浏览、面包屑、节点临时拖动、取消选择。无表单、连线端口、持久浏览器草稿或讨论区。
-- [ ] 独立前端 TypeScript/Vite 构建到 `dist/ui/graphs`；服务器按构建产物白名单提供静态资源，不读任意路径。默认构建同时验证前后端产物。
-- [ ] Playwright 使用生产产物和隔离真实HTTP fixture：普通图/经典知识图，增改删后刷新，子图与详情、搜索/取消选择、无编辑入口、页面异常清晰；查看截图检查文本、遮挡与避让。
+- [x] 先写可见投影测试：任意层级、局部图、跨组聚合不丢边、隐藏搜索目标、返回全景避让、无分组图直接显示。
+- [x] 迁入原型只读 React Flow、详情与 D3建议加矩形避让，改成正式图模型；保留缩放、搜索、分组浏览、面包屑、节点临时拖动、取消选择。无表单、连线端口、持久浏览器草稿或讨论区。
+- [x] 独立前端 TypeScript/Vite 构建到 `dist/ui/graphs`；服务器按构建产物白名单提供静态资源，不读任意路径。默认构建同时验证前后端产物。
+- [x] Playwright 使用生产产物和隔离真实HTTP fixture：普通图/经典知识图，增改删后刷新，子图与详情、搜索/取消选择、无编辑入口、页面异常清晰；查看截图检查文本、遮挡与避让。
 
 ## 5. 总体验证、审查和交付
 
-- [ ] 更新 `docs/manual-tests.md` 的图工具、锁、强解、只读界面使用及真实客户端待验步骤，索引需求/设计/计划。
-- [ ] `npm test`、`npm run typecheck`、`npm run build` 和图浏览器流程；保存实际输出到仓外 evidence，区分 fixture、真实 CLI 和真实模型证据。
-- [ ] 独立只读代码审查及收尾走查，修复属于本功能的重要问题；不为建议自动扩新行为。
-- [ ] 本地提交归属明确文件，保留主树原文档/其他 lane 改动；提交准确分支和验收证据给 coordinator 进行共享整合。不得自行覆盖生产 dist 或停启 Router。
+- [x] 更新 `docs/manual-tests.md` 的图工具、锁、强解、只读界面使用及真实客户端待验步骤，索引需求/设计/计划。
+- [x] `npm test`、`npm run typecheck`、`npm run build` 和图浏览器流程；保存实际输出到仓外 evidence，区分 fixture、真实 CLI 和真实模型证据。
+- [x] 独立只读代码审查及收尾走查，修复属于本功能的重要问题；不为建议自动扩新行为。
+- [x] 本地提交归属明确文件，保留主树原文档/其他 lane 改动；提交准确分支和验收证据给 coordinator 进行共享整合。不得自行覆盖生产 dist 或停启 Router。
 
 ## 交付限制
 
 本轮实现与隔离验证不冒充生产部署。若真实普通 lane 的新工具需部署后才能验收，交 coordinator 明确列出该用例及入口，不把 UI fixture或原型测试说成真实模型已通过。其余不依赖部署的实现和验证全部完成。
+
+## 本地验证结论
+
+2026-10-19：`npm test -- --maxWorkers=1 --testTimeout=15000` 为 965 pass / 1 skip；`npm run typecheck`、`npm run build`、`npm run test:graph-browser` 通过。更早并行全套存在启动超时及未改动收件箱 UI 等待波动，失败记录保留在仓外交接证据；没有跳过失败用例来取得通过。独立审查 Approved，锁返回值、拖动松手避让、祖先面包屑相机定位均已复现并修正。源码、生产浏览器及实际 CLI/HTTP 已验；模型 backend 为 fixture，真实模型客户端与共享部署待维护窗口验收。
