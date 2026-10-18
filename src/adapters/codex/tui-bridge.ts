@@ -2,6 +2,7 @@ import type { AddressInfo } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
 
 import { decodeServerMessage, type DynamicToolCallParams, type JsonRpcId } from "./protocol.js";
+import { isAccountModelRequest, type AccountRequestFinish } from "../../accounts/switch-gate.js";
 
 export interface CodexTuiBridgeHost {
   readonly endpoint: string;
@@ -12,6 +13,9 @@ export interface CodexTuiBridgeHost {
   ownsThread(threadId: string): boolean;
   dispatchTool(request: DynamicToolCallParams): Promise<unknown>;
   observeNotification(method: string, params: Readonly<Record<string, unknown>>): void;
+  admitModelRequest?(method: string, admission?: string, params?: unknown): AccountRequestFinish;
+  modelRequestUncertain?(): void;
+  refreshAccount?(params: Readonly<Record<string, unknown>>): Promise<unknown>;
 }
 
 export class CodexTuiBridge {
@@ -46,6 +50,7 @@ export class CodexTuiBridge {
     const queued: string[] = [];
     const pendingClaims = new Map<JsonRpcId, string | undefined>();
     const claimedThreads = new Set<string>();
+    const admissions = new Map<JsonRpcId, AccountRequestFinish>();
     this.connections.add(pair);
 
     upstream.on("open", () => {
@@ -53,12 +58,39 @@ export class CodexTuiBridge {
       queued.length = 0;
     });
     downstream.on("message", (raw) => {
-      const message = this.fromTui(raw.toString(), pendingClaims, downstream);
-      if (message === undefined) return;
+      const incoming = parseRecord(raw.toString());
+      let forwarded = raw.toString();
+      if (incoming && "accountAdmissionToken" in incoming) {
+        const { accountAdmissionToken: _admission, ...upstreamMessage } = incoming;
+        forwarded = JSON.stringify(upstreamMessage);
+      }
+      if (incoming && isId(incoming.id) && typeof incoming.method === "string") {
+        try {
+          if (admissions.has(incoming.id) || (incoming.accountAdmissionToken !== undefined && typeof incoming.accountAdmissionToken !== "string")) throw new Error();
+          const finish = this.host.admitModelRequest?.(incoming.method, incoming.accountAdmissionToken as string | undefined, incoming.params);
+          if (finish && isAccountModelRequest(incoming.method)) admissions.set(incoming.id, finish);
+        } catch {
+          downstream.send(JSON.stringify({ id: incoming.id, error: { code: -32001, message: "账号由本机账号页管理，或正在切换。请在账号页查看状态后重试。" } }));
+          return;
+        }
+      }
+      const message = this.fromTui(forwarded, pendingClaims, downstream);
+      if (message === undefined) {
+        if (incoming && isId(incoming.id)) { admissions.get(incoming.id)?.(); admissions.delete(incoming.id); }
+        return;
+      }
       if (upstream.readyState === WebSocket.OPEN) upstream.send(message);
       else if (upstream.readyState === WebSocket.CONNECTING) queued.push(message);
     });
-    upstream.on("message", (raw) => { void this.fromAppServer(raw.toString(), pendingClaims, claimedThreads, upstream, downstream); });
+    upstream.on("message", (raw) => {
+      const response = parseRecord(raw.toString());
+      if (response && isId(response.id) && !response.method) {
+        const finish = admissions.get(response.id);
+        try { decodeServerMessage(response); } catch { finish?.markUncertain?.(); }
+        finish?.(); admissions.delete(response.id);
+      }
+      void this.fromAppServer(raw.toString(), pendingClaims, claimedThreads, upstream, downstream);
+    });
     downstream.on("close", () => upstream.close());
     upstream.on("close", () => downstream.close());
     downstream.on("error", () => upstream.close());
@@ -67,6 +99,8 @@ export class CodexTuiBridge {
     const detach = () => {
       if (!attached) return;
       attached = false;
+      for (const finish of admissions.values()) { finish.markUncertain ? finish.markUncertain() : this.host.modelRequestUncertain?.(); finish(); }
+      admissions.clear();
       this.connections.delete(pair);
       for (const threadId of claimedThreads) this.host.closeThreadClient(threadId);
     };
@@ -133,11 +167,21 @@ export class CodexTuiBridge {
     if (message?.method === "item/tool/call" && isId(message.id)) {
       try {
         const decoded = decodeServerMessage(message);
-        if (decoded.kind !== "request") throw new Error("Invalid dynamic tool request");
+        if (decoded.kind !== "request" || decoded.method !== "item/tool/call") throw new Error("Invalid dynamic tool request");
         const result = await this.host.dispatchTool(decoded.params);
         if (upstream.readyState === WebSocket.OPEN) upstream.send(JSON.stringify({ id: decoded.id, result }));
       } catch (error) {
         if (upstream.readyState === WebSocket.OPEN) upstream.send(JSON.stringify({ id: message.id, error: { code: -32000, message: error instanceof Error ? error.message : String(error) } }));
+      }
+      return;
+    }
+    if (message?.method === "account/chatgptAuthTokens/refresh" && isId(message.id) && this.host.refreshAccount) {
+      try {
+        if (!isRecord(message.params)) throw new Error();
+        const result = await this.host.refreshAccount(message.params);
+        if (upstream.readyState === WebSocket.OPEN) upstream.send(JSON.stringify({ id: message.id, result }));
+      } catch {
+        if (upstream.readyState === WebSocket.OPEN) upstream.send(JSON.stringify({ id: message.id, error: { code: -32000, message: "AUTH_REQUIRED" } }));
       }
       return;
     }

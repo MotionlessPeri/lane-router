@@ -20,6 +20,8 @@
 
 私有许可文件是 JSON 数组，每项含 `token`、`hostInstanceId`、`address`、`slot:"lead"`、非空 `roleDescription`、非空 `model`。可信部署方装配准确值，不向模型、TUI 环境、Git、日志或对话提供 token。此接口不生成许可、不热更新许可、不新增 OS 用户或 Windows ACL 准入规则。
 
+省略 `scope` 时保持原 Lead-only 行为。明确增加 `scope:"company-active-task"` 的母许可才接受可信 Company 提供的员工 Task 身份；Company 在每次调用前后负责核当前 Task、Lead 授权、原派工和实际活动工作，不由共享 Router 授予业务权限。
+
 未配置时不启用接收端。配置了文件但文件不可读、JSON 或字段不合法、地址不合法、token/Host ID/address 重复时，启动失败，错误不带文件内容。显式 `runRouterProcess({nativeHosts})` 与 `nativeHostsFile` 同时存在时拒绝启动；空数组表示没有可接入的 Host。config 未知字段仍拒绝。
 
 ## 固定 HTTP/WS 合同
@@ -32,7 +34,11 @@ token 与完整许可记录不会进入 dashboard 或 discovery。Host ID 不是
 2. Host 向 `/native-host/v1/register` POST `{"threadId":"<Lead thread>","previousBinding":{...}}`；首次注册省略 `previousBinding`，只接受从未使用的地址。显式恢复需提供原 S 的全部六字段，严格匹配静态许可、原 Host/thread 复合身份和持久当前活动绑定；错误、inactive、archived、非 native 或不同代次拒绝，不 attach 或增加代次。成功返回 `protocolVersion:1` 和 S，含 `laneId,laneAddress,bindingId,generation,backend,conversationId`。共享 conversation ID 为 Host ID 与 thread ID 的 JSON 二元组。
 3. Host 向 `/native-host/v1/call` POST `{"callId":"<unique>","name":"external_lane_send","args":{...}}`。只允许 `external_lane_send`、`external_lane_read`、`external_lane_ack`；调用参数不接受自供 backend 或身份覆盖。
 
-`external_lane_send` 采用 `lane_send` 参数，回执不含存储路径。read/ACK 使用 `message_ids`，read 不 ACK，ACK 只作用于 S 拥有的消息。发送中的相同 `callId` 与相同参数合并；改参数拒绝。完成后不能复用 `callId`，也不能因丢失回执而自动重发。
+`external_lane_send` 采用 `lane_send` 参数，回执不含存储路径。read/ACK 使用 `message_ids`；read 也可省略 IDs，读取本人实际 pending，成功且确无消息才返回空数组。read 不 ACK，ACK 只作用于 S 拥有的消息。发送中的相同 `callId` 与相同参数合并；改参数拒绝。完成后不能复用 `callId`，也不能因丢失回执而自动重发。
+
+员工使用同一 `/native-host/v1/channel`、`register` 和 `call`。WS 的 `X-Native-Employee-Scope` 是 base64url 编码的可信身份 JSON；register/call 的 `identity` 为同一对象：`{principal:{employeeId,sessionId,generation},router:{laneAddress,bindingId,generation},scope:{kind:"company-active-task",taskId,grantId,revision,deliveryRequestId}}`。员工 thread 必须等于原 `principal.sessionId`，L 地址必须为母许可同 project 的本人地址。S 地址由接收端派生为 `project/employeeId-external-grantId`，会话为 `[hostInstanceId,grantId,employeeId,sessionId,generation]`；不接受模型自供 S、其他 project、变化的 Task/Principal/L 或旧 revision。员工可主动 read 本人待处理消息，不需要新增模型通知回合。
+
+撤销由 Company 先关闭本地授权并 abort/close 对应客户端，随后断开的通道拒绝新调用；已经转发的远端效果不声称回滚，远端关闭结果保持未确认。本接收端没有逐 permit 撤销或热增删接口，不将会话 register 当成配置许可。
 
 ```mermaid
 sequenceDiagram
@@ -57,7 +63,7 @@ Host 的 `attention` 帧须含 `protocolVersion:1,type:"attention",bindingId,gen
 
 schema 11 同时保留五种 backend、消息的 `sender_label` 和 lane set。版本 6 至 10 曾由不同分支写入不同结构，迁移先核实际表、约束和索引，再补齐缺失部分；未知形态拒绝。Company native v8/v9、主线 v10，以及已经包含 native 绑定的 v10 都可升级。整个升级在一个事务内完成，绑定的 ID、代次与原始 startup/cwd 逐记录核对，已有消息、发送方标签及分组成员保持不变；旧消息只增加值为 NULL 的 `sender_label`。不能仅修改 `user_version` 冒充迁移。
 
-`native-codex` 由 Host 管理，`lane-router-lane open` 和普通恢复不启动它。共享端支持 Lead 首次接入、同活 Host 重连及原静态许可下精确 S 的显式恢复；恢复身份由 Company 非秘密记录保存并传入可信配置。共享接收端的合成冷重启验证不代表真实 Company 冷恢复已验收。不支持 Employee 或许可轮换。
+`native-codex` 由 Host 管理，`lane-router-lane open` 和普通恢复不启动它。共享端支持 Lead 首次接入、同活 Host 重连及原静态许可下精确 S 的显式恢复；恢复身份由 Company 非秘密记录保存并传入可信配置。员工接入仅在上述母许可显式 opt-in 时生效；普通 Company 的已有员工 S 恢复是否可用仍取决于调用方保存的授权和身份，不由接收端合成测试代替。共享接收端的合成冷重启验证不代表真实 Company 冷恢复已验收。许可轮换及热变更仍不支持。
 
 升级必须由运行使用者确定维护时段，先停写再取得一致 DB/mailbox 与完整旧构建。无新写入时失败可恢复完整旧构建及一致快照；有新写入时保存新状态并前向修复，不能只降级 dist、恢复旧 DB 或删除 native 记录。此文档不授权重启或数据读取。
 

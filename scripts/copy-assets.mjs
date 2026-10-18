@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
  * `tsc` emits the files it compiles and nothing else, so anything shipped beside the code has to
  * be carried here. These pages stay real HTML files so they can be edited as pages.
  */
-const ASSETS = ["process/dashboard.html", "ui/issues/index.html"];
+const ASSETS = ["process/dashboard.html", "ui/issues/index.html", "accounts/accounts.html", "accounts/accounts.js", "accounts/accounts.css"];
 
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 

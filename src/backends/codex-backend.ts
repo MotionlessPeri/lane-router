@@ -7,6 +7,7 @@ import {
 import type { Notification, NotificationOutcome, PlatformBackend, ReachSnapshot, RestorePresence } from "../router/backend.js";
 import { notificationPayload } from "../router/notification-payload.js";
 import type { BindingRecord, CallerContext, ResolvedIdentity } from "../router/types.js";
+import { AccountError } from "../accounts/contracts.js";
 
 interface CodexNotification {
   readonly method: string;
@@ -118,6 +119,7 @@ export class CodexBackend implements PlatformBackend {
     } catch (error) {
       // A thread the App Server no longer knows, or a link that dropped mid-request, means
       // nothing was delivered and nothing is wrong with the request itself.
+      if (error instanceof AccountError && error.code === "ACCOUNT_SWITCH_IN_PROGRESS") return "deferred";
       return isMissingThread(error) || !this.dependencies.client.isConnected() ? "no_channel" : "send_failed";
     }
   }

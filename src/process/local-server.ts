@@ -455,7 +455,10 @@ export class LocalRouterServer {
         const token = bearerToken(request), threadId = request.headers["x-native-thread-id"];
         if (this.options.nativeHost.authorized(token) && typeof threadId === "string" && threadId.length > 0) {
           this.websocket.handleUpgrade(request, socket, head, client => {
-            try { this.options.nativeHost!.connect(token, threadId, client); }
+            try {
+              const scope = request.headers['x-native-employee-scope'];
+              this.options.nativeHost!.connect(token, threadId, client, typeof scope === 'string' ? JSON.parse(Buffer.from(scope, 'base64url').toString('utf8')) : undefined);
+            }
             catch { client.close(1008, "registration denied"); }
           });
           return;

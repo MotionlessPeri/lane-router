@@ -25,9 +25,9 @@ vi.mock("../../src/adapters/codex/codex-runtime.js", () => ({ createCodexRuntime
 vi.mock("../../src/process/codex-profiles.js", () => ({ defaultCodexModelProvider: () => "openai", listCodexModelProviders: () => [], listCodexProfiles: () => [], profileModelProvider: () => undefined }));
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.unstubAllEnvs(); fixture.notices = []; fixture.requests = []; });
-async function setup() {
+async function setup(scope?: 'company-active-task') {
   const root = mkdtempSync(join(tmpdir(), "native-shared-")); cleanups.push(() => rmSync(root, { recursive: true, force: true }));
-  const permit = { token: "synthetic-only-token", hostInstanceId: "synthetic-host", address: "fixture/lead", slot: "lead", roleDescription: "Lead", model: "fixed" };
+  const permit = { token: "synthetic-only-token", hostInstanceId: "synthetic-host", address: "fixture/lead", slot: "lead", roleDescription: "Lead", model: "fixed", ...(scope ? { scope } : {}) };
   writeFileSync(join(root, "permits.json"), JSON.stringify([permit]));
   writeFileSync(join(root, "config.json"), JSON.stringify({ nativeHostsFile: "permits.json", zcode: { driver: { credentialsPath: join(root, "never-read.json"), plan: { providerId: "fixture", modelId: "fixture", reasoningLevel: "high" } } } }));
   vi.stubEnv("LANE_ROUTER_CONFIG", join(root, "config.json"));
@@ -156,4 +156,73 @@ test("frozen Host transport never retries a response-loss send", async () => {
   const client = new NativeExternalClient({ endpoint: "http://127.0.0.1:1", token: "fixture", hostInstanceId: "fixture", address: "fixture/lead" }, lost);
   await expect(client.call({ callId: "once", name: "external_lane_send", args: { target: "fixture/target", body: "body", kind: "normal" } }, new AbortController().signal)).rejects.toThrow("NATIVE_EXTERNAL_EFFECT_UNKNOWN");
   expect(lost).toHaveBeenCalledTimes(1);
+});
+
+const employeeIdentity = () => ({
+  principal: { employeeId: 'engineer', sessionId: 'employee-thread', generation: 3 },
+  router: { laneAddress: 'fixture/engineer', bindingId: 'private-employee-L', generation: 7 },
+  scope: { kind: 'company-active-task', taskId: 'original-task', grantId: 'original-grant', revision: 1, deliveryRequestId: 'original-delivery' },
+});
+
+async function externalPost(x: Awaited<ReturnType<typeof setup>>, path: string, body: unknown) {
+  const response = await fetch(`${x.discovery.url}/native-host/v1/${path}`, { method: 'POST',
+    headers: { Authorization: `Bearer ${x.permit.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return { status: response.status, body: await response.json() as any };
+}
+
+async function connectEmployee(x: Awaited<ReturnType<typeof setup>>, identity: ReturnType<typeof employeeIdentity>) {
+  const socket = new WebSocket(`${x.discovery.url.replace('http:', 'ws:')}/native-host/v1/channel`, {
+    headers: { Authorization: `Bearer ${x.permit.token}`, 'X-Native-Thread-Id': identity.principal.sessionId,
+      'X-Native-Employee-Scope': Buffer.from(JSON.stringify(identity)).toString('base64url') },
+  });
+  cleanups.push(() => socket.terminate());
+  await new Promise<void>((done, fail) => { socket.once('open', done); socket.once('error', fail); });
+  return externalPost(x, 'register', { threadId: identity.principal.sessionId, identity });
+}
+
+test('file-loaded scoped permit gives an employee its own send, reply, pending read and personal ACK', async () => {
+  const x = await setup('company-active-task'), identity = employeeIdentity();
+  const registered = await connectEmployee(x, identity);
+  expect(registered.status).toBe(200);
+  const shared = registered.body.result;
+  expect(shared.laneAddress).toBe('fixture/engineer-external-original-grant');
+  expect(shared.conversationId).toBe(JSON.stringify(['synthetic-host', 'original-grant', 'engineer', 'employee-thread', 3]));
+  const call = (name: string, args: unknown) => externalPost(x, 'call', { callId: randomUUID(), name, args, identity });
+  const sent = await call('external_lane_send', { target: 'fixture/codex', kind: 'normal', body: 'employee-authored' });
+  expect(sent.status).toBe(200);
+  expect(x.state.requireMessage(sent.body.result[0].id).senderLane).toBe(shared.laneAddress);
+  expect((await call('external_lane_read', {})).body.result).toEqual([]);
+  const reply = await x.rpc('lane_send', { target: shared.laneAddress, body: 'reply for engineer', kind: 'normal' });
+  const messageId = reply.body.result[0].id;
+  expect((await call('external_lane_read', {})).body.result).toMatchObject([{ id: messageId, body: 'reply for engineer' }]);
+  expect(x.state.requireMessage(messageId).state).toBe('pending');
+  expect((await x.call('external_lane_read', { message_ids: [messageId] }).catch(() => 'denied'))).toBe('denied');
+  expect((await call('external_lane_ack', { message_ids: [messageId] })).body.result).toEqual({ resolved: [messageId] });
+  expect(x.state.requireMessage(messageId).state).toBe('resolved');
+  expect(x.state.activeBindingForLane(x.permit.address)!.id).toBe(x.shared.bindingId);
+  expect(fixture.requests).toEqual(['model/list']);
+});
+
+test('Lead-only permit refuses employee scope without changing the original Lead channel', async () => {
+  const x = await setup(), identity = employeeIdentity();
+  const rejected = await externalPost(x, 'register', { threadId: identity.principal.sessionId, identity });
+  expect(rejected).toMatchObject({ status: 409, body: { error: { code: 'NATIVE_HOST_SCOPE_REQUIRED' } } });
+  expect(x.state.lane('fixture/engineer-external-original-grant')).toBeUndefined();
+  expect((await x.call('external_lane_send', { target: 'fixture/codex', body: 'Lead still works', kind: 'normal' }) as any[])).toHaveLength(1);
+});
+
+test('a scoped receiver refuses old revisions and changed Task or Principal without a second send', async () => {
+  const x = await setup('company-active-task'), identity = employeeIdentity();
+  const registered = await connectEmployee(x, identity);
+  expect(registered.status).toBe(200);
+  const newer = { ...identity, scope: { ...identity.scope, revision: 2 } };
+  expect((await externalPost(x, 'register', { threadId: identity.principal.sessionId, identity: newer })).status).toBe(200);
+  const call = (value: typeof identity) => externalPost(x, 'call', { identity: value, callId: randomUUID(), name: 'external_lane_send',
+    args: { target: 'fixture/codex', kind: 'normal', body: 'one valid dispatch' } });
+  expect((await call(identity)).status).toBe(409);
+  expect((await call({ ...newer, principal: { ...newer.principal, generation: 4 } })).status).toBe(409);
+  expect((await call({ ...newer, scope: { ...newer.scope, taskId: 'another-task', revision: 3 } })).status).toBe(409);
+  expect((await call(newer)).status).toBe(200);
+  expect(x.state.pendingMessages('fixture/codex')).toHaveLength(1);
+  expect(x.state.activeBindingForLane(registered.body.result.laneAddress)!.id).toBe(registered.body.result.bindingId);
 });
