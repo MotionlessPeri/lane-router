@@ -563,6 +563,44 @@ test("a lane row still names its backend, startup, presence and model under set 
   expect(laneText(page.document, "beta/unbound")).toBe("beta/unbound · 未绑定 · unavailable · 未声明模型");
 });
 
+// The move the sets exist for: one click opens a whole group. Only lanes with a conversation to
+// resume go in the request, exactly as the group checkbox would have ticked them.
+test("each group heading opens the whole group with one click, unbound lanes left out", async () => {
+  const opened: Array<Record<string, unknown>> = [];
+  const page = startPage(setSnapshot, (url, body) => {
+    if (url === "/dashboard/lanes/open") {
+      opened.push(body);
+      return { ok: true, json: async () => ({ results: (body.addresses as string[]).map((address) => ({ address, status: "launch_requested" })) }) };
+    }
+    return { ok: true, json: async () => ({ laneSets: setSnapshot.laneSets }) };
+  });
+  await page.ready();
+
+  (page.document.querySelector("button[data-open-group='research']") as HTMLButtonElement).click();
+  await vi.waitFor(() => expect(opened).toHaveLength(1));
+  expect(opened[0]).toEqual({ addresses: ["alpha/offline", "gamma/one"], override: {}, actionToken: "action-token-1" });
+  await vi.waitFor(() => expect(page.document.querySelector("#launcher-status")?.textContent).toContain("research\nalpha/offline：已请求打开"));
+
+  (page.document.querySelector("button[data-open-group='beta']") as HTMLButtonElement).click();
+  await vi.waitFor(() => expect(opened).toHaveLength(2));
+  expect(opened[1]!.addresses).toEqual(["beta/online"]);
+
+  // Nothing to resume in it, so the button says so instead of sending an empty request.
+  expect((page.document.querySelector("button[data-open-group='empty']") as HTMLButtonElement).disabled).toBe(true);
+});
+
+// With sixty-odd lanes on the board, a button below them was a long scroll from the box that had
+// just been ticked: the open button and its status now come before every group and stay pinned.
+test("the open button and its status sit above the groups", async () => {
+  const page = startPage(setSnapshot);
+  await page.ready();
+  const actions = page.document.querySelector(".launcher-actions")!;
+  expect(actions.querySelector("button#open-selected")).not.toBeNull();
+  expect(actions.querySelector("#launcher-status")).not.toBeNull();
+  const firstGroup = page.document.querySelector("section.lane-group")!;
+  expect(actions.compareDocumentPosition(firstGroup) & 4).toBeTruthy();
+});
+
 test("creating, moving and deleting each send one protected request and then reload", async () => {
   const page = startPage(setSnapshot);
   await page.ready();

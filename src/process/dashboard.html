@@ -36,6 +36,9 @@
   .override-grid input, .override-grid select, .set-controls input, .set-controls select { font: inherit; padding: .15rem .3rem; }
   .set-controls { display: grid; grid-template-columns: 9rem minmax(12rem, 24rem) auto; gap: .35rem .6rem; align-items: center; justify-content: start; margin: .25rem 0 1rem; }
   #launcher-status { margin-top: .5rem; white-space: pre-wrap; }
+  /* Pinned while the groups scroll under it; Canvas follows the color scheme, so the rows that
+     slide beneath it do not show through in either theme. */
+  .launcher-actions { position: sticky; top: 0; z-index: 1; background: Canvas; padding: .35rem 0 .5rem; }
 </style>
 </head>
 <body>
@@ -437,54 +440,6 @@
       applyModelFilter();
     });
 
-    launcherGroups(snapshot).forEach((entry) => {
-      const group = el("section", "lane-group");
-      group.setAttribute("data-group", entry.name);
-      const groupChoice = el("label", null);
-      const groupCheckbox = document.createElement("input");
-      groupCheckbox.type = "checkbox";
-      groupCheckbox.setAttribute("data-group-checkbox", entry.name);
-      groupCheckbox.addEventListener("change", () => {
-        group.querySelectorAll("input[data-lane-checkbox]").forEach((checkbox) => {
-          (checkbox).checked = groupCheckbox.checked && !checkbox.disabled;
-        });
-        syncGroupCheckbox(group, groupCheckbox);
-        syncSelectAll();
-        applyModelFilter();
-      });
-      groupChoice.appendChild(groupCheckbox);
-      groupChoice.appendChild(document.createTextNode(" " + entry.name));
-      const heading = el("h3", null);
-      heading.appendChild(groupChoice);
-      if (entry.set !== null) {
-        heading.appendChild(el("span", "dim", " · set"));
-        // Only an empty set can be deleted. The Router refuses the others, so a button on them
-        // could only ever fail.
-        if (entry.lanes.length === 0) {
-          const remove = actionButton(null, "删除");
-          remove.setAttribute("data-delete-set", entry.set.id);
-          remove.addEventListener("click", () => {
-            sendSetAction({ action: "delete", setId: entry.set.id }, "已删除 set " + entry.set.name + "。");
-          });
-          heading.appendChild(document.createTextNode(" "));
-          heading.appendChild(remove);
-        }
-      }
-      group.appendChild(heading);
-      if (entry.lanes.length === 0) group.appendChild(el("div", "empty", "（空）"));
-      entry.lanes.forEach((lane) => group.appendChild(launcherLane(lane, previous)));
-      group.querySelectorAll("input[data-lane-checkbox]").forEach((checkbox) => {
-        checkbox.addEventListener("change", () => {
-          syncGroupCheckbox(group, groupCheckbox);
-          syncSelectAll();
-          applyModelFilter();
-        });
-      });
-      syncGroupCheckbox(group, groupCheckbox);
-      host.appendChild(group);
-    });
-    syncSelectAll();
-
     const overrides = el("div", "override-grid");
     // The backend is part of the label because the list holds both, and picking a Codex model for
     // a Claude lane fails at the CLI rather than in this page — late, and away from the choice.
@@ -548,14 +503,75 @@
     overrides.appendChild(provider.select);
     host.appendChild(overrides);
 
+    // The button and its status sit above the groups and stay pinned to the top while the groups
+    // scroll: with sixty-odd lanes below, a button at the bottom was a long scroll away from the
+    // box that had just been ticked.
+    const actions = el("div", "launcher-actions");
     const button = actionButton("open-selected", "打开选中 lane");
     button.addEventListener("click", openSelected);
-    host.appendChild(button);
+    actions.appendChild(button);
     const status = el("div", null, null);
     status.id = "launcher-status";
     status.textContent = previous.statusText;
     status.className = previous.statusClassName;
-    host.appendChild(status);
+    actions.appendChild(status);
+    host.appendChild(actions);
+
+    launcherGroups(snapshot).forEach((entry) => {
+      const group = el("section", "lane-group");
+      group.setAttribute("data-group", entry.name);
+      const groupChoice = el("label", null);
+      const groupCheckbox = document.createElement("input");
+      groupCheckbox.type = "checkbox";
+      groupCheckbox.setAttribute("data-group-checkbox", entry.name);
+      groupCheckbox.addEventListener("change", () => {
+        group.querySelectorAll("input[data-lane-checkbox]").forEach((checkbox) => {
+          (checkbox).checked = groupCheckbox.checked && !checkbox.disabled;
+        });
+        syncGroupCheckbox(group, groupCheckbox);
+        syncSelectAll();
+        applyModelFilter();
+      });
+      groupChoice.appendChild(groupCheckbox);
+      groupChoice.appendChild(document.createTextNode(" " + entry.name));
+      const heading = el("h3", null);
+      heading.appendChild(groupChoice);
+      if (entry.set !== null) heading.appendChild(el("span", "dim", " · set"));
+      // One click opens the whole group, set or project: every lane in it that has a conversation
+      // to resume, with the overrides chosen above. Ticking the group and scrolling to the button
+      // did the same in three moves; this is the move the sets exist for.
+      const restorable = entry.lanes.filter((lane) => lane.binding !== null).map((lane) => lane.address);
+      const openGroup = actionButton(null, "打开本组");
+      openGroup.setAttribute("data-open-group", entry.name);
+      openGroup.disabled = restorable.length === 0;
+      openGroup.addEventListener("click", () => openAddresses(restorable));
+      heading.appendChild(document.createTextNode(" "));
+      heading.appendChild(openGroup);
+      // Only an empty set can be deleted. The Router refuses the others, so a button on them
+      // could only ever fail.
+      if (entry.set !== null && entry.lanes.length === 0) {
+        const remove = actionButton(null, "删除");
+        remove.setAttribute("data-delete-set", entry.set.id);
+        remove.addEventListener("click", () => {
+          sendSetAction({ action: "delete", setId: entry.set.id }, "已删除 set " + entry.set.name + "。");
+        });
+        heading.appendChild(document.createTextNode(" "));
+        heading.appendChild(remove);
+      }
+      group.appendChild(heading);
+      if (entry.lanes.length === 0) group.appendChild(el("div", "empty", "（空）"));
+      entry.lanes.forEach((lane) => group.appendChild(launcherLane(lane, previous)));
+      group.querySelectorAll("input[data-lane-checkbox]").forEach((checkbox) => {
+        checkbox.addEventListener("change", () => {
+          syncGroupCheckbox(group, groupCheckbox);
+          syncSelectAll();
+          applyModelFilter();
+        });
+      });
+      syncGroupCheckbox(group, groupCheckbox);
+      host.appendChild(group);
+    });
+    syncSelectAll();
     // Once on render too, not only on change: a poll rebuilds this section with the selection the
     // reader already had, and the menu has to arrive matching it rather than a click behind.
     applyModelFilter();
@@ -645,8 +661,12 @@
   }
 
   function openSelected() {
+    openAddresses(checkedAddresses());
+  }
+
+  /** Open these lanes with the overrides chosen above; the selection and the group buttons share it. */
+  function openAddresses(addresses) {
     if (!currentSnapshot || currentSnapshot.actionToken === undefined) return;
-    const addresses = checkedAddresses();
     // Answered here rather than by the Router, which rejects an empty list with a 400 the reader
     // would see as "打开接口返回 400" — a transport code standing in for "you have not picked
     // anything yet". Nothing is selected by default, so this is the first click, not a rare one.
