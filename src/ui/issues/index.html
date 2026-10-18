@@ -49,7 +49,23 @@
   #history { display: grid; gap: 22px; padding: 22px 0; }
   .entry { border-left: 2px solid var(--line); padding-left: 13px; }
   .entry.user { border-color: var(--blue); }
-  .entry-body { white-space: pre-wrap; margin-top: 7px; }
+  .entry-body { margin-top: 7px; }
+  .entry-body.plain-text { white-space: pre-wrap; }
+  .entry-body > :first-child { margin-top: 0; }
+  .entry-body > :last-child { margin-bottom: 0; }
+  .entry-body :is(h1, h2, h3, h4, h5, h6) { margin: 18px 0 8px; line-height: 1.4; }
+  .entry-body h1 { font-size: 22px; }
+  .entry-body h2 { font-size: 19px; }
+  .entry-body :is(h3, h4, h5, h6) { font-size: 16px; }
+  .entry-body :is(ul, ol) { padding-left: 25px; margin: 9px 0; }
+  .entry-body blockquote { margin: 12px 0; padding: 1px 13px; border-left: 3px solid var(--line); color: var(--muted); }
+  .entry-body code { font: .9em/1.6 ui-monospace, Consolas, monospace; background: var(--bg); padding: 2px 5px; border-radius: 4px; }
+  .entry-body pre { max-width: 100%; overflow-x: auto; padding: 13px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); white-space: pre; overflow-wrap: normal; }
+  .entry-body pre code { padding: 0; background: transparent; }
+  .entry-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 12px 0; }
+  .entry-body :is(th, td) { border: 1px solid var(--line); padding: 7px 12px; text-align: left; }
+  .entry-body th { background: var(--bg); }
+  .entry-body hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
   .entry-head { font-size: 12px; color: var(--muted); }
   .delivery { margin-top: 8px; font-size: 12px; color: var(--muted); }
   #compose { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 18px; }
@@ -80,6 +96,7 @@
 <main>
   <h1>议题收件箱</h1>
   <p class="muted">集中查看答复与问题。看不懂可以继续追问，一轮回复不会自动结束议题。</p>
+  <p id="markdown-status" class="warning" role="status" hidden>Markdown 组件未能加载，暂时显示原文。可刷新页面重试；回复仍可正常保存。</p>
   <nav id="filters" aria-label="议题筛选">
     <button type="button" data-filter="attention" aria-pressed="true">待我处理</button>
     <button type="button" data-filter="open" aria-pressed="false">进行中</button>
@@ -94,23 +111,24 @@
       <p id="detail-empty" class="empty">选择一个议题，查看完整讨论。</p>
       <div id="detail-content" hidden>
         <div class="detail-head"><div><h2 id="detail-title"></h2><p id="detail-meta" class="meta"></p></div><button type="button" id="close-issue">结束议题</button></div>
+        <div id="close-confirmation" hidden role="group" aria-label="确认结束议题" tabindex="-1">
+          <p>确定结束这个议题吗？历史将保留，结束后不能继续回复。已保存的输入仍会交给 lane 处理。</p>
+          <button type="button" id="confirm-close" class="primary">确认结束</button>
+          <button type="button" id="cancel-close">取消</button>
+        </div>
         <p id="detail-status" class="meta" role="status"></p>
         <div id="questions" aria-label="问题状态"></div>
         <div id="history" aria-label="讨论历史"></div>
         <button type="button" id="load-history" hidden>继续加载历史</button>
         <p id="read-status" class="meta" role="status"></p>
         <div id="compose"></div>
-        <div id="close-confirmation" hidden role="group" aria-label="确认结束议题">
-          <p>确定结束这个议题吗？历史将保留，结束后不能继续回复。已保存的输入仍会交给 lane 处理。</p>
-          <button type="button" id="confirm-close" class="primary">确认结束</button>
-          <button type="button" id="cancel-close">取消</button>
-        </div>
         <p id="operation-status" role="status"></p>
         <div id="operation-recovery" hidden><button type="button" id="retry-operation">用同一操作重试</button><button type="button" id="check-history">查看后端历史</button></div>
       </div>
     </section>
   </div>
 </main>
+<script src="/issues/assets/markdown-it.js"></script>
 <script>
 (() => {
   "use strict";
@@ -125,6 +143,22 @@
     if (text !== undefined) element.textContent = text;
     return element;
   };
+  const markdown = typeof document.defaultView.markdownit === "function"
+    ? new document.defaultView.markdownit({ html: false, breaks: true, linkify: false }).disable("image") : null;
+  if (markdown) {
+    markdown.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
+      tokens[index].attrSet("target", "_blank");
+      tokens[index].attrSet("rel", "noopener noreferrer");
+      return renderer.renderToken(tokens, index, options);
+    };
+  } else byId("markdown-status").hidden = false;
+  function entryBody(text) {
+    const body = node("div", "entry-body");
+    // HTML input stays escaped; only the parser's own markup reaches this sink.
+    if (markdown) body.innerHTML = markdown.render(text);
+    else { body.classList.add("plain-text"); body.textContent = text; }
+    return body;
+  }
   const ownerText = owner => (owner.address || owner.laneId) + (owner.state === "archived" ? " · 已归档" : owner.state === "missing" ? " · 已缺失" : "");
   const time = value => new Date(value).toLocaleString("zh-CN", { hour12: false });
   const questionLabels = { waiting_user: "待我回答", waiting_lane: "等待 lane", answered: "已回答", not_needed: "无需回答" };
@@ -273,7 +307,7 @@
       article.dataset.entrySeq = String(entry.seq);
       const source = entry.source === "agent_reported_tui_user" ? "用户（agent 记录的 TUI 原话）" : entry.author === "user" ? "我" : "lane";
       const kind = { question: "提问", answer: "答复", reply: "回复", event: "记录" }[entry.kind] || entry.kind;
-      article.append(node("div", "entry-head", source + " · " + kind + " · #" + entry.seq + " · " + time(entry.createdAt)), node("div", "entry-body", entry.body));
+      article.append(node("div", "entry-head", source + " · " + kind + " · #" + entry.seq + " · " + time(entry.createdAt)), entryBody(entry.body));
       if (entry.relatedEntryId) {
         const related = view.entries.find(item => item.id === entry.relatedEntryId);
         article.append(node("div", "meta", "关联 " + (related ? "#" + related.seq : entry.relatedEntryId)));
@@ -377,8 +411,8 @@
   byId("refresh").addEventListener("click", refresh);
   byId("load-threads").addEventListener("click", () => { void loadList(true); });
   byId("load-history").addEventListener("click", () => { if (selectedId) void loadDetail(selectedId, true); });
-  byId("close-issue").addEventListener("click", () => { if (selectedId) { const view = viewFor(selectedId); if (!view.operation) { view.confirmClose = true; renderDetail(selectedId); } } });
-  byId("cancel-close").addEventListener("click", () => { if (selectedId) { viewFor(selectedId).confirmClose = false; renderDetail(selectedId); } });
+  byId("close-issue").addEventListener("click", () => { if (selectedId) { const view = viewFor(selectedId); if (!view.operation) { view.confirmClose = true; renderDetail(selectedId); byId("close-confirmation").focus(); } } });
+  byId("cancel-close").addEventListener("click", () => { if (selectedId) { viewFor(selectedId).confirmClose = false; renderDetail(selectedId); byId("close-issue").focus(); } });
   byId("confirm-close").addEventListener("click", () => {
     if (!selectedId) return;
     const view = viewFor(selectedId);

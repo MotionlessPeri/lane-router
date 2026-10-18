@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { createRequire } from "node:module";
 import { json, readPageAction } from "../../process/http-json.js";
 import type { IssuesService } from "./service.js";
 import { IssueError, type IssueHistoryQuery, type IssueListQuery } from "./types.js";
@@ -16,10 +17,11 @@ export class IssuesHttp {
   /** Unknown methods and URLs return without consuming a body, including action URLs with queries. */
   async handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    const markdownAsset = url.pathname === "/issues/assets/markdown-it.js";
     const detail = /^\/issues\/api\/threads\/([^/]+)$/u.exec(url.pathname);
     const write = request.method === "POST" && request.url === url.pathname
       ? /^\/issues\/api\/threads\/([^/]+)\/(replies|read|close)$/u.exec(url.pathname) : null;
-    const reading = request.method === "GET" && (url.pathname === "/issues" || url.pathname === "/issues/api/threads" || detail !== null);
+    const reading = request.method === "GET" && (url.pathname === "/issues" || markdownAsset || url.pathname === "/issues/api/threads" || detail !== null);
     if (!reading && !write) return false;
     const service = this.options.service;
     if (!service) { json(response, 503, { error: "ISSUES_UNAVAILABLE: issue module is unavailable", code: "ISSUES_UNAVAILABLE" }); return true; }
@@ -31,7 +33,11 @@ export class IssuesHttp {
     if (write && body === undefined) return true;
     try {
       if (reading) {
-        if (url.pathname === "/issues") {
+        if (markdownAsset) {
+          // A fixed, installed browser asset, not a filesystem path supplied by the request.
+          const script = readFileSync(createRequire(import.meta.url).resolve("markdown-it/browser"), "utf8");
+          response.writeHead(200, { "content-type": "application/javascript; charset=utf-8", "x-content-type-options": "nosniff", "cache-control": "no-store" }); response.end(script);
+        } else if (url.pathname === "/issues") {
           const page = (this.options.readPage ?? (() => readFileSync(new URL("../../ui/issues/index.html", import.meta.url), "utf8")))();
           response.writeHead(200, { "content-type": "text/html; charset=utf-8" }); response.end(page);
         } else {
