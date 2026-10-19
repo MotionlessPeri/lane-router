@@ -876,6 +876,37 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 **最后验证：** 2026-08-27 用真实离线 Codex thread 和隔离 Router 验证离线分支：`resume-info` 为 `reach=unconfirmed`、`restorePresence=offline`，批量脚本报告 `1 opened, 0 skipped, 0 failed`；开出的真实 Codex 进程使用隔离 endpoint，ownership 建立后同一接口变为 `restorePresence=online`。所有 child 都保留同一 `LANE_ROUTER_DATA_ROOT`。在线跳过、backend unavailable 与逐 lane 失败隔离仍由自动测试覆盖；本次真机 fixture 没有额外构造这三种分支。
 
+## 产品工具的参数 schema：union 工具发平表根
+
+需求与设计见 `docs/superpowers/specs/2026-10-19-tool-schema-flat-root.md`。参数有几种填法的工具（`lane_issue_publish`、`lane_issue_read`、`lane_issue_update`、`lane_graph_read`、`lane_graph_lock`），以前发出去的根节点是 `anyOf`/`oneOf`，Claude Code 把它改写成每个字段只剩第一种填法的取值。现在 `jsonTools()` 把这类根节点压成一个 object：同名字段的取值合并成 `enum`，`required` 只留每种填法都要的字段，`additionalProperties: false`；哪个取值要带哪些字段，逐行写在说明末尾的「Argument combinations (use exactly one):」里。解析仍按原来的 Zod union，嵌套的 union（如 `lane_graph_apply` 的 `changes`）不动。
+
+自动测试（`tests/tools/flat-root-schema.test.ts`）对默认 target 和 `draft-7` 各跑一遍：根节点形状、合并后的取值、`required`、每种填法一行说明、非 union 工具逐字节不变、嵌套 union 保留、跨填法混填仍被拒绝。八个变异（不压平、同名取值只留第一个、`required` 取并集、不附说明、非 union 工具也附说明、压平嵌套 union、解析改用平表、去掉字段级 `anyOf` 兜底）都让预定的用例变红。客户端最后把 schema 呈现成什么样，只能真机看。
+
+**前提：** 主检出构建到含此改动的版本。Claude 侧是新开的 Claude Code 会话加载 lane MCP 的新构建；Codex 侧要 Router（Codex 宿主）用上新构建，`dynamicTools` 在 `thread/start` 时发出。重启时机归用户，按设计稿与 codex-host 的部署合进同一次重启。
+
+### TC-TOOLSCHEMA-1：Claude Code 加载到的取值是全的
+
+1. 新开一个 Claude Code 会话，让它原样列出 `lane_issue_update`、`lane_issue_publish`、`lane_graph_lock` 加载到的参数 schema 和说明末尾。
+
+**预期：**
+- `lane_issue_update`：`action` 是 `resolve_question`、`record_processed`、`record_tui_close` 三个取值，`status` 是 `answered`、`not_needed` 两个取值；必填只有 `operationKey`、`issueId`、`action`。
+- `lane_issue_publish`：`kind` 是 `answer`、`question` 两个取值；必填是 `operationKey`、`title`、`kind`、`body`。
+- `lane_graph_lock`：`action` 是 `acquire`、`release` 两个取值；必填是 `operationKey`、`graphId`、`action`。
+- 三个工具的说明末尾都有逐行的「Argument combinations」，`lane_issue_update` 的两行 `resolve_question` 分别写着 `status="answered"` 和 `status="not_needed"`。
+
+**观察项（不作验收）：** 记下说明前面是否还有客户端加的「Input constraint: Provide parameters for …」那句。
+
+**最后验证：** 尚未真机执行。
+
+### TC-TOOLSCHEMA-2：Codex 实际收到的 `dynamicTools`
+
+1. 经 Codex 宿主的隔离环境发一次真实 turn。
+2. 记录 `thread/start` 里实际发出的这五个工具的 `dynamicTools` 条目，以及 codex 0.154.0 呈现给模型的样子。
+
+**预期：** 发出的条目与 TC-TOOLSCHEMA-1 的取值、必填和说明末尾一致；记录 Codex 呈现时有没有再改写。
+
+**最后验证：** 尚未执行。Codex 的全局授权已失效（Vikunja #315），真实 turn 发不出去；授权恢复后再做，不拿别的证据代替。
+
 ## Claude 账号余量
 
 需求与设计见 `docs/superpowers/specs/2026-10-19-claude-account-at-launch.md` 末尾的「修订」一节，使用说明见 `docs/account-switching.md`「Claude 账号余量」。2026-10-19 先上线过一版「开 Claude 窗口时按页面选中的账号注入 token」（`d93c8fa`），帮不上「工作到一半换号」，已回退：terminal child 回到注入之前的行为。

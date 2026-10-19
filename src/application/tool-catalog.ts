@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { CallerContext } from "../router/types.js";
+import { flattenRootUnion } from "./flat-root-schema.js";
 
 export interface ToolDefinition {
   readonly name: string;
@@ -35,11 +36,14 @@ export class ToolCatalog {
   }
 
   jsonTools(target?: "draft-7") {
-    return this.definitions.map(definition => ({
-      name: definition.name, description: definition.description,
-      // MCP requires an object root even when Zod represents strict object branches as anyOf.
-      inputSchema: { ...z.toJSONSchema(definition.schema, target === undefined ? {} : { target }), type: "object" as const },
-    }));
+    return this.definitions.map(definition => {
+      const schema = z.toJSONSchema(definition.schema, target === undefined ? {} : { target }) as Record<string, unknown>;
+      const flat = flattenRootUnion(schema);
+      return flat === undefined
+        // MCP requires an object root.
+        ? { name: definition.name, description: definition.description, inputSchema: { ...schema, type: "object" as const } }
+        : { name: definition.name, description: `${definition.description}\n\n${flat.combinations}`, inputSchema: flat.schema };
+    });
   }
 
   bind(handler: ToolHandler): ApplicationTools {
