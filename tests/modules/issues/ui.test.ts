@@ -17,7 +17,7 @@ async function boot(options: { firstTitle?: string; firstBody?: string; secondBo
   const second = x.service.publish(x.other, { operationKey: "second", kind: "answer", title: "研究答复", originalQuestion: "原来的问题", body: options.secondBody ?? "已有答复" });
   options.prepare?.(x);
   const server = new LocalRouterServer({ tools: { call: vi.fn() } as never,
-    instanceId: randomUUID(), issues: { service: x.service },
+    codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: randomUUID(), issues: { service: x.service },
   } as ConstructorParameters<typeof LocalRouterServer>[0]);
   const { url } = await server.start(); cleanup.push(() => server.close());
   const window = new Window({ url: `${url}/issues` }); cleanup.push(() => window.happyDOM.abort());
