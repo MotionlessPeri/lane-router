@@ -1,6 +1,6 @@
 # Codex 宿主独立进程：需求与设计
 
-状态：草稿，2026-10-19 由 `lane-router/codex-host` 起草，待 `lane-router/design` 过目。任务书在仓库外（`handoffs/2026-10-19-codex-host/brief.md`），本稿把其中的目标、范围和验收口径收进来，实施只以本稿为准。
+状态：2026-10-19 由 `lane-router/codex-host` 起草，`lane-router/design` 当天过目通过（回信 `8c65dc73`），并补了一条构建标识的要求，已并入 3.6。任务书在仓库外（`handoffs/2026-10-19-codex-host/brief.md`），本稿把其中的目标、范围和验收口径收进来，实施只以本稿为准。
 
 ## 术语表
 
@@ -79,7 +79,7 @@
 
 | 方向 | 帧 | 内容与用途 |
 |---|---|---|
-| 宿主 → 核心 | 事件 `hello` | `protocolVersion`、宿主 `instanceId`、`pid`、app-server 状态、`threads: [{ threadId, visibleClients }]`。每次连上第一帧。核心据此替换整份宿主快照。 |
+| 宿主 → 核心 | 事件 `hello` | `protocolVersion`、宿主 `instanceId`、`pid`、构建标识 `build`（见 3.6）、app-server 状态、`threads: [{ threadId, visibleClients }]`。每次连上第一帧。核心据此替换整份宿主快照。 |
 | 宿主 → 核心 | 事件 `appServer` | app-server 状态变化（`ready`、`recovering`、`failed` 等）。 |
 | 宿主 → 核心 | 事件 `threadClients` | 某 thread 的可见客户端数（绝对值，可重放）。认领和 TUI 断开都发。 |
 | 宿主 → 核心 | 事件 `observe` | 只转发 `CodexBackend` 消费的两种通知：`turn/completed` 和 `thread/status/changed`。来源包括原始连接和各 bridge 看到的上游消息。 |
@@ -90,7 +90,7 @@
 
 错误码在核心侧还原成今天 `CodexBackend` 认得的类型：`ACCOUNT_SWITCH_IN_PROGRESS` 等账号码还原为 `AccountError`，`CODEX_APP_SERVER_RPC` 还原为带 `rpcCode` 的 `AppServerRpcError`（`isMissingThread` 看 message，所以 message 原样带回），`CODEX_APP_SERVER_DISCONNECTED` 还原为 `AppServerDisconnectedError`。这样 `CodexBackend` 的 `notify`、`waitUntilReplaceable`、`reach`、`restorePresence` 一行不改。
 
-核心侧只认一条宿主连接：新连接到达时关掉旧的（与 Claude channel 的 `replaced` 同理），`/codex/host` 握手带 `Origin` 一律 403，与 `/claude` 同一判据。信任边界不变：同一 Windows 用户的 loopback 进程。今天任何本机进程本来就能直连 `codexEndpoint` 驱动 app-server，也能用任意 codex `conversationId` 调 `/rpc`，这条链路没有给出更多能力。
+核心侧只认一条宿主连接：新连接到达时关掉旧的（与 Claude channel 的 `replaced` 同理），`/codex/host` 握手带 `Origin` 一律 403，与 `/claude` 同一判据。信任边界不变：同一 Windows 用户的 loopback 进程。今天任何本机进程本来就能直连 `codexEndpoint` 驱动 app-server，也能用任意 codex `conversationId` 调 `/rpc`，这条链路没有给出更多能力。design 提过可复用 `loadDshHostToken` 的 owner-only token 给链路加 bearer，用来防日后同机第二份构建的宿主误连；它不算缺口，本稿不做：宿主只连自己 `dataRoot` 下 discovery 指向的核心，误连需要两份构建共用同一个 `dataRoot`，而那时 `codex-host.lock` 已经只放行一个宿主。
 
 ### 3.4 核心或宿主不在时各发生什么
 
@@ -123,6 +123,7 @@
 宿主跨核心重启存活，所以部署新构建并重启核心之后，宿主仍跑旧代码，直到有人带 `-CodexHost` 重启它。处理方式：
 
 - `hello` 带 `protocolVersion`。核心不认识的版本，以关闭码 4001 和原因文字关掉连接并写 stderr；宿主记下原因，之后的工具调用错误里带上这句原因和「用 `restart-router.ps1 -CodexHost` 重启宿主」的提示。
+- 协议号相同、但宿主代码有修复（例如 bridge 的 bug）时，版本号发现不了。为此 `hello` 再带构建标识 `build`：进程启动时对自己所在构建目录（`dist/`）下全部 `.js` 文件按相对路径排序后连同内容取 SHA-256。核心启动时用同一函数算出自己的标识。看板快照加一项 `codexHost: { connected, hostBuild, coreBuild }`，两者不同时看板显示一行提示：「Codex 宿主的构建与核心不同，用 `restart-router.ps1 -CodexHost` 换代」。不新增构建戳机制，只读已有产物。
 - 线上格式不变的改动（例如工具实现）不涉及版本；动态工具清单仍在 `thread/start` 时由宿主注入，旧 thread 不热刷新，与今天的约定相同。
 
 第一次部署本构建时，旧核心持有的 app-server 会被重启脚本停掉，开着的 Codex TUI 最后再断一次；之后的核心重启才不再断。部署交接要写明这一点。
@@ -143,6 +144,8 @@
 | `src/process/main.ts` | 按 3.5 装配。测试经 `runRouterProcess` 选项替换 ensure，不再 mock `createCodexRuntime`。 |
 | `src/process/codex-launcher.ts` | 按 3.5。 |
 | `scripts/restart-router.ps1` | 加 `-CodexHost`。 |
+| `src/router/dashboard.ts`、`src/process/dashboard.html` | 快照加 `codexHost`；构建不同时显示换代提示。 |
+| 文档 | `docs/manual-tests.md`「Codex remote TUI」一节（其中「Router discovery 只含 PID、loopback 地址、Codex endpoint 与 instance ID」要改）、重启语义两节的 Codex 对应记录、新真机用例；`docs/account-switching.md` 的启动环境说明；`docs/README.md` 索引；规范库 `techniques/lane-router.md` 中描述「Router 持有 app-server / `codexEndpoint`」的句子（另一个仓，改完交 design 提交）。 |
 
 ## 4. 范围审计
 
@@ -160,6 +163,8 @@
 | 宿主自动重连核心 | 每次核心重启 | 明确：「核心回来后宿主自动重连」 | 核心重启后 lane 工具永久失效 | 无 | 保留 | |
 | `hello` 快照与核心侧补发处理机会 | 每次重连 | 明确：验收 2 | 核心回来后 pending 不提醒，`restorePresence` 错报 | 无 | 保留 | |
 | `protocolVersion` 与关闭码 4001 | 部署后宿主仍是旧代码时 | 推断，由明确的独立生命周期直接导出 | 新旧帧格式错配时行为未定义 | 无 | 保留，只做版本号与明确报错 | |
+| `hello.build` 与看板「宿主构建与核心不同」提示 | 部署后看看板的人 | 明确：design 审稿回信 `8c65dc73` 第 b 条（role 约定设计取舍归 design） | 协议号相同的宿主修复没人记得换代 | 无 | 保留；只读已有产物算哈希，不加构建戳 | |
+| 链路 bearer token | 无现有消费者 | design 回信列为可选 | 无 | loopback 与 `codex-host.lock` | 删除（理由见 3.3） | |
 | `restart-router.ps1 -CodexHost` | 部署新构建后需要宿主换代时，低频 | 明确：验收 3「宿主重启时的行为明确」；推断：Windows 上硬杀宿主会留下 app-server 孤儿，需要连子进程一起停 | 宿主换代只能手查 pid，并且会留下孤儿 app-server | 手工 `Stop-Process` | 合并进现有脚本 | |
 | 核心启动不再依赖 `codex` | 每次核心启动 | 推断，由互相等待成环直接导出 | 核心与宿主互相等待，谁也起不来 | 无 | 保留；在交接里列为行为变化 | |
 | 看板 Codex 模型列表改为链路就绪后取 | 看板 | 推断，同上 | 核心启动时拿不到模型列表 | 无 | 保留 | |
@@ -184,7 +189,7 @@
 7. `restorePresence` 在「链路断」「通且可见客户端为 0」「通且为 1」下分别是 `unavailable`、`offline`、`online`；`reach` 在「链路断」「通且未观测」「通且观测过」下分别是 `no_channel`、`unconfirmed`、`live`。看板恢复与 `lane-router-lane open` 用 `resumeInfo` 读到的就是这些值。（单元测试。）
 8. 核心关闭不停宿主、不停 app-server；核心在没有可用 `codex` 的环境下照样启动并写出 discovery，Codex 能力报 `unavailable`。（集成测试。）
 9. 账号 gate 被持有时，核心经链路发起的 `turn/start` 以 `ACCOUNT_SWITCH_IN_PROGRESS` 返回，核心侧 `notify` 得到 `deferred`；`thread/resume` 所有权：宿主已认领的直接放行，未认领的问核心，链路不通时拒绝。（单元测试。）
-10. `hello` 版本号不被认可时，核心以 4001 关闭连接，宿主之后的工具错误带上这句原因。（单元测试。）
+10. `hello` 版本号不被认可时，核心以 4001 关闭连接，宿主之后的工具错误带上这句原因。宿主与核心构建标识不同时，看板快照的 `codexHost` 两项不同且页面显示换代提示；相同或链路未连通时不显示。（单元测试与看板渲染测试。）
 11. `/codex/host` 握手带 `Origin` 返回 403；宿主 `POST /codex/provider-endpoint` 保留与核心原入口相同的来源与内容类型守卫。（修改现有守卫测试。）
 12. `npm test`、`npm run typecheck`、`npm run build` 全过；现有 Codex 相关测试只改不删。
 13. 真机验收记入 `docs/manual-tests.md`，全程使用隔离的 `LANE_ROUTER_DATA_ROOT`。
@@ -215,6 +220,7 @@
 | 链路请求绕过账号 gate | 9 |
 | bridge 恢复同步 `ownsThread`、不问核心 | 9（未认领 thread 的 `resume` 判错） |
 | 不校验 `protocolVersion` | 10 |
+| 看板提示改为恒不显示 | 10 |
 
 ## 7. 已知边界与不做
 
