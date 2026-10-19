@@ -57,7 +57,12 @@ export class CodexTuiBridge {
       for (const message of queued) upstream.send(message);
       queued.length = 0;
     });
+    let attached = true;
     const fromDownstream = async (raw: string): Promise<void> => {
+      // A frame still queued behind an ownership answer when its TUI went away is dropped before it
+      // reaches the account gate: detach has already settled every admission, and one taken now
+      // would never be settled, leaving the gate believing a turn is in flight for good.
+      if (!attached) return;
       const incoming = parseRecord(raw);
       let forwarded = raw;
       if (incoming && "accountAdmissionToken" in incoming) {
@@ -81,6 +86,7 @@ export class CodexTuiBridge {
       }
       if (upstream.readyState === WebSocket.OPEN) upstream.send(message);
       else if (upstream.readyState === WebSocket.CONNECTING) queued.push(message);
+      else if (incoming && isId(incoming.id)) { admissions.get(incoming.id)?.(); admissions.delete(incoming.id); }
     };
     // One frame at a time per TUI: an ownership answer may have to come from the Router core, and
     // a frame forwarded past it could reach the App Server before the resume it depends on.
@@ -102,7 +108,6 @@ export class CodexTuiBridge {
     upstream.on("close", () => downstream.close());
     downstream.on("error", () => upstream.close());
     upstream.on("error", () => downstream.close(1011, "Codex App Server connection failed"));
-    let attached = true;
     const detach = () => {
       if (!attached) return;
       attached = false;

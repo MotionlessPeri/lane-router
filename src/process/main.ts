@@ -38,11 +38,8 @@ import { ClaudeChannelHub, LocalRouterServer } from "./local-server.js";
 import { RuntimeLock } from "./runtime-lock.js";
 import { buildId } from "./build-id.js";
 import { CodexHostHub } from "./codex-host-hub.js";
+import { CodexHostKeeper } from "./codex-host-keeper.js";
 import { ensureCodexHost } from "./ensure-codex-host.js";
-
-/** How many times the core tries to bring up a missing Codex host before leaving it to the launcher. */
-const HOST_ENSURE_ATTEMPTS = 3;
-const HOST_ENSURE_BACKOFF_MS = 2_000;
 
 export async function runRouterProcess(options: {
   dataRoot?: string; nativeHosts?: readonly NativeHostPermit[]; issues?: boolean;
@@ -114,7 +111,10 @@ export async function runRouterProcess(options: {
   let closed = false;
   // The Codex host lives in its own process and outlives this one: nothing here starts or stops an
   // App Server. The core only serves the host's link and makes sure some host exists.
-  const hostKeeper = new CodexHostKeeper(() => (options.ensureCodexHost ?? ((root: string) => ensureCodexHost({ dataRoot: root })))(dataRoot));
+  const hostKeeper = new CodexHostKeeper({
+    ensureHost: () => (options.ensureCodexHost ?? ((root: string) => ensureCodexHost({ dataRoot: root })))(dataRoot),
+    log: (line) => process.stderr.write(`${line}\n`),
+  });
   const closeResources = async (): Promise<void> => {
     let failure: unknown;
     const attempt = async (work: () => unknown | Promise<unknown>) => { try { await work(); } catch (error) { failure ??= error; } };
@@ -341,43 +341,6 @@ export function parseWindowsTokenAclResult(raw: string): void {
     && (rules[0] as Record<string, unknown>).fullControl === true
     && (rules[0] as Record<string, unknown>).inherited === false;
   if (!ownerOnly) throw new Error("Windows DSH token ACL is not owner-only");
-}
-
-/**
- * Keeps one Codex host in existence: asked to on core startup and whenever the host's link drops.
- * Bounded on purpose — a machine without a working Codex would otherwise spawn a doomed host every
- * few seconds forever — and the launcher ensures a host again whenever someone opens a Codex lane.
- * Finding a live host is the normal answer and starts nothing.
- */
-class CodexHostKeeper {
-  private running = false;
-  private stopped = false;
-  private timer?: NodeJS.Timeout;
-
-  constructor(private readonly ensureHost: () => Promise<unknown>) {}
-
-  ensure(): void {
-    if (this.running || this.stopped) return;
-    this.running = true;
-    void this.attempt(1);
-  }
-
-  stop(): void {
-    this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
-  }
-
-  private async attempt(attempt: number): Promise<void> {
-    try {
-      await this.ensureHost();
-      this.running = false;
-    } catch (error) {
-      process.stderr.write(`Codex host unavailable (attempt ${attempt} of ${HOST_ENSURE_ATTEMPTS}): ${error instanceof Error ? error.message : "unknown error"}\n`);
-      if (attempt >= HOST_ENSURE_ATTEMPTS || this.stopped) { this.running = false; return; }
-      this.timer = setTimeout(() => { void this.attempt(attempt + 1); }, HOST_ENSURE_BACKOFF_MS * attempt);
-      this.timer.unref();
-    }
-  }
 }
 
 function baseLauncherChoices(): DashboardLauncherChoices {

@@ -26,7 +26,8 @@ interface HostSnapshot {
  */
 export class CodexHostHub {
   private current?: HostSnapshot;
-  private pendingPeer?: LinkPeer;
+  /** Every open link, introduced or not, so closing the Router closes them all. */
+  private readonly peers = new Set<LinkPeer>();
   private notificationHandler: (message: CodexNotification) => void = () => undefined;
   private readonly readyHandlers = new Set<() => void>();
   readonly client = {
@@ -60,13 +61,12 @@ export class CodexHostHub {
       request: (method, params) => this.handleRequest(peer, method, params, lifetime.signal),
       event: (method, params) => this.handleEvent(peer, method, params),
     }, { lostError: () => new AppServerDisconnectedError("Codex host disconnected") });
-    // A newer link replaces an older one, as a reconnecting host's would: the old socket may only
-    // be half-dead, and the host behind the new one is the one that answers.
-    this.pendingPeer?.close(1000, "replaced");
-    this.pendingPeer = peer;
+    // Nothing is replaced yet: a connection only takes over once its hello is accepted, so a
+    // stray connection on loopback cannot knock the working host off and fail its calls.
+    this.peers.add(peer);
     socket.once("close", () => {
       lifetime.abort(new Error("the Codex host disconnected"));
-      if (this.pendingPeer === peer) this.pendingPeer = undefined;
+      this.peers.delete(peer);
       if (this.current?.peer !== peer) return;
       this.current = undefined;
       this.options.onHostLost?.();
@@ -88,9 +88,8 @@ export class CodexHostHub {
   }
 
   close(): void {
-    this.pendingPeer?.close(1001, "router closing");
-    this.current?.peer.close(1001, "router closing");
-    this.pendingPeer = undefined;
+    for (const peer of this.peers) peer.close(1001, "router closing");
+    this.peers.clear();
     this.current = undefined;
   }
 

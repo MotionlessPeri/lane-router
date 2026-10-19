@@ -13,6 +13,8 @@ import { AccountError } from "../../accounts/contracts.js";
 export interface CodexProcessControl {
   readonly client: AppServerClient;
   readonly state?: CodexProcessState;
+  /** The App Server's endpoint right now, which a respawn changes. */
+  readonly endpoint?: string;
   start(): Promise<string>;
   shutdown(): Promise<void>;
   onReconnect(handler: (event?: { strategy?: string }) => void): () => void;
@@ -49,7 +51,14 @@ export class CodexRuntime {
   private readonly visibleClients = new Map<string, number>();
   private unsubscribers: Array<() => void> = [];
   private running = false;
-  endpoint = "";
+  private startedEndpoint = "";
+
+  /**
+   * Read by every bridge for every new TUI connection, so it must follow the App Server across a
+   * respawn onto a new port. Before the host existed a Router restart reset it; the host outlives
+   * those, so a value captured once would strand every later TUI until the host was replaced.
+   */
+  get endpoint(): string { return this.options.process.endpoint ?? this.startedEndpoint; }
 
   constructor(private readonly options: {
     readonly core: CodexCoreLink;
@@ -98,7 +107,7 @@ export class CodexRuntime {
       }),
     ];
     try {
-      this.endpoint = await this.options.process.start();
+      this.startedEndpoint = await this.options.process.start();
       this.accountConsumer?.start();
       this.running = true;
       return this.endpoint;
@@ -205,6 +214,14 @@ export function createCodexRuntime(options: {
   readonly capabilityCacheDir: string;
   readonly accountConnectionFile?: string;
 }): CodexRuntime {
-  const process = new CodexAppServerProcess({ command: options.command, gate: new CodexCapabilityGate({ cacheDir: options.capabilityCacheDir }) });
+  const appServer = new CodexAppServerProcess({ command: options.command, gate: new CodexCapabilityGate({ cacheDir: options.capabilityCacheDir }) });
+  const process: CodexProcessControl = {
+    get client() { return appServer.client; },
+    get state() { return appServer.state; },
+    get endpoint() { return appServer.currentEndpoint; },
+    start: () => appServer.start(),
+    shutdown: () => appServer.shutdown(),
+    onReconnect: (handler) => appServer.onReconnect(handler),
+  };
   return new CodexRuntime({ core: options.core, catalog: options.catalog, process, accountConnectionFile: options.accountConnectionFile });
 }

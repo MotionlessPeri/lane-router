@@ -132,6 +132,21 @@ test("core requests are limited to the four App Server methods and pass the acco
   expect(fake.request).not.toHaveBeenCalledWith("turn/start", expect.anything());
 });
 
+// A respawned App Server listens on a new port. The bridges read the endpoint for every new TUI
+// connection, so it has to be the process's current one; the host outlives core restarts, so a
+// stale value would otherwise last until someone replaced the host by hand.
+test("the endpoint bridges connect to follows the App Server across a respawn", async () => {
+  const fake = fakeProcess();
+  let current = "ws://127.0.0.1:1";
+  Object.defineProperty(fake.process, "endpoint", { get: () => current });
+  const runtime = new CodexRuntime({ core: fakeCore().core, process: fake.process });
+  await runtime.start();
+  expect(runtime.endpoint).toBe("ws://127.0.0.1:1");
+  current = "ws://127.0.0.1:2";
+  fake.reconnect("respawned");
+  expect(runtime.endpoint).toBe("ws://127.0.0.1:2");
+});
+
 test("a thread this host claimed is owned at once; any other is the core's answer", async () => {
   const { process } = fakeProcess();
   const { core } = fakeCore();

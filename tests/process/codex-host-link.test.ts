@@ -44,6 +44,27 @@ test("a core that refuses this host's protocol is named in the error, with the w
   });
 });
 
+// A refusal does not lift on its own: it lasts until someone replaces the host. Knocking at the
+// ordinary reconnect pace would write a line to both logs every few seconds for as long as that takes.
+test("a refused host waits much longer before asking again and logs the refusal once", async () => {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  let hellos = 0;
+  server.on("connection", (socket) => socket.once("message", () => { hellos += 1; socket.close(PROTOCOL_MISMATCH_CLOSE, "protocol 2 vs 1"); }));
+  const logs: string[] = [];
+  const value = new CodexHostLink({
+    resolveCore: async () => `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    hello: () => hello, appServerRequest: async () => ({}), reconnectDelaysMs: [10], refusedDelayMs: 250, log: (line) => logs.push(line),
+  });
+  cleanups.push(() => value.close());
+  value.start();
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  expect(hellos).toBeGreaterThanOrEqual(2);
+  expect(hellos).toBeLessThanOrEqual(4);
+  expect(logs).toHaveLength(1);
+});
+
 test("the host introduces itself first and then answers the core's App Server requests", async () => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise<void>((resolve) => server.once("listening", resolve));

@@ -10,6 +10,11 @@ import { probeRouterHealth } from "./local-client.js";
 import type { RouterDiscovery } from "./local-server.js";
 
 const RECONNECT_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 5_000];
+/**
+ * A refusal lasts until someone replaces the host, so asking at the ordinary pace only fills the
+ * Router's and the host's logs. The calls that fail meanwhile already carry the reason.
+ */
+const REFUSED_RETRY_MS = 60_000;
 
 /**
  * The host's end of the link: it finds whichever core is current, connects, introduces itself,
@@ -32,6 +37,7 @@ export class CodexHostLink implements CodexCoreLink {
     /** Requests the core makes of the host: App Server calls only. */
     readonly appServerRequest: (method: string, params: unknown) => Promise<unknown>;
     readonly reconnectDelaysMs?: readonly number[];
+    readonly refusedDelayMs?: number;
     readonly log?: (line: string) => void;
   }) {}
 
@@ -106,20 +112,23 @@ export class CodexHostLink implements CodexCoreLink {
       if (this.socket === socket) this.socket = undefined;
       // A refusal outlives the socket so the calls that fail in the meantime can say why; any other
       // way of losing the link means the core simply went away.
-      // A refused host keeps backing off rather than knocking every 100 ms on a door that will not open.
       if (code === PROTOCOL_MISMATCH_CLOSE) {
-        this.refusal = reason.toString() || "protocol version mismatch";
-        this.options.log?.(`Codex host link refused by the Router: ${this.refusal}`);
-      } else { this.refusal = undefined; this.failures = 0; }
+        const refusal = reason.toString() || "protocol version mismatch";
+        if (refusal !== this.refusal) this.options.log?.(`Codex host link refused by the Router: ${refusal}`);
+        this.refusal = refusal;
+        return this.scheduleReconnect(this.options.refusedDelayMs ?? REFUSED_RETRY_MS);
+      }
+      this.refusal = undefined;
+      this.failures = 0;
       this.scheduleReconnect();
     });
     peer.event("hello", this.options.hello() as unknown as Record<string, unknown>);
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(fixedDelayMs?: number): void {
     if (this.closed || this.retry) return;
     const delays = this.options.reconnectDelaysMs ?? RECONNECT_DELAYS_MS;
-    const delay = delays[Math.min(this.failures, delays.length - 1)] ?? 5_000;
+    const delay = fixedDelayMs ?? delays[Math.min(this.failures, delays.length - 1)] ?? 5_000;
     this.failures += 1;
     this.retry = setTimeout(() => { this.retry = undefined; void this.open(); }, delay);
     this.retry.unref();

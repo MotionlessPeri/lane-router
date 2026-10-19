@@ -53,7 +53,7 @@ async function harness(bindings: BindingRecord[] = []) {
     });
     return { socket, peer };
   };
-  return { hub, host, opportunities, logs, callTool };
+  return { hub, host, opportunities, logs, callTool, url };
 }
 
 test("a host speaking another protocol version is refused with 4001 and a reason", async () => {
@@ -106,6 +106,36 @@ test("hello offers every thread the host has and every active codex binding a ch
   await vi.waitFor(() => expect(x.opportunities).toEqual([["open", "bound-only"]]));
   expect(x.hub.hasVisibleClient("open")).toBe(true);
   expect(x.hub.hasVisibleClient("bound-only")).toBe(false);
+});
+
+// Replacement happens on an accepted hello, not on a bare connection: anything else on loopback
+// could otherwise knock the working host off and fail its tool calls in flight.
+test("a connection that never says hello does not displace the linked host", async () => {
+  const x = await harness();
+  const linked = await x.host({ build: "working" });
+  await vi.waitFor(() => expect(x.hub.status().connected).toBe(true));
+  const silent = new WebSocket(x.url);
+  await new Promise<void>((resolve, reject) => { silent.once("open", resolve); silent.once("error", reject); });
+  cleanups.push(() => silent.terminate());
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(linked.socket.readyState).toBe(WebSocket.OPEN);
+  expect(x.hub.status()).toMatchObject({ connected: true, hostBuild: "working" });
+});
+
+test("an App Server recovering on the host reads as unavailable, and its return as ready again", async () => {
+  const x = await harness([binding("t-1")]);
+  const ready = vi.fn();
+  x.hub.onReady(ready);
+  const { peer } = await x.host();
+  const backend = new CodexBackend({ client: x.hub.client, resolveLane: () => "alpha/t-1", hasVisibleClient: (id) => x.hub.hasVisibleClient(id) });
+  await vi.waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  expect(backend.restorePresence(binding("t-1"))).toBe("offline");
+  peer.event("appServer", { state: "recovering" });
+  await vi.waitFor(() => expect(backend.restorePresence(binding("t-1"))).toBe("unavailable"));
+  expect(backend.reach(binding("t-1")).state).toBe("no_channel");
+  peer.event("appServer", { state: "ready" });
+  await vi.waitFor(() => expect(ready).toHaveBeenCalledTimes(2));
+  expect(backend.restorePresence(binding("t-1"))).toBe("offline");
 });
 
 test("a newer host link replaces the older one", async () => {
