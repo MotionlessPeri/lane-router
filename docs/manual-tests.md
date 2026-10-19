@@ -377,6 +377,24 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 **限制（不是缺陷，是这个形态的边界）：** 隧道挂在 Windows 某个进程里，进程没了就断；Router 重启换端口，隧道和 VM 的 `discovery.json` 都要重做——`start-vm-bridge.ps1` 现在每 5 秒比对 `discovery.json` 的 `instanceId`，变了就杀掉旧 ssh、按新端口重开并重拷 `discovery.json`。⚠️ 只等 ssh 退出是不够的：2026-10-12 实测 Router 换到新端口后，转发旧端口的 ssh 会话照样活着，远端 lane 一直指着死端口，直到这个比对加上；dashboard「恢复 lane」对这条 lane 无意义（Router 开不了 VM 的窗口）；`joinKey` 是 pid，跨机可能撞。要去掉这些边界是跨机设计稿（可配绑定地址 + 认证 + 消息经 HTTP 拉取 + 远端 lane 的开窗语义）的事。
 
+#### 一键打开 VM 上的 lane：`scripts/open-vm-lane.ps1`（2026-10-19）
+
+上面第 5 步「PuTTY 登录 → tmux → cd → 带 channel 参数起 claude」的手工流程收进了一个脚本。它向本机 Router 问这条 lane 的 Claude 会话 id 和工作目录（`/lanes/resume-info`），然后开一个终端到 VM：登录、按需切用户、`tmux` 有同名会话就 attach、没有就新建并在里面 `claude --dangerously-load-development-channels server:lane --resume <id>`。桥没在跑会顺手拉起 `start-vm-bridge.ps1`。
+
+```powershell
+scripts\open-vm-lane.ps1 -Init                                   # 写配置模板到 ~/.lane-router/vm-lanes.json
+scripts\open-vm-lane.ps1 -List                                   # 列出工作目录在 Linux 上的 lane 及其 tmux 会话名
+scripts\open-vm-lane.ps1 -Lane mayacustomnodes/linux-deploy      # 打开（恢复）一条
+scripts\open-vm-lane.ps1 -Lane proj/newlane -New -Cwd /home/dev/xd_projects/proj -Role "..."   # 在 VM 上新建
+scripts\open-vm-lane.ps1 -Lane ... -DryRun                       # 只打印命令和远端脚本
+```
+
+配置项：`host` / `port` / `loginUser`；`password`（只给 PuTTY，留空则 PuTTY 自己提示输入）或 `keyFile`；`switchUser` 加 `switchMethod`（`sudo` 或 `su`）在登录后切到跑 lane 的用户；`transport` 选 `putty`（默认，独立 PuTTY 窗口）或 `ssh`（Windows OpenSSH 走现有密钥，在 lane 所属 set 或项目的 Windows Terminal 窗口里开一个标签）；`tmuxSessions` 把 lane 地址映射到已有的 tmux 会话名（现有三条是 `lane` / `build` / `rea`），没映射的用 lane 名；`roleSuffix` 是新建 lane 时自动追加到 role 末尾的「用 curl 读 mailbox」说明。密码写在配置文件里是明文，而且 PuTTY 的 `-pw` 会出现在进程命令行上；能用密钥就用密钥。
+
+远端命令一律 base64 后再过三层 shell，三个踩过的坑：① PowerShell 把字符串管给 `ssh` 的 stdin 会带上 BOM 和 CRLF，bash 把它们当成第一个词的一部分（`-Probe` 因此改成传参数）；② 远端脚本不能用 `… | bash` 喂，那样 bash 的 stdin 是管道，`tmux attach` 报「open terminal failed: not a terminal」，要用 `bash <(echo … | base64 -d)` 让 stdin 留在终端上；③ 远端命令里不能出现双引号，PowerShell 5.1 传给原生程序时不会转义它们。VM 上 `claude` 装在 `~/.local/bin`，非交互 shell 的 PATH 里没有，所以远端脚本先把它加进 PATH。
+
+**最后验证：** 2026-10-19。`-List` / `-Probe` / `-DryRun` 通过。`-Transport ssh` 真机打开 `mayacustomnodes/linux-deploy`：第一次因坑 ② 失败（窗口里就是那句 not a terminal），改后第二次在 `mayacustomnodes` 窗口出一个标签，VM 上 `tmux ls` 的 `lane` 会话变为 `(attached)`，本机有对应的 `ssh -t` 进程。PuTTY 路径只做了 `-DryRun`，带密码的登录由用户验。
+
 ### Claude Code 的后台会话（`claude --bg`）当前不能当 lane 用（2026-10-12，2.1.284）
 
 **问题：** Windows 上 lane 的生命周期绑在 Windows Terminal 窗口上，关窗即死（消息不丢，只是没人醒来处理）。Claude Code 自带的 `claude --bg` / `claude attach` / `claude agents` 是 daemon 托管的后台会话，形态上就是 Windows 版的 tmux。实测它能不能带 channel。
