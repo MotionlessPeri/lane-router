@@ -77,7 +77,8 @@ export async function ensurePrivateDirectory(root: string): Promise<void> {
 /**
  * Codex's managed OAuth credentials stay in its keyring and never reach these JSON files. Claude
  * setup tokens do: Claude Code reads no keyring this service could use, so `claude-profiles.ts`
- * keeps them here, under the same ACL as Claude's own `~/.claude/.credentials.json`.
+ * keeps them here, under the same ACL as Claude's own `~/.claude/.credentials.json`, to read each
+ * account's usage with.
  */
 export async function atomicPrivateJson(path: string, value: unknown): Promise<void> {
   let temporary: string | undefined;

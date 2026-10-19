@@ -797,41 +797,47 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 **最后验证：** 2026-08-27 用真实离线 Codex thread 和隔离 Router 验证离线分支：`resume-info` 为 `reach=unconfirmed`、`restorePresence=offline`，批量脚本报告 `1 opened, 0 skipped, 0 failed`；开出的真实 Codex 进程使用隔离 endpoint，ownership 建立后同一接口变为 `restorePresence=online`。所有 child 都保留同一 `LANE_ROUTER_DATA_ROOT`。在线跳过、backend unavailable 与逐 lane 失败隔离仍由自动测试覆盖；本次真机 fixture 没有额外构造这三种分支。
 
-## Claude 切号：下次打开的 lane 用选中的账号
+## Claude 账号余量
 
-需求与设计见 `docs/superpowers/specs/2026-10-19-claude-account-at-launch.md`，使用说明见 `docs/account-switching.md`「Claude lane 账号」。
+需求与设计见 `docs/superpowers/specs/2026-10-19-claude-account-at-launch.md` 末尾的「修订」一节，使用说明见 `docs/account-switching.md`「Claude 账号余量」。2026-10-19 先上线过一版「开 Claude 窗口时按页面选中的账号注入 token」（`d93c8fa`），帮不上「工作到一半换号」，已回退：terminal child 回到注入之前的行为。
 
-自动测试覆盖以下几方面，全部用临时目录和合成 token：
-- 账号后台：Claude 账号的添加、选中、取消选中、删除；后台重启后账号与选中项仍在。
-- 启动文件：选中时以受限 ACL 原子写出，取消选中或删除选中项时删除；启动时按保存的选中项修正启动文件。
-- HTTP：沿用账号页的四道守卫，每条路由只收自己的字段，任何响应都不含 token。
-- terminal child：只给 Claude 窗口加 `CLAUDE_CODE_OAUTH_TOKEN`；没有启动文件时环境与之前逐字相同；启动文件坏了照旧，并在 stderr 打一行原因；连接文件的两种取法；两处都没写时不读启动文件。
-- 页面：添加之后 token 不留在 DOM 或任何输入框里。
+自动测试覆盖以下几方面，全部用临时目录、合成 token 和一个假的 claude 程序：
+- 账号后台：
+  - Claude 账号的添加、删除；后台重启后账号与读数仍在；状态里没有选中项、没有 token。
+  - 接管上一版留下的带选中项的文件，并删掉它的 `claude-launch.json`。
+  - 删除账号时一并删掉它的配置目录。
+- 读余量：
+  - 从 `rate_limit_event` 取出两个窗口；读失败、读不到、超时、找不到程序各成一个错误码。
+  - 读失败只记在该账号上；同一账号同时只读一次。
+  - 读余量的会话只带该账号的 token 和它自己的 `CLAUDE_CONFIG_DIR`，后台继承的 `CLAUDE*` 和 Anthropic 凭据变量一个不带。
+- HTTP：沿用账号页的四道守卫，每条路由只收自己的字段，选中路由已删，任何响应都不含 token。
+- terminal child：有没有账号后台、有没有遗留的启动文件，Claude、Codex、ZCode 窗口的环境都与继承来的逐字相同，也不读启动文件。
+- 页面：
+  - 每个账号一行，显示两个窗口的已用百分比、重置时间、检查时间，没读过的显示「未查询」。
+  - 刷新按账号进行，互不阻塞；失败只显示在那一行。
+  - 添加之后 token 不留在 DOM 或任何输入框里。
 
-设计稿第六节的五个变异都让预定的用例变红。下面这条要真的登录 Claude 账号、真的开 Claude 窗口，自动测试代替不了。
+五个变异（状态带出 token、terminal child 仍注入、读余量不设独立配置目录、一个账号读失败波及别的账号、页面回显 token）都让预定的用例变红。下面这条要用真实账号真的读一次，自动测试代替不了。
 
-**前提：** 账号后台受控重启到含此功能的构建，时机与部署由 design 安排。开窗口的进程（Router，以及在 shell 里跑 `lane-router-lane` 的那个终端）能找到账号后台的连接文件：环境变量 `LANE_ROUTER_ACCOUNTS_CONNECTION`，或 Router 配置里的 `accounts.connectionFile`。准备一个和本机 `~\.claude` 当前登录不同的 Claude 账号 A。
+**前提：** 账号后台受控重启到含此功能的构建，时机与部署由 design 安排。后台找得到 claude 程序：环境变量 `CLAUDE_EXE`，或 `%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe`。
 
-### TC-CLAUDE-ACCOUNT-1：选中的账号只作用于之后新开的 Claude lane
+### TC-CLAUDE-USAGE-1：三个已注册账号各读一次余量
 
-1. 用账号 A 在终端跑 `claude setup-token`，复制输出的 token。
-2. 打开账号页，在「Claude lane（下次打开时生效）」里添加 A（邮箱填 A 的邮箱，粘贴 token），然后选中 A。
-   确认顶部写「当前选用：A……」。确认后台数据目录里出现 `claude-launch.json`。
-3. 选一条已关闭的 Claude lane，在 shell 里跑 `lane-router-lane open <地址>`。
-   确认新窗口第一行是 `lane 账号：A（来自账号页的选择）`，会话里 `/status` 显示账号 A。
-4. 不关第 3 步的窗口。在账号页选「不选用」，确认 `claude-launch.json` 消失。
-5. 再开另一条已关闭的 Claude lane，确认窗口里没有 `lane 账号` 那一行，`/status` 显示 `~\.claude` 当前登录的账号。
-6. 回到第 3 步的窗口跑 `/status`，确认仍是 A。
-7. 收尾：在账号页删除 A。
+1. 打开账号页，确认「Claude 账号余量」一节列出已注册的三个账号（pub.staff、jack.ge、xiedong），都显示「未查询」，且没有「选用」之类的单选。
+   确认后台数据目录里已没有 `claude-launch.json`。
+2. 对每个账号点一次「刷新」，等按钮从「刷新中…」变回「刷新」。
+3. 拿其中一个账号对照：在用这个账号登录的 Claude 会话里查看用量（当前版本是 `/usage`；没有这个命令就看 claude.ai 的用量页）。
+4. 重启账号后台后再打开页面。
+5. 记下用户 `~\.claude\.credentials.json` 的修改时间，再点一次「全部刷新」。
 
-**预期：** 第 3 步是 A；第 5 步是本机 `/login` 的账号；第 6 步仍是 A，因为已开着的窗口不换号。整个过程中：
-- `lane-status` 下的状态文件不含 token；
-- 账号后台的 `service-stdout.log` 与 `service-stderr.log` 不含 token；
-- 浏览器开发者工具里 `/api/state` 的响应不含 token。
+**预期：**
+- 第 2 步：每行显示「5 小时：已用 N% · 时间 重置」「7 天：已用 N% · 时间 重置」和「检查于 时间」。
+- 第 3 步：百分比与该行一致（允许两次读之间的正常增长）。
+- 第 4 步：读数仍在。
+- 第 5 步：`~\.claude\.credentials.json` 的修改时间不变，在跑的 lane 都没有被登出。
+- 整个过程中，账号后台的 `service-stdout.log`、`service-stderr.log` 和浏览器里 `/api/state` 的响应都不含 token。
 
-**关键看点：**
-- 看 `/status` 里的账号，不看窗口里那一行提示：那一行只说明 terminal child 读到了选择，不证明 Claude 认了这个 token。
-- 第 4 步之前已开着的窗口不能被取消选中影响，这是「下次打开才换」的另一半。
+**关键看点：** 第 5 步是这条的底线：读余量的会话必须用每个账号自己的配置目录，碰了 `~\.claude` 就可能把所有 lane 一起登出。
 
 **最后验证：** 尚未真机执行。
 

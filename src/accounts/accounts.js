@@ -18,6 +18,10 @@
     OPERATION_FAILED: "操作未完成，请检查状态后重试。",
     INVALID_CLAUDE_TOKEN: "这不是 claude setup-token 生成的 token（应以 sk-ant-oat 开头），请重新粘贴。",
     INVALID_CLAUDE_EMAIL: "请填写邮箱，用来在这里区分这个 Claude 账号。",
+    USAGE_FAILED: "Claude 报了错，token 可能已失效：重跑 claude setup-token，删掉这个账号再添加。",
+    USAGE_UNAVAILABLE: "Claude 这次的输出里没有余量信息（CLI 升级可能改了格式）。",
+    USAGE_TIMEOUT: "读余量超时，请稍后再试。",
+    CLAUDE_UNAVAILABLE: "后台找不到 claude 程序，可用环境变量 CLAUDE_EXE 指定。",
     INVALID_PROFILE: "这个账号已经不在了，请看刷新后的列表。",
     STORAGE_UNAVAILABLE: "后台无法写入它的受限数据目录。",
   };
@@ -98,8 +102,10 @@
     $("status-title").textContent = title; $("status-detail").textContent = detail;
     renderClaude();
   }
-  /* Claude accounts take effect when a lane window opens, not here: the page only picks one. Tokens
-     go to the backend once, from the add form, and are never part of any state this page reads. */
+  /* Claude accounts are shown for what they have left; switching is /login in a lane's window.
+     Tokens go to the backend once, from the add form, and are never part of any state this page
+     reads. A reading takes seconds and spends a little of that account, so each one is asked for
+     by a click, refreshes run per account, and one running does not hold up the others. */
   async function claudeAction(path, body) {
     busy = true; render(); $("claude-error").hidden = true;
     try {
@@ -109,35 +115,48 @@
     } catch (error) { $("claude-error").textContent = error instanceof Error ? error.message : "后台连接失败。"; $("claude-error").hidden = false; return false; }
     finally { busy = false; await poll(false); }
   }
-  const day = value => { const date = new Date(value); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; };
-  function claudeChoice(value, title, detail, checked) {
-    const row = document.createElement("div"); row.className = "claude-profile";
-    const label = document.createElement("label");
-    const radio = document.createElement("input"); radio.type = "radio"; radio.name = "claude-selected"; radio.value = value; radio.checked = checked; radio.disabled = busy;
-    radio.onchange = () => { if (radio.checked) void claudeAction("/api/claude/select", value ? { profileId: value } : {}); };
-    const name = document.createElement("strong"); name.textContent = title;
-    const note = document.createElement("small"); note.textContent = detail;
-    label.append(radio, name, note); row.append(label);
-    return row;
+  const refreshing = new Set();
+  async function refreshUsage(profileId) {
+    if (refreshing.has(profileId)) return;
+    refreshing.add(profileId); render(); $("claude-error").hidden = true;
+    try {
+      const response = await fetch("/api/claude/usage/refresh", { method: "POST", headers: { "Content-Type": "application/json", "X-Account-Action": "1" }, body: JSON.stringify({ profileId }) });
+      const result = await response.json(); if (!response.ok) throw new Error(describe(result.error));
+    } catch (error) { $("claude-error").textContent = error instanceof Error ? error.message : "后台连接失败。"; $("claude-error").hidden = false; }
+    finally { refreshing.delete(profileId); await poll(false); }
   }
+  const pad = value => String(value).padStart(2, "0");
+  const day = value => { const date = new Date(value); return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`; };
+  const moment = value => { const date = new Date(value); return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`; };
+  const windowText = (label, reading) => reading ? `${label}：已用 ${Math.round(reading.utilization * 100)}% · ${moment(reading.resetsAt * 1000)} 重置` : `${label}：未读到`;
+  const text = (tag, className, content) => { const node = document.createElement(tag); if (className) node.className = className; node.textContent = content; return node; };
   function renderClaude() {
     const claude = state.claude;
     $("claude").hidden = !claude;
     if (!claude) return;
-    const selected = claude.profiles.find(p => p.id === claude.selectedId);
-    $("claude-current").textContent = selected
-      ? `当前选用：${selected.email}。之后新开的 Claude lane 用它；已开着的不受影响。`
-      : "未选用：新开的 Claude lane 用本机 /login 的账号。";
-    const rows = [claudeChoice("", "不选用", "新开的 Claude lane 用本机 /login 的账号", !selected)];
-    for (const profile of claude.profiles) {
-      const row = claudeChoice(profile.id, profile.email, `添加于 ${day(profile.createdAt)}`, profile.id === claude.selectedId);
-      const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "删除"; remove.disabled = busy;
+    const rows = claude.profiles.map(profile => {
+      const row = document.createElement("div"); row.className = "claude-profile"; row.dataset.claudeProfile = profile.id;
+      const account = document.createElement("div"); account.className = "claude-account";
+      account.append(text("strong", null, profile.email), text("small", null, `添加于 ${day(profile.createdAt)}`));
+      const usage = document.createElement("div"); usage.className = "claude-usage";
+      if (profile.usage) usage.append(text("span", null, windowText("5 小时", profile.usage.fiveHour)), text("span", null, windowText("7 天", profile.usage.sevenDay)), text("small", null, `检查于 ${moment(profile.usage.checkedAt)}`));
+      else usage.append(text("span", "unread", "未查询"));
+      if (profile.usageError) usage.append(text("p", "error", `最近一次刷新失败（${moment(profile.usageError.at)}）：${describe(profile.usageError.code)}`));
+      const pending = refreshing.has(profile.id) || profile.refreshing;
+      const refresh = text("button", null, pending ? "刷新中…" : "刷新"); refresh.type = "button"; refresh.disabled = pending || busy;
+      refresh.dataset.claudeRefresh = profile.id;
+      refresh.onclick = () => void refreshUsage(profile.id);
+      const remove = text("button", null, "删除"); remove.type = "button"; remove.disabled = pending || busy;
       remove.dataset.claudeDelete = profile.id;
       remove.onclick = () => void claudeAction("/api/claude/profiles/delete", { profileId: profile.id });
-      row.append(remove); rows.push(row);
-    }
+      const actions = document.createElement("div"); actions.className = "claude-actions"; actions.append(refresh, remove);
+      row.append(account, usage, actions);
+      return row;
+    });
     $("claude-profiles").replaceChildren(...rows);
+    $("claude-empty").hidden = claude.profiles.length > 0;
     $("claude-add").disabled = busy; $("claude-submit").disabled = busy;
+    $("claude-refresh-all").disabled = busy || claude.profiles.length === 0;
   }
   async function poll(repeat = true) {
     try { const response = await fetch("/api/state"); if (!response.ok) throw new Error(); state = await response.json(); $("connection").textContent = "本机后台已连接"; render(); }
@@ -151,8 +170,8 @@
       const note = document.createElement("p"); note.textContent = "Company 与 Codex lane 的当前账号尚未核实。"; $("consumers").append(note);
       $("switch").disabled = true; $("add").disabled = true; $("reauthorize").disabled = true;
       $("cancel").hidden = true; $("cancel-login").hidden = true;
-      $("claude-add").disabled = true; $("claude-submit").disabled = true;
-      for (const control of document.querySelectorAll("#claude-profiles input, #claude-profiles button")) control.disabled = true;
+      $("claude-add").disabled = true; $("claude-submit").disabled = true; $("claude-refresh-all").disabled = true;
+      for (const control of document.querySelectorAll("#claude-profiles button")) control.disabled = true;
     }
     if (repeat) setTimeout(() => void poll(), 1000);
   }
@@ -162,6 +181,7 @@
   $("cancel").onclick = () => void action("/api/switch/cancel");
   $("cancel-login").onclick = () => void action("/api/login/cancel");
   $("claude-add").onclick = () => { $("claude-form").hidden = false; $("claude-email").focus(); };
+  $("claude-refresh-all").onclick = () => { for (const profile of state?.claude?.profiles ?? []) void refreshUsage(profile.id); };
   $("claude-form-cancel").onclick = () => { $("claude-email").value = ""; $("claude-token").value = ""; $("claude-form").hidden = true; };
   $("claude-submit").onclick = async () => {
     const email = $("claude-email").value, token = $("claude-token").value;

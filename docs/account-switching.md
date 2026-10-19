@@ -16,7 +16,7 @@ node .\dist\accounts\main.js --codex-exe 'C:\path\to\codex.exe'
 
 后台默认监听 `http://127.0.0.1:47839`，启动时打印实际页面地址。默认数据目录为 `%USERPROFILE%\.lane-router-accounts`，可用 `--root <absolute-path>` 和 `--port <number>` 覆盖。该目录及其祖先不能是符号链接或目录联接。后台拒绝无法限制权限的目录，不自动降低凭据保护要求。
 
-后台在自己的目录内写 `connection.json`。该文件含运行端连接凭据，供同一 Windows 用户的本机后端读取；不能复制到网页、聊天、日志或仓库。Codex 的模型凭据由官方 Codex keyring 保管，不在这个 JSON 中。Claude 账号的 setup token 存在同一受限目录的 `claude-profiles.json` 与 `claude-launch.json` 里（Claude Code 没有可供后台使用的 keyring），见下文「Claude lane 账号」。
+后台在自己的目录内写 `connection.json`。该文件含运行端连接凭据，供同一 Windows 用户的本机后端读取；不能复制到网页、聊天、日志或仓库。Codex 的模型凭据由官方 Codex keyring 保管，不在这个 JSON 中。Claude 账号的 setup token 存在同一受限目录的 `claude-profiles.json` 里（Claude Code 没有可供后台使用的 keyring），只用来读各账号的余量，见下文「Claude 账号余量」。
 
 ### 持续运行与故障恢复
 
@@ -58,36 +58,37 @@ Company 使用它的接入候选，将同一路径传给 `startCompanyRouter({ a
 
 不要在已接入运行端的 TUI 中单独执行登录或登出。统一账号模式会拒绝这些入口以及普通客户端的令牌导出请求。独立启动、没有接入 Router 的 CLI 不在统一切换范围内。
 
-## Claude lane 账号（下次打开时生效）
+## Claude 账号余量
 
-账号页下方的「Claude lane」一节为之后新开的 Claude lane 选账号。它和上面的 Codex 同步切换是两件事，各选各的：Codex 在线切换正在运行的会话；Claude 只在开窗口那一刻换号。
+账号页下方的「Claude 账号余量」一节列出已添加的 Claude 账号，以及每个账号 5 小时窗口与 7 天窗口各用掉了多少、何时重置、何时读的。它只显示，不切换：Claude Code 没有从外部给运行中的会话换号的办法，要换号就在 lane 窗口里 `/login`。
 
-为什么只能在开窗口时换：Claude 的 refresh token 每次刷新都会轮换，旧的再用会被拒，而且 Claude 会把凭据文件清空（2026-10-19 探测）。所以后台不能靠改写共享的 `~\.claude\.credentials.json` 来切号。`claude setup-token` 生成的一年期 OAuth token 不轮换，经环境变量 `CLAUDE_CODE_OAUTH_TOKEN` 交给会话；Claude 只在会话启动时读这个变量。
-
-1. 对每个要用的 Claude 账号，在终端运行一次 `claude setup-token`，在打开的浏览器页面授权，复制它输出的 token（以 `sk-ant-oat` 开头）。
+1. 对每个要看的 Claude 账号，在终端运行一次 `claude setup-token`，在打开的浏览器页面授权，复制它输出的 token（以 `sk-ant-oat` 开头）。
 2. 在账号页点「添加 Claude 账号」，填一个邮箱（只用来在页面上区分账号，后台不核对）并粘贴 token，点「保存」。token 只在这一次请求里经过网页，页面和 `/api/state` 都不再含它。
-3. 选中一个账号。之后从任何入口新开的 Claude lane 都用它：`lane-router-lane new` / `open`、看板「打开」与 `lane_restore_project`、`lane-router-rotate`。终端里会先打印一行 `lane 账号：<邮箱>（来自账号页的选择）`。
-4. 选「不选用」后，新开的 Claude lane 回到本机 `/login` 的账号。
+3. 点账号行的「刷新」（或「全部刷新」）。后台用该账号跑一次极小的非交互会话，几秒后这一行显示读数。没读过的账号显示「未查询」。
+
+读法：后台以该账号运行 `claude -p "Reply with exactly the single word ok" --model haiku --output-format stream-json --verbose`，从输出里最后一个 `rate_limit_event` 的 `rate_limit_info.unifiedWindows.{five_hour,seven_day}.{utilization,resetsAt}` 取数。这个会话：
+
+- token 经 `CLAUDE_CODE_OAUTH_TOKEN` 传入，`CLAUDE_CONFIG_DIR` 指向后台受限目录里该账号自己的 `claude-config\<账号 id>`，工作目录也是它，**不读写用户的 `~\.claude`**。
+- 后台进程自己继承的 `CLAUDE*` 变量与 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 都不传给它，免得读到别的账号。
+- 程序用 `CLAUDE_EXE` 指定；没指定时用 `%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe`（PATH 上的 `claude` 是 `.cmd`，后台不经 shell 启动不了它）。
+- 2 分钟没结束就终止，记为超时。
 
 边界：
 
-- 已开着的 lane 不换号，关掉重开才换。要所有会话立刻换，仍在任一窗口 `/login`。
-- **行为变化：** 选中 Claude 账号后，新开的 lane 不再跟随共享凭据文件。在某个窗口里 `/login` 只影响用共享文件的会话，不影响带 token 打开的 lane。
-- token 一年到期。页面不提醒到期；到期后 Claude 会在开 lane 时报认证错误，重跑 `claude setup-token`，删掉旧账号再添加新的。
-- 后台不校验 token 是否有效：校验要真发一次模型请求。无效的 token 在第一次用它开 lane 时由 Claude 报错。
-- Linux 虚拟机上的 lane 不经过本机开窗，不受这里影响，仍用虚拟机上的 `/login`。
-- Codex 与 ZCode 窗口不注入这个变量。
+- 每次刷新花该账号一点点额度，所以只在点按钮时读，不定时轮询。同一账号已在读时再点不会重复发起。
+- 余量字段来自 Claude Code 非交互输出，**不在官方稳定接口清单里**；CLI 升级可能改格式，读不到时这一行显示「没有余量信息」，需要跟着改读法。
+- 读失败（token 失效、超时、找不到 claude）只记在该账号上，保留它上一次成功的读数，不影响别的账号。
+- token 一年到期。页面不提醒到期；到期后刷新会报错，重跑 `claude setup-token`，删掉旧账号再添加新的。
+- 删除账号会一并删掉它的 `claude-config` 目录。
 
-存储与读取：
+存储：
 
-| 文件（都在后台的受限数据目录） | 内容 | 读者 |
-|---|---|---|
-| `claude-profiles.json` | `{ version: 1, selectedId, profiles: [{ id, email, token, createdAt }] }` | 账号后台 |
-| `claude-launch.json` | 当前选中账号的 `{ version: 1, email, token }`；没选中时不存在 | 每个 Claude lane 窗口的 terminal child |
+| 位置（都在后台的受限数据目录） | 内容 |
+|---|---|
+| `claude-profiles.json` | `{ version: 1, selectedId: null, profiles: [{ id, email, token, createdAt, usage?, usageError? }] }`。`usage` 是最近一次成功读数，`usageError` 是此后最近一次失败。`selectedId` 恒为 `null`，只为让 2026-10-19 那版仍能读这个文件 |
+| `claude-config\<账号 id>\` | 读余量时该账号的 Claude 配置目录 |
 
-两份文件都用与 `connection.json` 相同的 owner + SYSTEM ACL 原子写出。`claude-profiles.json` 里的选中项是准：后台每次启动、每次选中或删除时，都按它重写或删除 `claude-launch.json`。
-
-开窗进程直接读 `claude-launch.json`，不经 HTTP 问后台，所以后台停着时 lane 照样能开，用的是最后一次选中的账号。它和 Router 用同样的方式找连接文件：先看 `LANE_ROUTER_ACCOUNTS_CONNECTION`，再看 Router 配置（`LANE_ROUTER_CONFIG`，否则 `<数据目录>\config.json`）里的 `accounts.connectionFile`；启动文件取连接文件所在目录。两处都没写时不找启动文件，一切照旧。启动文件读不了或格式不对时也照旧，并在终端打印一行原因（不含文件内容）。token 只进 Claude 进程的环境变量，不写状态文件、不进日志、不进开窗请求。
+文件用与 `connection.json` 相同的 owner + SYSTEM ACL 原子写出。2026-10-19 曾有一版在开 Claude 窗口时按页面上选中的账号注入 token（`d93c8fa`），因只对新开窗口生效、帮不上「工作到一半换号」而回退。那一版留下的 `claude-launch.json` 在后台启动时删除，它保存的账号原样留用。
 
 后台要重启到含此功能的构建，页面才有这一节。
 

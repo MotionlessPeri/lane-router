@@ -2,6 +2,8 @@
 
 **状态：** 需求与设计合一稿，2026-10-19 由 `lane-router/design` 起草。用户在议题看板上决定「做」（议题 `f0118f0b`，2026-10-19）。实施归 `lane-router/impl`，第五节是验收标准。
 
+> **2026-10-19 修订（取代本稿「开窗口注入账号」部分）：** 已部署后用户指出主场景是「工作到一半切账号」，本稿只对新开窗口生效，帮不上；Claude Code 没有外部可调的运行时换号，运行中的 lane 只能在窗口里 `/login`。用户决定回退开窗注入，保留已注册的 Claude 账号，改作「看各账号余量」。新范围见文末「修订：回退开窗注入，改为按账号查余量」一节（议题 `f0118f0b`、`aafc6005`）。
+
 ## 术语表
 
 | 词 | 含义 |
@@ -123,3 +125,43 @@ HTTP（与现有端点同守卫：`Host` 核对、`Origin` 同源、`X-Account-A
 - token 一年到期要用户重跑 `setup-token` 再粘一次；页面不提醒到期（文档写明）。
 - VM 上的 lane 不在本稿内。
 - 账号后台要重启到新构建才有新接口；重启时机归用户，部署由 design 安排。
+
+## 修订：回退开窗注入，改为按账号查余量（2026-10-19，用户确认）
+
+一、二、三节的「开窗口注入账号」实现已在 master（commit `d93c8fa`）并部署过。用户主场景是「工作到一半切账号」，本实现只对新开窗口生效，帮不上；运行中的 lane 只能 `/login`（Claude Code 无外部运行时换号）。用户决定回退，改成「看各账号余量，自己去 `/login`」。
+
+### 回退哪些、保留哪些
+
+| 对象 | 处置 |
+|---|---|
+| `src/process/terminal-child.ts` 的账号注入（读启动文件、设 `CLAUDE_CODE_OAUTH_TOKEN`） | **回退**。terminal-child 回到 `d93c8fa` 之前的行为，逐字还原；保留 impl 顺带做的 `runTerminalChild` 可测试化拆分（如果它独立于注入；不独立就一并还原，以「不注入账号」为准） |
+| `claude-launch.json` 的写 / 删，及其在 terminal-child 的读取 | **删除**。不再有「选中账号」这个概念，也不写启动文件 |
+| 账号页「选用 / 取消选用」`POST /api/claude/select` | **删除** |
+| Router `~/.lane-router/config.json` 的 `accounts.connectionFile` | design 部署时清理（已是 design 加的，不在 impl 范围） |
+| `claude-profiles.json`、添加 / 删除账号（`POST /api/claude/profiles`、`/api/claude/profiles/delete`）、`/api/state` 的 `claude` 节 | **保留**，但去掉 `selectedId`。账号从「切号目标」变成「查余量的对象」。已注册的 pub.staff / jack.ge / xiedong 三个 setup-token 原样留用 |
+
+### 新增：按账号查余量
+
+- 账号页 Claude 节每个账号一行，显示该账号最近一次读到的:5 小时窗口已用百分比 + 重置时间、7 天窗口已用百分比 + 重置时间、最后检查时间。没读过显示「未查询」。
+- 每行一个「刷新」按钮（可加一个「全部刷新」）。点刷新 → `POST /api/claude/usage/refresh {profileId}` → 后台用该账号的 token 跑一次**极小**的非交互会话读出余量。
+- 读法（已实测 2026-10-19）：在隔离环境里用该账号跑
+  `claude -p "Reply with exactly the single word ok" --model haiku --output-format stream-json --verbose`，
+  环境设 `CLAUDE_CODE_OAUTH_TOKEN=<该账号 token>` 且 `CLAUDE_CONFIG_DIR=<每账号一个隔离目录>`（不要用 `~/.claude`，免得动用户在用的登录）。输出里有一行 `type":"rate_limit_event"`，其 `rate_limit_info.unifiedWindows.{five_hour,seven_day}.{utilization,resetsAt}` 就是要的数据（`utilization` 0–1，`resetsAt` Unix 秒）。读完把这次读数存进账号记录（`claude-profiles.json` 或旁边的 usage 文件），页面显示存的值。
+- 手动刷新，不做后台定时轮询（每次花该账号一点点额度，用户已同意）。
+- token 只进那次子进程的环境,不进日志 / 响应 / 页面。读数(百分比、时间)是公开字段,可进 `/api/state`。
+
+### 验收（取代上面第五节，Claude 账号部分）
+
+1. 账号仍可添加 / 删除;`/api/state` 的 `claude` 节列账号,**没有** `selectedId`,响应不含 token。
+2. terminal child 在有 / 无账号后台两种情况下,开 Claude 窗口的子进程环境与 `d93c8fa` 之前**逐字相同**(不再设 `CLAUDE_CODE_OAUTH_TOKEN`);codex / zcode 不受影响。不再读写 `claude-launch.json`。
+3. `POST /api/claude/usage/refresh {profileId}` 用该账号跑一次极小会话,解析出两个窗口的 utilization 与 resetsAt,存进账号记录;再 `GET /api/state` 能读到这次读数与「最后检查时间」。token 不出现在响应、日志、页面。坏 token / 读失败 → 该账号记一个错误态,不影响别的账号。
+4. 每个账号用独立的 `CLAUDE_CONFIG_DIR`(账号后台私有目录下),绝不读写用户的 `~/.claude`。
+5. 页面:每账号一行显示两窗口百分比、重置时间、最后检查时间、刷新按钮;happy-dom 断言页面不含 token。
+6. 现有 Codex 切换测试不改不删;`npm test` / `typecheck` / `build` 全过。
+7. 真机:对三个已注册账号各点一次刷新,读到百分比与重置时间;记入 `docs/manual-tests.md`。
+
+### 边界
+
+- 余量字段来自 Claude Code 非交互输出,**不在官方稳定接口清单**,版本升级可能变,变了要跟着改(文档写明)。
+- Codex 的余量:用户家里机器已实现,等那边推上来再合,本次不做。
+- 读余量按账号隔离目录跑,首次对某账号跑会在该隔离目录建一份它的登录态(来自 setup-token);这不动 `~/.claude`。

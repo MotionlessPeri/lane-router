@@ -24,7 +24,8 @@ export async function startAccountService(options: { root: string; executable: s
   const connectionFile = join(root, "connection.json");
   try {
     await accounts.initialize();
-    // Before the page opens, so the launch file already agrees with the saved selection.
+    // Before the page opens, so a launch file left by the build that wrote them is already gone.
+    // Readings run the CLI found by `CLAUDE_EXE`, else the npm package's own binary.
     const claude = new ClaudeProfiles({ root });
     await claude.initialize();
     const service = new AccountSwitchService({ source: accounts, expected: ["router", "company"], desired: accounts.desiredProfileId, saveDesired: id => accounts.saveDesired(id) });

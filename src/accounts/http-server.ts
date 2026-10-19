@@ -14,12 +14,12 @@ interface AccountPageSource {
   cancelLogin(): Promise<void>;
 }
 
-/** Claude accounts for lanes opened from now on. Every answer is token-free by contract. */
+/** Claude accounts and what each has left. Every answer is token-free by contract. */
 interface ClaudeAccountSource {
   listPublic(): unknown;
   add(email: string, token: string): Promise<unknown>;
-  select(profileId: string | null): Promise<unknown>;
   remove(profileId: string): Promise<unknown>;
+  refreshUsage(profileId: string): Promise<unknown>;
 }
 
 /** The body fields each write route takes; anything else in a body refuses the request. */
@@ -31,8 +31,8 @@ const ROUTE_FIELDS: Readonly<Record<string, readonly string[]>> = {
 };
 const CLAUDE_ROUTE_FIELDS: Readonly<Record<string, readonly string[]>> = {
   "/api/claude/profiles": ["email", "token"],
-  "/api/claude/select": ["profileId"],
   "/api/claude/profiles/delete": ["profileId"],
+  "/api/claude/usage/refresh": ["profileId"],
 };
 
 export class AccountHttpServer {
@@ -138,10 +138,15 @@ export class AccountHttpServer {
           if (typeof fields.email !== "string" || typeof fields.token !== "string") throw new AccountError("INVALID_REQUEST");
           json(200, { claude: await claude!.add(fields.email, fields.token) }); return;
         }
-        case "/api/claude/select": json(200, { claude: await claude!.select(profileId ?? null) }); return;
         case "/api/claude/profiles/delete": {
           if (!profileId) throw new AccountError("INVALID_REQUEST");
           json(200, { claude: await claude!.remove(profileId) }); return;
+        }
+        // Answered when the reading is in, a few seconds later; a failed reading is part of the
+        // state answered, not an error of this request.
+        case "/api/claude/usage/refresh": {
+          if (!profileId) throw new AccountError("INVALID_REQUEST");
+          json(200, { claude: await claude!.refreshUsage(profileId) }); return;
         }
       }
       json(202, { accepted: true });
