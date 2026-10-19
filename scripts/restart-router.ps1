@@ -108,15 +108,23 @@ if ($null -ne $hostProcess -and $PSCmdlet.ShouldProcess("Codex host PID $($hostP
 
 function Invoke-Ensure([string]$module, [string]$function, [string]$label) {
     Push-Location -LiteralPath $laneRouterRoot
+    # Under "Stop", the first line node writes to stderr becomes a terminating error and the rest
+    # of the reason is lost; the exit code below is what decides failure.
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {
         # The data root travels as an argument, not inside the code: Windows PowerShell mangles
-        # double quotes embedded in a native command's arguments.
-        $output = @(& node --input-type=module -e "import { $function } from './dist/process/$module'; console.log(JSON.stringify(await $function({ dataRoot: process.argv[1] })));" $laneRouterDataRoot 2>&1)
-        if ($LASTEXITCODE -ne 0) {
-            throw "$label failed to start:`n$($output -join [Environment]::NewLine)"
-        }
+        # double quotes embedded in a native command's arguments. 60 s rather than the 15 s default:
+        # a Router on a loaded machine has taken 15 s to publish discovery (2026-10-19), and a
+        # restart that worked must not be reported as failed.
+        $output = @(& node --input-type=module -e "import { $function } from './dist/process/$module'; console.log(JSON.stringify(await $function({ dataRoot: process.argv[1], timeoutMs: 60000 })));" $laneRouterDataRoot 2>&1)
+        $exitCode = $LASTEXITCODE
     } finally {
+        $ErrorActionPreference = $previousPreference
         Pop-Location
+    }
+    if ($exitCode -ne 0) {
+        throw "$label failed to start:`n$($output -join [Environment]::NewLine)"
     }
     $line = $output | Where-Object { $_.ToString().Trim().Length -gt 0 } | Select-Object -Last 1
     try {
