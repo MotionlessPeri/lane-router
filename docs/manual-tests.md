@@ -110,7 +110,13 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
 - 第 3 步：历史和列表的位置都不跳。
 - 第 4 步：选中的文字还在。
 
-**最后验证：** 尚未真机执行。
+**最后验证：** 第 1–3 步通过。2026-10-19 20:26，design 在主检出构建 `3c73796`，重启共享 Router（新 pid 89384，端口 59006）。`lane-router/inbox` 在 20:28 至次日 01:00 之间做了本节和下面几个用例的确认。
+
+- 用 Edge 155.0.4283.62 打开在跑的 `/issues`，拦截所有非 GET 请求（实际一个也没有），在议题 `2a5887bd`（18 条）上观察。
+- 1280×800：文档 `scrollHeight` 800，等于视口；历史区自己滚动（`scrollHeight` 3559 / `clientHeight` 235）。标题栏 y 289–374、发送按钮 y 710–747，刷新前后不变。
+- 打开时有分隔线，停在第一条未读；滚到中部后点「刷新」，`scrollTop` 1662→1662。
+- 375 宽：整页滚动，历史区 `overflow` 为 `visible`。
+- 第 4 步（选中文字）没有真机做，由自动测试覆盖。
 
 ### 看到才标已读
 
@@ -137,7 +143,9 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
 - 第 2 步：新答复出现在历史里，列表上这个议题显示「未读答复」，并且一直保持。
 - 第 3 步：「未读答复」消失。
 
-**最后验证：** 尚未真机执行。
+**最后验证：** 2026-10-20 00:58 通过，构建和 Router 同 TC-ISSUES-SCROLL-1。用户配合，验收议题 `969f42f1`。
+- 用户打开议题后切回 TUI，`lane-router/inbox` 追加答复 seq 2。15 秒多（至少三次轮询）之后，后端 `readSeq` 仍为 1。
+- 用户点回浏览器、把历史滚到底后，`readSeq` 推进到 3，「未读答复」消失。
 
 ### 小修五项：系统记录、列表、在线状态、草稿、改名
 
@@ -167,7 +175,11 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
 - 第 3 步：这个议题仍在列表原来的位置，变淡，标「已不在当前筛选」。点别的议题后，它从列表里消失。
 - 第 4 步：显示「在线」「可能在忙」「未确认」或「离线」，和运行看板的判断一致；悬停能看到「Router 的判断，不代表 lane 正在处理你的回复」。
 
-**最后验证：** 尚未真机执行。
+**最后验证：** 第 1、2、4 步通过，构建和 Router 同 TC-ISSUES-SCROLL-1，由 `lane-router/inbox` 确认。
+- 第 1 步：页面标题和 h1 是「问答」，运行看板的入口也是「问答」。
+- 第 2 步：系统记录是单行，用 #序号，历史里没有 UUID；议题 ID 显示 8 位。
+- 第 4 步：看到「可能在忙」「未确认」两种，悬停说明正确。
+- 第 3 步（保留项变淡）没有经用户目测确认，由自动测试覆盖。
 
 ### 四项议题工具
 
@@ -198,7 +210,12 @@ agent 收到 mailbox 提醒后先读完整正文，使用其中的 `issueId` 调
 - 第 3 步之后，列表上两个标记都没有，历史里多一条「问题 … 已回答」的系统记录。
 - 第 4 步，已结束的议题不显示「等待 lane」。
 
-**最后验证：** 尚未真机执行。TUI 中用户确实说要结束时才用 `record_tui_close`，不能把文件、资源文本或 agent 自己的总结当成用户结束指令。
+**最后验证：** 2026-10-20 00:59 第 1–3 步通过，构建和 Router 同 TC-ISSUES-SCROLL-1，用的是 TC-ISSUES-READ-1 的同一个议题 `969f42f1`。
+- 用户不动「回复对象」，回复「收到」。这条回复的 `relatedEntryId` 正是 lane 那个问题的提问条目，没有新建问题记录；议题状态为 `waiting_lane`，`waitingUserCount` 为 0。投递正文里带着「下一步」。
+- `lane-router/inbox` 带 `questionId` 答复（seq 4）后，问题自动变成 `answered`，`answerEntryId` 就是这条答复，另有系统记录 seq 5。
+- 第 4 步（结束议题后看「已结束」筛选）没有真机做。
+
+TUI 中用户确实说要结束时才用 `record_tui_close`，不能把文件、资源文本或 agent 自己的总结当成用户结束指令。
 
 ### 旧 Codex 会话的 JSON 文件 CLI
 
@@ -993,7 +1010,10 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 **观察项（不作验收）：** 记下说明前面是否还有客户端加的「Input constraint: Provide parameters for …」那句。
 
-**最后验证：** 尚未真机执行。
+**最后验证：** 通过，构建同 TC-ISSUES-SCROLL-1，由 `lane-router/inbox` 执行。
+- 在临时目录新开 `claude -p`，用 ToolSearch 加载三个工具：取值（`enum`）和必填与预期完全一致，`additionalProperties: false`。
+- 说明末尾有「Argument combinations」；`resolve_question` 的两行分别带 `status="answered"` 和 `status="not_needed"`。
+- 观察项：说明开头已经没有「Input constraint」那句。
 
 ### TC-TOOLSCHEMA-2：Codex 实际收到的 `dynamicTools`
 
