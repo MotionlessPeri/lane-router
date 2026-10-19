@@ -4,20 +4,24 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { ensureRouter } from "./ensure-router.js";
+import { ensureCodexHost, type CodexHostDiscovery } from "./ensure-codex-host.js";
 import { profileModelProvider } from "./codex-profiles.js";
 import type { RouterDiscovery } from "./local-server.js";
 
 interface LauncherDependencies {
   readonly ensure: (options?: { readonly dataRoot?: string }) => Promise<RouterDiscovery>;
+  readonly ensureHost?: (options?: { readonly dataRoot?: string }) => Promise<CodexHostDiscovery>;
   readonly spawnTui: (executable: string, args: readonly string[]) => Promise<number>;
   readonly resolveModelProvider?: (profile: string) => string;
-  readonly resolveProviderEndpoint?: (routerUrl: string, modelProvider: string, profile?: string, persistStartup?: boolean) => Promise<string>;
+  readonly resolveProviderEndpoint?: (hostUrl: string, modelProvider: string, profile?: string, persistStartup?: boolean) => Promise<string>;
 }
 
 /**
- * Start stock Codex against the Router-owned remote endpoint.
+ * Start stock Codex against the Codex host's remote endpoint. The Router is ensured first, as
+ * before, so lane tools work from the first turn; the host is ensured second and owns the endpoint,
+ * which is what lets the conversation outlive a Router restart.
  * @param args Optional declared model and profile followed by either a prompt or one Router-owned thread ID.
- * @param dependencies Router discovery and TUI process boundaries.
+ * @param dependencies Router and host discovery, and the TUI process boundary.
  * @returns The stock Codex process exit code without rewriting CLI errors.
  */
 export async function launchCodex(args: readonly string[], dependencies: LauncherDependencies = defaults): Promise<number> {
@@ -39,17 +43,18 @@ export async function launchCodex(args: readonly string[], dependencies: Launche
   const resume = remaining.length === 2 && remaining[0] === "resume" && remaining[1] ? remaining : undefined;
   if (remaining.length !== 0 && !prompt && !resume) throw new Error(usage);
   const inheritedDataRoot = process.env.LANE_ROUTER_DATA_ROOT;
-  const discovery = inheritedDataRoot === undefined
-    ? await dependencies.ensure()
-    : await dependencies.ensure({ dataRoot: inheritedDataRoot });
+  const scope = inheritedDataRoot === undefined ? undefined : { dataRoot: inheritedDataRoot };
+  await (scope === undefined ? dependencies.ensure() : dependencies.ensure(scope));
+  const ensureHost = dependencies.ensureHost ?? ensureCodexHost;
+  const host = await (scope === undefined ? ensureHost() : ensureHost(scope));
   const environmentalProvider = process.env.LANE_ROUTER_CODEX_MODEL_PROVIDER;
   const modelProvider = profile === undefined && environmentalProvider === undefined
     ? undefined
     : environmentalProvider ?? (profile === undefined ? undefined : (dependencies.resolveModelProvider ?? profileModelProvider)(profile));
   const persistStartup = process.env.LANE_ROUTER_CODEX_TRANSIENT_STARTUP !== "1";
   const remote = modelProvider === undefined
-    ? discovery.codexEndpoint
-    : await (dependencies.resolveProviderEndpoint ?? postProviderEndpoint)(discovery.url, modelProvider, profile, persistStartup);
+    ? host.codexEndpoint
+    : await (dependencies.resolveProviderEndpoint ?? postProviderEndpoint)(host.url, modelProvider, profile, persistStartup);
   const modelArgs = model === undefined ? [] : ["--model", model];
   const profileArgs = profile === undefined ? [] : ["--profile", profile];
   const tuiArgs = resume
@@ -67,8 +72,8 @@ const defaults: LauncherDependencies = {
   }),
 };
 
-async function postProviderEndpoint(routerUrl: string, modelProvider: string, profile?: string, persistStartup = true): Promise<string> {
-  const response = await fetch(`${routerUrl}/codex/provider-endpoint`, {
+async function postProviderEndpoint(hostUrl: string, modelProvider: string, profile?: string, persistStartup = true): Promise<string> {
+  const response = await fetch(`${hostUrl}/codex/provider-endpoint`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -80,9 +85,9 @@ async function postProviderEndpoint(routerUrl: string, modelProvider: string, pr
   const body = await response.json().catch(() => undefined) as { endpoint?: unknown; error?: unknown } | undefined;
   if (response.ok && typeof body?.endpoint === "string") return body.endpoint;
   if (response.status === 404) {
-    throw new Error(`The running Lane Router does not support model provider endpoints; restart it after updating lane-router (provider ${modelProvider})`);
+    throw new Error(`The running Codex host does not support model provider endpoints; restart it with scripts/restart-router.ps1 -CodexHost (provider ${modelProvider})`);
   }
-  throw new Error(`Lane Router rejected model provider ${modelProvider}: ${String(body?.error ?? response.status)}`);
+  throw new Error(`The Codex host rejected model provider ${modelProvider}: ${String(body?.error ?? response.status)}`);
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {

@@ -1,11 +1,10 @@
-import { CodexBackend } from "../../backends/codex-backend.js";
-import type { RouterStateStore } from "../../router/state-store.js";
 import { LANE_ROUTER_INSTRUCTIONS } from "../../tools/tool-contract.js";
 import type { CallerContext } from "../../router/types.js";
 import type { ToolCatalog } from "../../application/tool-catalog.js";
 import { AppServerClient } from "./app-server-client.js";
-import { CodexAppServerProcess, CodexCapabilityGate, type CodexCommand } from "./app-server-process.js";
+import { CodexAppServerProcess, CodexCapabilityGate, type CodexCommand, type CodexProcessState } from "./app-server-process.js";
 import { CodexDynamicToolDispatcher, codexDynamicTools } from "./dynamic-tools.js";
+import { CODEX_HOST_PROTOCOL_VERSION, CORE_APP_SERVER_METHODS, type HostHello } from "./host-protocol.js";
 import type { DynamicToolCallParams } from "./protocol.js";
 import { AccountSwitchGate, type AccountRequestFinish } from "../../accounts/switch-gate.js";
 import { AccountConsumer } from "../../accounts/consumer.js";
@@ -13,31 +12,47 @@ import { AccountError } from "../../accounts/contracts.js";
 
 export interface CodexProcessControl {
   readonly client: AppServerClient;
+  readonly state?: CodexProcessState;
   start(): Promise<string>;
   shutdown(): Promise<void>;
   onReconnect(handler: (event?: { strategy?: string }) => void): () => void;
 }
 
+/**
+ * What the host needs from the Router core. Every call is allowed to fail at once: when the core
+ * is not there, a lane tool must say so immediately rather than hold the model's turn open.
+ */
+export interface CodexCoreLink {
+  callTool(name: string, args: Record<string, unknown>, context: CallerContext): Promise<unknown>;
+  ownsThread(threadId: string): Promise<boolean>;
+  /** Fire-and-forget; dropped while the core is away, and made good by the next hello. */
+  event(method: string, params: Record<string, unknown>): void;
+}
+
+type ThreadStartup = Readonly<{ profile?: string; modelProvider?: string; transient?: boolean }>;
+
+/** The notifications the core's Codex backend acts on; nothing else is worth a frame. */
+const CONSUMED_NOTIFICATIONS = new Set(["turn/completed", "thread/status/changed"]);
+
+/**
+ * The Codex side of the host process: the App Server's owner, the account consumer that has to
+ * sit on that owner's connection, and the per-thread facts only the bridge sees. Everything that
+ * needs Router state — lane bindings, tools, mailboxes — is asked of the core over the link.
+ */
 export class CodexRuntime {
   readonly client: AppServerClient;
-  readonly backend: CodexBackend;
   readonly dynamicTools: ReturnType<typeof codexDynamicTools>;
   readonly accountGate?: AccountSwitchGate;
   private readonly accountConsumer?: AccountConsumer;
   private readonly dispatcher: CodexDynamicToolDispatcher;
-  private readonly ownedThreads = new Set<string>();
+  private readonly claims = new Map<string, { cwd?: string; startup?: ThreadStartup }>();
   private readonly visibleClients = new Map<string, number>();
-  private readonly threadCwds = new Map<string, string>();
-  private readonly threadStartups = new Map<string, Readonly<{ profile?: string; modelProvider?: string; transient?: boolean }>>();
-  private unsubscribeRequest?: () => void;
-  private unsubscribeReconnect?: () => void;
-  private unsubscribeTransport?: () => void;
+  private unsubscribers: Array<() => void> = [];
   private running = false;
   endpoint = "";
 
   constructor(private readonly options: {
-    readonly state: RouterStateStore;
-    readonly callTool: (name: string, args: Record<string, unknown>, context: CallerContext) => unknown | Promise<unknown>;
+    readonly core: CodexCoreLink;
     readonly catalog?: ToolCatalog;
     readonly process: CodexProcessControl;
     readonly accountConnectionFile?: string;
@@ -47,43 +62,41 @@ export class CodexRuntime {
     if (options.accountConnectionFile) {
       this.accountGate = new AccountSwitchGate({
         request: (method, params) => this.client.request(method, params),
-        onRelease: () => this.backend.reportReconnect(this.knownThreadIds()),
+        onRelease: () => this.offerOpportunity(),
       });
       this.accountConsumer = new AccountConsumer({
         id: "router", connectionFile: options.accountConnectionFile, gate: this.accountGate,
         request: (method, params) => this.client.request(method, params),
       });
     }
-    this.backend = new CodexBackend({
-      client: {
-        request: (method, params) => this.accountGate
-          ? this.accountGate.request(method, () => this.client.request(method, params))
-          : this.client.request(method, params),
-        isConnected: () => this.client.isConnected(),
-        onNotification: handler => this.client.onNotification(handler),
-      },
-      resolveLane: (threadId) => options.state.activeBindingForConversation("codex", threadId)?.laneAddress,
-      hasVisibleClient: (threadId) => (this.visibleClients.get(threadId) ?? 0) > 0,
-    });
+    // Ownership is this host's claims alone: every thread its App Server runs a turn for was
+    // started or resumed through one of its bridges, which is exactly when a claim is made.
     this.dispatcher = new CodexDynamicToolDispatcher({
-      ownsThread: (threadId) => this.ownsThread(threadId),
-      cwdForThread: (threadId) => this.threadCwds.get(threadId) ?? startupCwd(this.options.state.activeBindingForConversation("codex", threadId)),
-      startupForThread: (threadId) => this.threadStartups.get(threadId),
-      call: options.callTool,
+      ownsThread: (threadId) => this.claims.has(threadId),
+      cwdForThread: (threadId) => this.claims.get(threadId)?.cwd,
+      startupForThread: (threadId) => this.claims.get(threadId)?.startup,
+      call: (name, args, context) => options.core.callTool(name, args, context),
       catalog: options.catalog,
     });
   }
 
   async start(): Promise<string> {
     if (this.running) return this.endpoint;
-    this.unsubscribeRequest = this.client.onServerRequest((request) => request.method === "account/chatgptAuthTokens/refresh"
-      ? this.refreshAccount(request.params)
-      : this.dispatcher.dispatch(request.params));
-    this.unsubscribeTransport = this.client.onTransportLoss(() => this.accountConsumer?.runtimeChanged());
-    this.unsubscribeReconnect = this.options.process.onReconnect(event => {
-      this.accountConsumer?.runtimeChanged(event?.strategy === "respawned");
-      this.backend.reportReconnect(this.knownThreadIds());
-    });
+    this.unsubscribers = [
+      this.client.onServerRequest((request) => request.method === "account/chatgptAuthTokens/refresh"
+        ? this.refreshAccount(request.params)
+        : this.dispatcher.dispatch(request.params)),
+      this.client.onNotification((message) => this.observeNotification(message.method, message.params)),
+      this.client.onTransportLoss(() => {
+        this.accountConsumer?.runtimeChanged();
+        this.options.core.event("appServer", { state: "recovering" });
+      }),
+      this.options.process.onReconnect((event) => {
+        this.accountConsumer?.runtimeChanged(event?.strategy === "respawned");
+        this.options.core.event("appServer", { state: "ready" });
+        this.offerOpportunity();
+      }),
+    ];
     try {
       this.endpoint = await this.options.process.start();
       this.accountConsumer?.start();
@@ -96,7 +109,7 @@ export class CodexRuntime {
   }
 
   async stop(): Promise<void> {
-    if (!this.running && !this.unsubscribeRequest && !this.unsubscribeReconnect) return;
+    if (!this.running && this.unsubscribers.length === 0) return;
     this.running = false;
     this.accountConsumer?.close();
     this.detach();
@@ -108,24 +121,23 @@ export class CodexRuntime {
     return { ...params, dynamicTools: this.dynamicTools, developerInstructions: LANE_ROUTER_INSTRUCTIONS };
   }
 
-  claimThread(threadId: string, cwd?: string, startup?: Readonly<{ profile?: string; modelProvider?: string; transient?: boolean }>): void {
-    this.ownedThreads.add(threadId);
-    if (cwd !== undefined) this.threadCwds.set(threadId, cwd);
-    if (startup !== undefined) this.threadStartups.set(threadId, startup);
+  claimThread(threadId: string, cwd?: string, startup?: ThreadStartup): void {
+    const claim = this.claims.get(threadId) ?? {};
+    if (cwd !== undefined) claim.cwd = cwd;
+    if (startup !== undefined) claim.startup = startup;
+    this.claims.set(threadId, claim);
   }
 
   openThreadClient(threadId: string): void {
-    this.visibleClients.set(threadId, (this.visibleClients.get(threadId) ?? 0) + 1);
+    this.setVisibleClients(threadId, (this.visibleClients.get(threadId) ?? 0) + 1);
   }
 
   closeThreadClient(threadId: string): void {
-    const next = (this.visibleClients.get(threadId) ?? 0) - 1;
-    if (next > 0) this.visibleClients.set(threadId, next);
-    else this.visibleClients.delete(threadId);
+    this.setVisibleClients(threadId, Math.max(0, (this.visibleClients.get(threadId) ?? 0) - 1));
   }
 
-  ownsThread(threadId: string): boolean {
-    return this.ownedThreads.has(threadId) || this.options.state.latestBindingForConversation("codex", threadId) !== undefined;
+  ownsThread(threadId: string): boolean | Promise<boolean> {
+    return this.claims.has(threadId) || this.options.core.ownsThread(threadId);
   }
 
   dispatchTool(request: DynamicToolCallParams): Promise<unknown> {
@@ -144,32 +156,55 @@ export class CodexRuntime {
   }
 
   observeNotification(method: string, params: Readonly<Record<string, unknown>>): void {
-    this.backend.observeNotification({ method, params });
+    if (CONSUMED_NOTIFICATIONS.has(method)) this.options.core.event("observe", { method, params });
   }
 
-  private knownThreadIds(): string[] {
-    return [...new Set([...this.ownedThreads, ...this.options.state.activeBindings("codex").map((binding) => binding.conversationId)])];
+  /**
+   * The core's way into the App Server, for delivering notifications and judging takeovers. Model
+   * requests take the same account gate a TUI's do, so a switch in progress defers a notification
+   * instead of starting a turn under the wrong account.
+   */
+  appServerRequest(method: string, params: unknown): Promise<unknown> {
+    if (!(CORE_APP_SERVER_METHODS as readonly string[]).includes(method)) {
+      return Promise.reject(new Error(`App Server method ${method} is not allowed over the Codex host link`));
+    }
+    return this.accountGate
+      ? this.accountGate.request(method, () => this.client.request(method, params))
+      : this.client.request(method, params);
+  }
+
+  hello(identity: { readonly instanceId: string; readonly pid: number; readonly build: string }): HostHello {
+    const threadIds = [...new Set([...this.claims.keys(), ...this.visibleClients.keys()])];
+    return {
+      protocolVersion: CODEX_HOST_PROTOCOL_VERSION, ...identity,
+      appServer: this.options.process.state ?? (this.running ? "ready" : "stopped"),
+      threads: threadIds.map((threadId) => ({ threadId, visibleClients: this.visibleClients.get(threadId) ?? 0 })),
+    };
+  }
+
+  private setVisibleClients(threadId: string, count: number): void {
+    if (count > 0) this.visibleClients.set(threadId, count);
+    else this.visibleClients.delete(threadId);
+    this.options.core.event("threadClients", { threadId, visibleClients: count });
+  }
+
+  private offerOpportunity(): void {
+    this.options.core.event("opportunity", { threadIds: [...this.claims.keys()] });
   }
 
   private detach(): void {
-    this.unsubscribeRequest?.(); this.unsubscribeRequest = undefined;
-    this.unsubscribeReconnect?.(); this.unsubscribeReconnect = undefined;
-    this.unsubscribeTransport?.(); this.unsubscribeTransport = undefined;
+    for (const unsubscribe of this.unsubscribers) unsubscribe();
+    this.unsubscribers = [];
   }
 }
 
 export function createCodexRuntime(options: {
-  readonly state: RouterStateStore;
-  readonly callTool: (name: string, args: Record<string, unknown>, context: CallerContext) => unknown | Promise<unknown>;
+  readonly core: CodexCoreLink;
   readonly catalog?: ToolCatalog;
   readonly command: CodexCommand;
   readonly capabilityCacheDir: string;
   readonly accountConnectionFile?: string;
 }): CodexRuntime {
   const process = new CodexAppServerProcess({ command: options.command, gate: new CodexCapabilityGate({ cacheDir: options.capabilityCacheDir }) });
-  return new CodexRuntime({ state: options.state, callTool: options.callTool, catalog: options.catalog, process, accountConnectionFile: options.accountConnectionFile });
-}
-
-function startupCwd(binding: ReturnType<RouterStateStore["activeBindingForConversation"]>): string | undefined {
-  return typeof binding?.startup.cwd === "string" ? binding.startup.cwd : undefined;
+  return new CodexRuntime({ core: options.core, catalog: options.catalog, process, accountConnectionFile: options.accountConnectionFile });
 }

@@ -7,7 +7,6 @@ import { LANE_TOOL_NAMES } from "../../src/tools/tool-contract.js";
 function startServer(dashboardState?: (router: DashboardRouter) => unknown) {
   return new LocalRouterServer({
     tools: { call: vi.fn() } as never,
-    codex: { endpoint: "ws://127.0.0.1:1" } as never,
     instanceId: "instance-1",
     ...(dashboardState ? { dashboardState } : {}),
   });
@@ -17,7 +16,6 @@ function startOpenableServer() {
   const dashboardOpen = vi.fn(async () => ({ results: [{ address: "alpha/a", status: "launch_requested" }] }));
   const server = new LocalRouterServer({
     tools: { call: vi.fn() } as never,
-    codex: { endpoint: "ws://127.0.0.1:1" } as never,
     instanceId: "instance-1",
     dashboardState: () => ({ capturedAt: 1, lanes: [], messages: [] }),
     dashboardOpen,
@@ -129,7 +127,6 @@ function startSetServer() {
   const dashboardLaneSets = vi.fn(async () => ({ laneSets }));
   const server = new LocalRouterServer({
     tools: { call: vi.fn() } as never,
-    codex: { endpoint: "ws://127.0.0.1:1" } as never,
     instanceId: "instance-1",
     dashboardState: () => ({ capturedAt: 1, lanes: [], messages: [] }),
     dashboardLaneSets,

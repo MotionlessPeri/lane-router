@@ -5,9 +5,9 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { createCodexRuntime } from "../adapters/codex/codex-runtime.js";
 import { ZcodeDriver } from "../adapters/zcode/driver/driver.js";
 import { ClaudeBackend } from "../backends/claude-backend.js";
+import { CodexBackend } from "../backends/codex-backend.js";
 import { DshBackend, DshChannelHub } from "../backends/dsh-backend.js";
 import { ZcodeBackend } from "../backends/zcode-backend.js";
 import { NativeHostBackend } from "../backends/native-host-backend.js";
@@ -36,8 +36,20 @@ import { openIssuesModule } from "../modules/issues/index.js";
 import { openGraphs } from "../modules/graphs/index.js";
 import { ClaudeChannelHub, LocalRouterServer } from "./local-server.js";
 import { RuntimeLock } from "./runtime-lock.js";
+import { buildId } from "./build-id.js";
+import { CodexHostHub } from "./codex-host-hub.js";
+import { ensureCodexHost } from "./ensure-codex-host.js";
 
-export async function runRouterProcess(options: { dataRoot?: string; nativeHosts?: readonly NativeHostPermit[]; issues?: boolean } = {}): Promise<{ close(): Promise<void> }> {
+/** How many times the core tries to bring up a missing Codex host before leaving it to the launcher. */
+const HOST_ENSURE_ATTEMPTS = 3;
+const HOST_ENSURE_BACKOFF_MS = 2_000;
+
+export async function runRouterProcess(options: {
+  dataRoot?: string; nativeHosts?: readonly NativeHostPermit[]; issues?: boolean;
+  /** Replaces starting the detached Codex host; tests assemble their own host in-process. */
+  ensureCodexHost?: (dataRoot: string) => Promise<unknown>;
+  build?: string;
+} = {}): Promise<{ close(): Promise<void> }> {
   const dataRoot = options.dataRoot ?? process.env.LANE_ROUTER_DATA_ROOT ?? join(homedir(), ".lane-router");
   mkdirSync(dataRoot, { recursive: true });
   const lock = RuntimeLock.acquire(join(dataRoot, "router.lock"));
@@ -97,38 +109,54 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
   let issues: ReturnType<typeof openIssuesModule> | undefined;
   let graphs: ReturnType<typeof openGraphs> | undefined;
   let graphOrigin: string | undefined;
-  let codex: ReturnType<typeof createCodexRuntime> | undefined;
   let server: LocalRouterServer | undefined;
   const discoveryPath = join(dataRoot, "discovery.json");
   let closed = false;
+  // The Codex host lives in its own process and outlives this one: nothing here starts or stops an
+  // App Server. The core only serves the host's link and makes sure some host exists.
+  const hostKeeper = new CodexHostKeeper(() => (options.ensureCodexHost ?? ((root: string) => ensureCodexHost({ dataRoot: root })))(dataRoot));
   const closeResources = async (): Promise<void> => {
     let failure: unknown;
     const attempt = async (work: () => unknown | Promise<unknown>) => { try { await work(); } catch (error) { failure ??= error; } };
+    hostKeeper.stop();
     // Drain module work while core storage and delivery backends are still available.
     await attempt(() => issues?.close());
     await attempt(() => server?.close());
     await attempt(() => graphs?.close());
     await attempt(() => nativeHost?.close());
-    await attempt(() => codex?.stop());
     await attempt(() => zcodeDriver?.shutdown());
     try { database.close(); } finally { lock.release(); }
     if (failure !== undefined) throw failure;
   };
   try {
     const dshToken = loadDshHostToken(dataRoot);
-    codex = createCodexRuntime({
-      state, catalog,
-      callTool: (name, args, context) => {
+    let codexBackend: CodexBackend | undefined;
+    const codexHub = new CodexHostHub({
+      state, build: options.build ?? buildId(),
+      callTool: (name, args, context, signal) => {
         if (!applicationTools) throw new Error("Router tools are not ready");
-        return applicationTools.call(name, args, context);
+        return applicationTools.call(name, args, context, signal);
       },
-      command: { executable: process.env.CODEX_EXE ?? "codex" },
-      capabilityCacheDir: join(dataRoot, "cache"),
-      accountConnectionFile: process.env.LANE_ROUTER_ACCOUNTS_CONNECTION ?? configuration.config.accounts?.connectionFile,
+      opportunity: (threadIds) => codexBackend?.reportReconnect(threadIds),
+      onHostLost: () => hostKeeper.ensure(),
+      log: (line) => process.stderr.write(`${line}\n`),
     });
-    await codex.start();
-    const launcherChoices = await codexLauncherChoices(codex.client);
-    const backends = new BackendRegistry([claudeBackend, codex.backend, dshBackend, zcodeBackend, nativeHostBackend]);
+    codexBackend = new CodexBackend({
+      client: codexHub.client,
+      resolveLane: (threadId) => state.activeBindingForConversation("codex", threadId)?.laneAddress,
+      hasVisibleClient: (threadId) => codexHub.hasVisibleClient(threadId),
+    });
+    // Codex models come from the host's App Server, which may not be linked yet — or ever, on a
+    // machine without Codex — so the menu starts without them and fills in once the host is ready.
+    let launcherChoices = baseLauncherChoices();
+    codexHub.onReady(() => {
+      void codexModels(codexHub.client).then((models) => {
+        launcherChoices = { ...launcherChoices, models: [...CLAUDE_LAUNCHER_MODELS, ...models] };
+      }, (error: unknown) => {
+        process.stderr.write(`Codex model list unavailable: ${error instanceof Error ? error.message : "unknown error"}\n`);
+      });
+    });
+    const backends = new BackendRegistry([claudeBackend, codexBackend, dshBackend, zcodeBackend, nativeHostBackend]);
     const pump = new NotificationPump(state, mailbox, backends);
     const restore = new ConversationRestorer({
       state, backends,
@@ -145,9 +173,9 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
       state,
       restore,
       overrideChoices: {
-        models: launcherChoices.models.map((model) => model.id),
-        profiles: launcherChoices.profiles.map((profile) => profile.name),
-        modelProviders: launcherChoices.modelProviders,
+        get models() { return launcherChoices.models.map((model) => model.id); },
+        get profiles() { return launcherChoices.profiles.map((profile) => profile.name); },
+        get modelProviders() { return launcherChoices.modelProviders; },
       },
       resolveProfileProvider: profileModelProvider,
     });
@@ -179,7 +207,7 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
       }
     }
     server = new LocalRouterServer({
-      tools, applicationTools, codex, claude: claudeHub, instanceId: randomUUID(),
+      tools, applicationTools, codexHost: codexHub, claude: claudeHub, instanceId: randomUUID(),
       ...(options.issues === false ? {} : { issues: { service: issues?.service } }),
       ...(options.issues === false ? {} : { graphs: { service: graphs?.service } }),
       nativeHost,
@@ -211,7 +239,7 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
           input,
         }),
       }),
-      dashboardState: (router) => dashboardSnapshot({ state, mailbox, backends, now: Date.now, launcherChoices }, router),
+      dashboardState: (router) => dashboardSnapshot({ state, mailbox, backends, now: Date.now, launcherChoices, codexHost: () => codexHub.status() }, router),
       dashboardOpen: (input) => dashboardOpener.open(input),
       dashboardLaneSets: async (input) => {
         if (input.action === "create") core.createLaneSet(input.name);
@@ -223,8 +251,11 @@ export async function runRouterProcess(options: { dataRoot?: string; nativeHosts
     const discovery = await server.start();
     graphOrigin = discovery.url;
     writeDiscovery(discoveryPath, discovery);
-    for (const backend of [claudeBackend, codex.backend, dshBackend, zcodeBackend]) backend.onAttentionOpportunity((lane) => { void pump.onAttentionOpportunity(lane); });
+    for (const backend of [claudeBackend, codexBackend, dshBackend, zcodeBackend]) backend.onAttentionOpportunity((lane) => { void pump.onAttentionOpportunity(lane); });
     await pump.onStartup();
+    // After discovery, never before: the host finds this core through that file, so a core that
+    // waited for its host first would wait forever.
+    hostKeeper.ensure();
   } catch (error) {
     await closeResources().catch(() => undefined);
     throw error;
@@ -312,7 +343,55 @@ export function parseWindowsTokenAclResult(raw: string): void {
   if (!ownerOnly) throw new Error("Windows DSH token ACL is not owner-only");
 }
 
-async function codexLauncherChoices(client: { request(method: string, params: unknown): Promise<unknown> }): Promise<DashboardLauncherChoices> {
+/**
+ * Keeps one Codex host in existence: asked to on core startup and whenever the host's link drops.
+ * Bounded on purpose — a machine without a working Codex would otherwise spawn a doomed host every
+ * few seconds forever — and the launcher ensures a host again whenever someone opens a Codex lane.
+ * Finding a live host is the normal answer and starts nothing.
+ */
+class CodexHostKeeper {
+  private running = false;
+  private stopped = false;
+  private timer?: NodeJS.Timeout;
+
+  constructor(private readonly ensureHost: () => Promise<unknown>) {}
+
+  ensure(): void {
+    if (this.running || this.stopped) return;
+    this.running = true;
+    void this.attempt(1);
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer) clearTimeout(this.timer);
+  }
+
+  private async attempt(attempt: number): Promise<void> {
+    try {
+      await this.ensureHost();
+      this.running = false;
+    } catch (error) {
+      process.stderr.write(`Codex host unavailable (attempt ${attempt} of ${HOST_ENSURE_ATTEMPTS}): ${error instanceof Error ? error.message : "unknown error"}\n`);
+      if (attempt >= HOST_ENSURE_ATTEMPTS || this.stopped) { this.running = false; return; }
+      this.timer = setTimeout(() => { void this.attempt(attempt + 1); }, HOST_ENSURE_BACKOFF_MS * attempt);
+      this.timer.unref();
+    }
+  }
+}
+
+function baseLauncherChoices(): DashboardLauncherChoices {
+  return {
+    defaultModelProvider: defaultCodexModelProvider(),
+    // Claude first: its four aliases are the short, stable end of the list, and burying them under
+    // however many models Codex reports would leave them unfindable in the menu.
+    models: [...CLAUDE_LAUNCHER_MODELS],
+    profiles: listCodexProfiles(),
+    modelProviders: listCodexModelProviders(),
+  };
+}
+
+async function codexModels(client: { request(method: string, params: unknown): Promise<unknown> }): Promise<DashboardLauncherChoices["models"]> {
   const models: DashboardLauncherChoices["models"][number][] = [];
   let cursor: string | undefined;
   do {
@@ -331,14 +410,7 @@ async function codexLauncherChoices(client: { request(method: string, params: un
     if (next !== null && typeof next !== "string") throw new Error("Codex App Server model/list returned an invalid cursor");
     cursor = next ?? undefined;
   } while (cursor !== undefined && models.length < 10_000);
-  return {
-    defaultModelProvider: defaultCodexModelProvider(),
-    // Claude first: its four aliases are the short, stable end of the list, and burying them under
-    // however many models Codex reports would leave them unfindable in the menu.
-    models: [...CLAUDE_LAUNCHER_MODELS, ...models],
-    profiles: listCodexProfiles(),
-    modelProviders: listCodexModelProviders(),
-  };
+  return models;
 }
 
 function responseProperty(value: unknown, property: string): unknown {

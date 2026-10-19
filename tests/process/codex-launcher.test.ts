@@ -12,15 +12,32 @@ vi.setConfig({ testTimeout: 30_000 });
 
 const codexExecutable = process.env.CODEX_EXE ?? "codex";
 
-test("keeps Router discovery inside the inherited isolated data root", async () => {
+// The Router answers on one port; the Codex host, which owns every endpoint a TUI connects to and
+// the provider endpoints, on another. Keeping the two apart is what the tests below check.
+const core = async () => ({ pid: 1, port: 5, url: "http://127.0.0.1:5", instanceId: "x" });
+const host = async () => ({ pid: 4, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "h", protocolVersion: 1, build: "b" });
+
+test("keeps Router and host discovery inside the inherited isolated data root", async () => {
   vi.stubEnv("LANE_ROUTER_DATA_ROOT", "D:\\isolated-router");
-  const ensure = vi.fn(async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }));
+  const ensure = vi.fn(core);
+  const ensureHost = vi.fn(host);
   try {
-    await launchCodex([], { ensure, spawnTui: vi.fn(async () => 0) });
+    await launchCodex([], { ensure, ensureHost, spawnTui: vi.fn(async () => 0) });
     expect(ensure).toHaveBeenCalledExactlyOnceWith({ dataRoot: "D:\\isolated-router" });
+    expect(ensureHost).toHaveBeenCalledExactlyOnceWith({ dataRoot: "D:\\isolated-router" });
   } finally {
     vi.unstubAllEnvs();
   }
+});
+
+test("ensures the Router before the Codex host so lane tools work from the first turn", async () => {
+  const order: string[] = [];
+  await launchCodex([], {
+    ensure: async () => { order.push("router"); return core(); },
+    ensureHost: async () => { order.push("host"); return host(); },
+    spawnTui: async () => { order.push("tui"); return 0; },
+  });
+  expect(order).toEqual(["router", "host", "tui"]);
 });
 
 test("runs the CLI entrypoint when the package is reached through a symlink", () => {
@@ -45,7 +62,7 @@ test("runs the CLI entrypoint when the package is reached through a symlink", ()
 test("lets the remote TUI start a new thread instead of resuming an unmaterialized thread", async () => {
   const spawnTui = vi.fn(async () => 0);
   await expect(launchCodex([], {
-    ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+    ensure: core, ensureHost: host,
     spawnTui,
   })).resolves.toBe(0);
   expect(spawnTui).toHaveBeenCalledWith(codexExecutable, ["-C", process.cwd(), "--remote", "ws://127.0.0.1:3"]);
@@ -58,7 +75,7 @@ test("pins new threads to the directory where the launcher was invoked", async (
   try {
     process.chdir(invocationRoot);
     await launchCodex([], {
-      ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+      ensure: core, ensureHost: host,
       spawnTui,
     });
     expect(spawnTui).toHaveBeenCalledWith(codexExecutable, ["-C", invocationRoot, "--remote", "ws://127.0.0.1:3"]);
@@ -71,7 +88,7 @@ test("pins new threads to the directory where the launcher was invoked", async (
 test("resume only resumes a Router-owned thread and exposes no management subcommands", async () => {
   const spawnTui = vi.fn(async () => 0);
   const dependencies = {
-    ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+    ensure: core, ensureHost: host,
     spawnTui,
   };
   await launchCodex(["resume", "thread-old"], dependencies);
@@ -82,7 +99,7 @@ test("resume only resumes a Router-owned thread and exposes no management subcom
 test("passes an initial prompt after the Codex option terminator", async () => {
   const spawnTui = vi.fn(async () => 0);
   await launchCodex(["--prompt", "take over alpha/design"], {
-    ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+    ensure: core, ensureHost: host,
     spawnTui,
   });
   expect(spawnTui).toHaveBeenCalledWith(codexExecutable, [
@@ -93,7 +110,7 @@ test("passes an initial prompt after the Codex option terminator", async () => {
 test("forwards a declared model to stock Codex for new and resumed threads", async () => {
   const spawnTui = vi.fn(async () => 0);
   const dependencies = {
-    ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+    ensure: core, ensureHost: host,
     spawnTui,
   };
 
@@ -111,7 +128,7 @@ test("forwards a declared model to stock Codex for new and resumed threads", asy
 test("passes unknown model names through and rejects only malformed launcher syntax", async () => {
   const spawnTui = vi.fn(async () => 0);
   const dependencies = {
-    ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+    ensure: core, ensureHost: host,
     spawnTui,
   };
 
@@ -124,7 +141,7 @@ test("forwards a declared profile to stock Codex for new and resumed threads", a
   const spawnTui = vi.fn(async () => 0);
   const resolvedProviders: string[] = [];
   const dependencies = {
-    ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+    ensure: core, ensureHost: host,
     spawnTui,
     resolveModelProvider: (profile: string) => (profile === "gpt" ? "openai" : "ZAI"),
     resolveProviderEndpoint: async (routerUrl: string, modelProvider: string) => {
@@ -159,7 +176,7 @@ test("an environmental provider without a profile requests a transient provider 
   process.env.LANE_ROUTER_CODEX_TRANSIENT_STARTUP = "1";
   try {
     await launchCodex(["--model", "glm-5.3", "resume", "thread-old"], {
-      ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+      ensure: core, ensureHost: host,
       spawnTui,
     });
   } finally {
@@ -191,7 +208,7 @@ test("the real provider endpoint request carries the selected profile", async ()
   delete process.env.LANE_ROUTER_CODEX_TRANSIENT_STARTUP;
   try {
     await launchCodex(["--profile", "glm", "resume", "thread-old"], {
-      ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+      ensure: core, ensureHost: host,
       spawnTui: async () => 0,
       resolveModelProvider: () => "ZAI",
     });
@@ -209,7 +226,7 @@ test("the real provider endpoint request carries the selected profile", async ()
 test("combines profile and model flags in any order and rejects a profile without a value", async () => {
   const spawnTui = vi.fn(async () => 0);
   const dependencies = {
-    ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+    ensure: core, ensureHost: host,
     spawnTui,
     resolveModelProvider: () => "openai",
     resolveProviderEndpoint: async () => "ws://127.0.0.1:9",
@@ -231,7 +248,7 @@ test("combines profile and model flags in any order and rejects a profile withou
 test("fails the launch before spawning when a profile cannot be resolved", async () => {
   const spawnTui = vi.fn(async () => 0);
   const dependencies = {
-    ensure: async () => ({ pid: 1, port: 2, url: "http://127.0.0.1:2", codexEndpoint: "ws://127.0.0.1:3", instanceId: "x" }),
+    ensure: core, ensureHost: host,
     spawnTui,
     resolveModelProvider: () => { throw new Error("Codex profile config not found"); },
   };

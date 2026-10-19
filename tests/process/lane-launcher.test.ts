@@ -458,7 +458,7 @@ test("tell exits 2 when there is no lane to deliver to, and still prints the JSO
 // command line. The server is imported at the top of the file, not in here: under a loaded full
 // run, transforming its module graph inside the test alone can outlast the whole 5 s budget.
 test("tell says the Router needs restarting when the running one has no tell endpoint", async () => {
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "old-build" });
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: "old-build" });
   const discovery = await server.start();
   const deps = fakes();
   writeFileSync(join(deps.dataRoot, "discovery.json"), JSON.stringify(discovery));
@@ -490,7 +490,7 @@ test("new --backend zcode spawns headless through the Router and opens no termin
 // wire is the thing that has to pass.
 test("new --backend zcode still reaches a real Router's spawn entry", async () => {
   const zcodeSpawnLane = vi.fn(async (input: { address: string }) => ({ sessionId: "sess_real", address: input.address }));
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "spawn", zcodeSpawnLane });
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: "spawn", zcodeSpawnLane });
   const discovery = await server.start();
   const deps = fakes();
   writeFileSync(join(deps.dataRoot, "discovery.json"), JSON.stringify(discovery));

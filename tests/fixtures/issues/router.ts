@@ -89,7 +89,7 @@ export async function startIssueAdapters(x: ReturnType<typeof setupIssueRouter>)
   const tools = new ToolService(x.core);
   const applicationTools = bindBuiltinTools(tools, x.service);
   const server = new LocalRouterServer({ tools, applicationTools, issues: { service: x.service },
-    codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: randomUUID() });
+    instanceId: randomUUID() });
   const { url } = await server.start();
   let closed = false;
   const client = new LocalRouterClient(async () => url);

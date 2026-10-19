@@ -155,6 +155,19 @@ describe("dashboardSnapshot", () => {
     } finally { x.database.close(); }
   });
 
+  // Both builds, as facts; whether they differ is the page's to see, not a third field to drift.
+  it("publishes the Codex host link and both builds when the Router serves a host", () => {
+    const x = setup();
+    try {
+      const status = { connected: true, hostBuild: "host-build", coreBuild: "core-build" };
+      const state = dashboardSnapshot(
+        { state: x.state, mailbox: x.mailbox, backends: x.backends, now: () => 9_999, codexHost: () => status },
+        ROUTER,
+      );
+      expect(state.codexHost).toEqual(status);
+    } finally { x.database.close(); }
+  });
+
   // Acceptance 4, both sides. Testing only the over-limit side would pass with `truncated` wired
   // to a constant true, which is the same defect as a list that never admits it was cut.
   it("returns the newest messages up to the limit and says whether it cut any", () => {

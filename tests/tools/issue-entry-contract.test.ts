@@ -42,8 +42,8 @@ test("Codex product publication and dispatcher use the same catalog with authori
 test("real Codex runtime uses its supplied catalog for thread decoration and dispatch with a fake process", async () => {
   const callTool = vi.fn(async () => ({ ok: true }));
   const runtime = new CodexRuntime({
-    state: { activeBindingForConversation: () => undefined, latestBindingForConversation: () => undefined } as never,
-    catalog: productToolCatalog, callTool,
+    core: { callTool, ownsThread: async () => false, event: () => undefined },
+    catalog: productToolCatalog,
     process: { client: { onNotification: () => () => {} }, start: () => { throw new Error("fixture process must not start"); } } as never,
   });
   const decorated = runtime.decorateThreadStart({ cwd: "fixture" });

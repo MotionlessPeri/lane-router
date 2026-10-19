@@ -141,6 +141,30 @@ async function renderLauncherWithRefresh() {
   };
 }
 
+async function renderWith(value: unknown): Promise<Window["document"]> {
+  const window = new Window({ url: "http://127.0.0.1:52494/dashboard" });
+  window.document.write(pageSource);
+  const script = window.document.querySelector("script")?.textContent;
+  new Function("document", "fetch", "setInterval", script!)(window.document, async () => ({ ok: true, json: async () => value }), () => 0);
+  await vi.waitFor(() => expect(window.document.body.textContent).toContain("alpha/one"));
+  return window.document;
+}
+
+// The Codex host survives core restarts, so after a deploy it can still be running the old build.
+// Nothing else on the board would say so; this line is the only reminder.
+test("the board says when the Codex host runs a different build from the core, and only then", async () => {
+  const hint = /Codex 宿主的构建与核心不同.*-CodexHost/su;
+  const stale = await renderWith({ ...snapshot, codexHost: { connected: true, hostBuild: "aaaa", coreBuild: "bbbb" } });
+  expect(stale.getElementById("codex-host")?.hidden).toBe(false);
+  expect(stale.getElementById("codex-host")?.textContent).toMatch(hint);
+  // The page's own script carries the sentence, so the negative cases read the notice, not the body.
+  for (const codexHost of [{ connected: true, hostBuild: "bbbb", coreBuild: "bbbb" }, { connected: false, hostBuild: null, coreBuild: "bbbb" }]) {
+    const notice = (await renderWith({ ...snapshot, codexHost })).getElementById("codex-host");
+    expect(notice?.hidden, JSON.stringify(codexHost)).toBe(true);
+    expect(notice?.textContent, JSON.stringify(codexHost)).toBe("");
+  }
+});
+
 test("hostile text in a snapshot is shown, not run", async () => {
   const document = await render();
 

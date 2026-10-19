@@ -1,10 +1,13 @@
 import { expect, test, vi } from "vitest";
-import { CodexRuntime, createCodexRuntime, type CodexProcessControl } from "../../src/adapters/codex/codex-runtime.js";
-import type { RouterStateStore } from "../../src/router/state-store.js";
+import { CodexRuntime, createCodexRuntime, type CodexCoreLink, type CodexProcessControl } from "../../src/adapters/codex/codex-runtime.js";
 import { productToolCatalog } from "../../src/application/builtin-tools.js";
 
+function core(callTool: CodexCoreLink["callTool"] = vi.fn()): CodexCoreLink {
+  return { callTool, ownsThread: async () => false, event: () => undefined };
+}
+
 function runtime(enabled: boolean) {
-  return new CodexRuntime({ state: {} as RouterStateStore, callTool: vi.fn(),
+  return new CodexRuntime({ core: core(),
     process: { client: { onNotification: () => () => {} } } as unknown as CodexProcessControl,
     accountConnectionFile: enabled ? "unused-fixture-path" : undefined });
 }
@@ -20,7 +23,7 @@ test("managed runtimes reject ordinary credential export and account mutation", 
 test("account-managed assembly keeps issue tools usable while model admission is held", async () => {
   const callTool = vi.fn().mockResolvedValue({ issues: [] });
   const managed = createCodexRuntime({
-    state: {} as RouterStateStore, callTool, catalog: productToolCatalog,
+    core: core(callTool), catalog: productToolCatalog,
     command: { executable: "unused-fixture-executable" }, capabilityCacheDir: "unused-fixture-cache",
     accountConnectionFile: "unused-fixture-path",
   });

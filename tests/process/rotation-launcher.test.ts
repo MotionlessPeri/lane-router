@@ -289,7 +289,6 @@ test("asks the Router for the lane's set beside its directory entry, and does wi
   const start = async (resumeInfo?: () => unknown) => {
     const server = new LocalRouterServer({
       tools: { call: vi.fn(async () => directory) } as never,
-      codex: { endpoint: "ws://127.0.0.1:1" } as never,
       instanceId: "instance-1",
       ...(resumeInfo === undefined ? {} : { resumeInfo }),
     });

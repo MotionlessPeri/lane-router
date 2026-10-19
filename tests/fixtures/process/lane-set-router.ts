@@ -43,7 +43,6 @@ export async function startLaneSetRouter(dataRoot: string): Promise<{ close: () 
 
   const server = new LocalRouterServer({
     tools: new ToolService(core),
-    codex: { endpoint: "ws://127.0.0.1:1" } as never,
     instanceId: "lane-sets",
     resumeInfo: (address) => core.resumeInfo(address),
   });

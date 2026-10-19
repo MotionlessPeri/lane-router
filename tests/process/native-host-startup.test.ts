@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { runRouterProcess } from "../../src/process/main.js";
 
-vi.mock("../../src/adapters/codex/codex-runtime.js", () => ({ createCodexRuntime: () => { throw new Error("fixture provider must not start"); } }));
+vi.mock("../../src/process/codex-host-hub.js", () => ({ CodexHostHub: class { constructor() { throw new Error("fixture provider must not start"); } } }));
+vi.mock("../../src/process/ensure-codex-host.js", () => ({ ensureCodexHost: () => { throw new Error("fixture provider must not start"); } }));
 const roots: string[] = [];
 afterEach(() => { vi.unstubAllEnvs(); roots.splice(0).forEach(root => rmSync(root, { recursive: true, force: true })); });
 function setup(value?: unknown) {

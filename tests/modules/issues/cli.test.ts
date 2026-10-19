@@ -14,7 +14,7 @@ async function fixture() {
   const x = setupIssues(); cleanup.push(() => x.dispose());
   const server = new LocalRouterServer({ tools: {} as never,
     applicationTools: bindBuiltinTools({} as never, x.service),
-    codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "cli-fixture" });
+    instanceId: "cli-fixture" });
   const { url } = await server.start(); cleanup.push(() => server.close());
   const client = new LocalRouterClient(async () => url);
   const calls: unknown[][] = [];

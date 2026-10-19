@@ -2,6 +2,7 @@ import { expect, test, vi } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
 
 import { connectClaudeChannel, LocalRouterClient, probeRouterHealth } from "../../src/process/local-client.js";
+import { CodexHostServer } from "../../src/process/codex-host.js";
 import { ClaudeChannelHub, LocalRouterServer } from "../../src/process/local-server.js";
 import type { BindingRecord } from "../../src/router/types.js";
 
@@ -24,7 +25,7 @@ test("the Codex TUI bridge injects Router tools into TUI-created threads", async
     dispatchTool: vi.fn(async () => ({ success: true, contentItems: [{ type: "inputText", text: "ok" }] })),
     observeNotification: vi.fn(),
   };
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex, instanceId: "instance-1" });
+  const server = new CodexHostServer(codex, () => ({ instanceId: "host-1" }));
   const discovery = await server.start();
   let client: WebSocket | undefined;
   let upstream: WebSocket | undefined;
@@ -95,7 +96,7 @@ test("a model provider endpoint injects the provider into thread start and resum
     dispatchTool: vi.fn(async () => ({ success: true })),
     observeNotification: vi.fn(),
   };
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex, instanceId: "instance-1" });
+  const server = new CodexHostServer(codex, () => ({ instanceId: "host-1" }));
   const discovery = await server.start();
   const clients: WebSocket[] = [];
   const postProvider = async (modelProvider: string, profile?: string) => fetch(`${discovery.url}/codex/provider-endpoint`, {
@@ -181,7 +182,7 @@ test("a transient provider endpoint reports its startup as non-persistent", asyn
     dispatchTool: vi.fn(async () => ({ success: true })),
     observeNotification: vi.fn(),
   };
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex, instanceId: "instance-1" });
+  const server = new CodexHostServer(codex, () => ({ instanceId: "host-1" }));
   const discovery = await server.start();
   let client: WebSocket | undefined;
   try {
@@ -213,15 +214,15 @@ test("a transient provider endpoint reports its startup as non-persistent", asyn
 
 test("serves health and lane calls on loopback", async () => {
   const tools = { call: vi.fn(async (name: string) => ({ name })) };
-  const codex = {
-    endpoint: "ws://127.0.0.1:45000",
-  };
-  const server = new LocalRouterServer({ tools: tools as never, codex: codex as never, instanceId: "instance-1" });
+  const server = new LocalRouterServer({ tools: tools as never, instanceId: "instance-1" });
   const discovery = await server.start();
   try {
     expect(discovery.url).toMatch(/^http:\/\/127\.0\.0\.1:/u);
     const client = new LocalRouterClient(async () => discovery.url);
-    await expect(probeRouterHealth(discovery.url)).resolves.toMatchObject({ instanceId: "instance-1", codexEndpoint: expect.stringMatching(/^ws:\/\/127\.0\.0\.1:\d+$/u) });
+    // The Codex endpoint belongs to the Codex host now; the Router's health no longer names one.
+    const health = await probeRouterHealth(discovery.url);
+    expect(health).toMatchObject({ instanceId: "instance-1" });
+    expect(health).not.toHaveProperty("codexEndpoint");
     await expect(client.call("lane_directory", { project: "alpha" }, {
       backend: "claude", conversationId: "session-1", cwd: "D:\\project", requestKey: "request-1",
     })).resolves.toEqual({ name: "lane_directory" });
@@ -234,8 +235,8 @@ test("serves health and lane calls on loopback", async () => {
 });
 
 test("rejects non-loopback binding configuration and unknown RPC methods", async () => {
-  expect(() => new LocalRouterServer({ tools: {} as never, codex: {} as never, instanceId: "x", host: "0.0.0.0" })).toThrow(/loopback/i);
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x" });
+  expect(() => new LocalRouterServer({ tools: {} as never, instanceId: "x", host: "0.0.0.0" })).toThrow(/loopback/i);
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: "x" });
   const discovery = await server.start();
   try {
     const response = await fetch(`${discovery.url}/rpc`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ method: "unknown_tool", params: {}, context: {} }) });
@@ -244,7 +245,7 @@ test("rejects non-loopback binding configuration and unknown RPC methods", async
 });
 
 test("bridges body-free Claude notifications and waits for lifecycle Stop before replacement", async () => {
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x" });
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: "x" });
   const discovery = await server.start();
   const channel = await connectClaudeChannel(async () => discovery.url, "session-1");
   const notifications: unknown[] = [];
@@ -276,7 +277,7 @@ test("a Claude reconnect after Router restart resolves its durable binding and e
   const hub = new ClaudeChannelHub((conversationId) => conversationId === "session-1" ? binding : undefined);
   const attention: string[] = [];
   hub.onAttentionOpportunity((current) => { attention.push(current.laneAddress); });
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x", claude: hub });
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: "x", claude: hub });
   const discovery = await server.start();
   const channel = await connectClaudeChannel(async () => discovery.url, "session-1");
   try { await vi.waitFor(() => expect(attention).toEqual(["alpha/design"])); }
@@ -290,7 +291,7 @@ test("a Claude channel follows the Router that replaced the one it was connected
     messages: [{ id: "message-1", sender: "alpha/hub", summary: "本轮 lane 重构的顺序" }],
   };
   const startRouter = async () => {
-    const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x" });
+    const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: "x" });
     return { server, discovery: await server.start() };
   };
 
@@ -321,7 +322,6 @@ const CALLER = { backend: "claude" as const, conversationId: "session-1", reques
 async function startNamedRouter(instanceId: string) {
   const server = new LocalRouterServer({
     tools: { call: vi.fn(async (name: string) => ({ name, instanceId })) } as never,
-    codex: { endpoint: "ws://127.0.0.1:1" } as never,
     instanceId,
   });
   return { server, discovery: await server.start() };
@@ -427,7 +427,6 @@ test("serves the lane archiving endpoints and reports refusals as refusals", asy
   const calls: string[] = [];
   const server = new LocalRouterServer({
     tools: { call: vi.fn() } as never,
-    codex: { endpoint: "ws://127.0.0.1:1" } as never,
     instanceId: "x",
     archiveLane: async (address: string) => {
       calls.push(`archive:${address}`);
@@ -475,7 +474,7 @@ function nextJson(socket: WebSocket): Promise<unknown> {
 
 test("hands a lifecycle-reported cwd to the recorder even when no channel is connected", async () => {
   const recordCwd = vi.fn();
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x", recordCwd });
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: "x", recordCwd });
   const discovery = await server.start();
   try {
     // No channel exists for this conversation, so the hub cannot accept the event — but the cwd
@@ -499,7 +498,7 @@ test("hands a lifecycle-reported cwd to the recorder even when no channel is con
 test("serves resume info for the lane launcher on loopback", async () => {
   const info = { state: "bound", backend: "claude", conversationId: "session-1", cwd: "E:\\project", generation: 2, reach: null };
   const resumeInfo = vi.fn(async () => info);
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x", resumeInfo });
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: "x", resumeInfo });
   const discovery = await server.start();
   try {
     const response = await fetch(`${discovery.url}/lanes/resume-info?address=${encodeURIComponent("alpha/design")}`);

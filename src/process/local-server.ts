@@ -5,7 +5,6 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import type { ClaudeChannelPort, ClaudeChannelOutcome } from "../backends/claude-backend.js";
 import type { DshChannelHub } from "../backends/dsh-backend.js";
-import { CodexTuiBridge, type CodexTuiBridgeHost } from "../adapters/codex/tui-bridge.js";
 import type { Notification } from "../router/backend.js";
 import { parseLaneAddress } from "../router/address.js";
 import type { DashboardRouter } from "../router/dashboard.js";
@@ -19,15 +18,15 @@ import { GraphsHttp, type GraphsHttpAssembly } from "../modules/graphs/http.js";
 import type { NativeHostService } from "./native-host-service.js";
 import type { DashboardOpenOverride } from "./dashboard-lane-opener.js";
 import { DashboardHttp, type DashboardLaneSetsInput } from "./dashboard-http.js";
-import { json, readJson } from "./http-json.js";
+import { json, readJson, refuseWebPage } from "./http-json.js";
 
 export type { DashboardLaneSetsInput } from "./dashboard-http.js";
 
+/** The Codex endpoint is not here: it belongs to the Codex host, which outlives this process. */
 export interface RouterDiscovery {
   readonly pid: number;
   readonly port: number;
   readonly url: string;
-  readonly codexEndpoint: string;
   readonly instanceId: string;
 }
 
@@ -359,13 +358,10 @@ export class LocalRouterServer {
   private readonly host: string;
   private readonly http = createServer((request, response) => void this.handle(request, response));
   private readonly websocket = new WebSocketServer({ noServer: true });
-  private readonly codexBridge: CodexTuiBridge;
-  private readonly providerBridges = new Map<string, { bridge: CodexTuiBridge; endpoint: Promise<string> }>();
   private readonly dashboardActionToken = randomUUID();
   private readonly dashboard: DashboardHttp;
   private readonly issues: IssuesHttp | undefined;
   private readonly graphs: GraphsHttp | undefined;
-  private codexEndpoint = "";
   readonly claude: ClaudeChannelHub;
 
   constructor(private readonly options: {
@@ -373,7 +369,8 @@ export class LocalRouterServer {
     readonly applicationTools?: ApplicationTools;
     readonly issues?: IssuesHttpAssembly;
     readonly graphs?: GraphsHttpAssembly;
-    readonly codex: CodexTuiBridgeHost;
+    /** Where the Codex host's link lands; absent means this Router serves no Codex host. */
+    readonly codexHost?: { connect(socket: WebSocket): void; close(): void };
     readonly instanceId: string;
     readonly host?: string;
     readonly port?: number;
@@ -436,7 +433,6 @@ export class LocalRouterServer {
   }) {
     this.host = options.host ?? "127.0.0.1";
     if (this.host !== "127.0.0.1" && this.host !== "::1") throw new Error("Router internal server must bind to loopback");
-    this.codexBridge = new CodexTuiBridge(options.codex);
     this.claude = options.claude ?? new ClaudeChannelHub();
     this.dashboard = new DashboardHttp({
       router: () => {
@@ -481,6 +477,16 @@ export class LocalRouterServer {
         this.websocket.handleUpgrade(request, socket, head, (client) => this.claude.connect(conversationId, client, joinKey));
         return;
       }
+      // Same reasoning as /claude: the Codex host never sends Origin, so any Origin is a web page
+      // trying to stand in for the host and receive lane tool calls or drive turns.
+      if (url.pathname === "/codex/host" && !url.search && this.options.codexHost) {
+        if (request.headers.origin !== undefined) {
+          socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+          return;
+        }
+        this.websocket.handleUpgrade(request, socket, head, (client) => this.options.codexHost!.connect(client));
+        return;
+      }
       // The Bearer token guards this one instead: a page can neither set Authorization on a
       // handshake nor know the token, so Origin adds nothing here.
       if (url.pathname === "/dsh/v1/channel" && this.options.dsh && this.dshAuthorized(request)) {
@@ -499,11 +505,6 @@ export class LocalRouterServer {
       this.http.once("error", reject);
       this.http.listen(this.options.port ?? 0, this.host, () => { this.http.off("error", reject); resolve(); });
     });
-    try { this.codexEndpoint = await this.codexBridge.start(this.host); }
-    catch (error) {
-      await new Promise<void>((resolve) => this.http.close(() => resolve()));
-      throw error;
-    }
     return this.discovery();
   }
 
@@ -511,10 +512,7 @@ export class LocalRouterServer {
     this.claude.close();
     this.options.dsh?.channel.close();
     this.options.nativeHost?.close();
-    await this.codexBridge.close();
-    const providerBridges = [...this.providerBridges.values()].map(({ bridge }) => bridge);
-    this.providerBridges.clear();
-    await Promise.all(providerBridges.map((bridge) => bridge.close()));
+    this.options.codexHost?.close();
     await new Promise<void>((resolve) => this.websocket.close(() => resolve()));
     await new Promise<void>((resolve, reject) => this.http.close((error) => error ? reject(error) : resolve()));
   }
@@ -615,19 +613,6 @@ export class LocalRouterServer {
         const accepted = valid
           ? this.claude.reportLifecycle(body.conversationId as string, body.event as "Stop" | "UserPromptSubmit", typeof body.joinKey === "string" ? body.joinKey : undefined) : false;
         return json(response, accepted ? 200 : 400, { accepted });
-      }
-      if (request.method === "POST" && request.url === "/codex/provider-endpoint") {
-        // Each new provider name starts another Codex endpoint, so a page must not be able to ask.
-        if (refuseWebPage(request, response)) return;
-        const body = await readJson(request) as { modelProvider?: unknown; profile?: unknown; persistStartup?: unknown };
-        if (typeof body.modelProvider !== "string") return json(response, 400, { error: "modelProvider is required" });
-        if (body.profile !== undefined && typeof body.profile !== "string") return json(response, 400, { error: "profile must be a string" });
-        if (body.persistStartup !== undefined && typeof body.persistStartup !== "boolean") return json(response, 400, { error: "persistStartup must be a boolean" });
-        try {
-          return json(response, 200, { endpoint: await this.codexEndpointForProvider(body.modelProvider, body.profile, body.persistStartup ?? true) });
-        } catch (error) {
-          return json(response, 400, { error: error instanceof Error ? error.message : "provider endpoint unavailable" });
-        }
       }
       if (request.method !== "POST" || request.url !== "/rpc") return json(response, 404, { error: "not found" });
       if (refuseWebPage(request, response)) return;
@@ -741,23 +726,7 @@ export class LocalRouterServer {
 
   private discovery(): RouterDiscovery {
     const address = this.http.address() as AddressInfo;
-    return { pid: process.pid, port: address.port, url: `http://${this.host}:${address.port}`, codexEndpoint: this.codexEndpoint, instanceId: this.options.instanceId };
-  }
-
-  /** One bridge endpoint per model provider; its threads carry that provider instead of the base one. */
-  async codexEndpointForProvider(modelProvider: string, profile?: string, persistStartup = true): Promise<string> {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(modelProvider)) throw new Error(`Invalid model provider id: ${modelProvider}`);
-    const key = `${modelProvider}\0${profile ?? ""}\0${persistStartup ? "persistent" : "transient"}`;
-    const existing = this.providerBridges.get(key);
-    if (existing) return existing.endpoint;
-    const bridge = new CodexTuiBridge(this.options.codex, modelProvider, profile, persistStartup);
-    const entry = { bridge, endpoint: bridge.start(this.host) };
-    this.providerBridges.set(key, entry);
-    try { return await entry.endpoint; }
-    catch (error) {
-      if (this.providerBridges.get(key) === entry) this.providerBridges.delete(key);
-      throw error;
-    }
+    return { pid: process.pid, port: address.port, url: `http://${this.host}:${address.port}`, instanceId: this.options.instanceId };
   }
 }
 
@@ -817,33 +786,6 @@ function callerContext(value: unknown): CallerContext | undefined {
     ...(typeof context.joinKey === "string" ? { joinKey: context.joinKey } : {}),
     ...(typeof context.cwd === "string" ? { cwd: context.cwd } : {}),
   };
-}
-
-/**
- * Keep web pages out of the entries that change state. Any page open in a browser on this machine
- * can POST to the loopback port; it cannot read the answer, but a "simple" request — text/plain, no
- * custom headers — is sent without a preflight, so its side effect happens regardless. Two checks,
- * each enough on its own, so either can fail without the other going with it:
- *
- *   - Origin present ⇒ 403. A browser always sends it on a cross-site POST, and nothing meant to
- *     call these entries — the command line, the lane server — sends one, so no list is needed.
- *   - Content type other than application/json ⇒ 400. A page can only send JSON after a preflight,
- *     and the Router grants no cross-origin permission, so that request is never sent.
- *
- * Both run before the body is read: a refused request must not cost the Router a parse, and must
- * not reach the code that would act on it. Answers true when it has already written the refusal.
- */
-function refuseWebPage(request: IncomingMessage, response: ServerResponse): boolean {
-  if (request.headers.origin !== undefined) {
-    json(response, 403, { error: "requests from a web page are not accepted here" });
-    return true;
-  }
-  const contentType = request.headers["content-type"];
-  if (typeof contentType !== "string" || !contentType.toLowerCase().startsWith("application/json")) {
-    json(response, 400, { error: "content-type must be application/json" });
-    return true;
-  }
-  return false;
 }
 
 function bearerToken(request: IncomingMessage): string {

@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { WebSocketServer } from "ws";
 
 const args = process.argv.slice(2);
@@ -59,8 +59,32 @@ if (args[0] === "app-server") {
   const listen = args[args.indexOf("--listen") + 1];
   const url = new URL(listen);
   const server = new WebSocketServer({ host: url.hostname, port: Number(url.port) });
+  // Just enough of a conversation for the host tests: threads, turns that finish at once, and a
+  // turn whose text is `tool:<name> <json>` asks the client that started it for that dynamic tool
+  // and finishes with the client's answer as its only item. Thread status reads come from
+  // FAKE_CODEX_STATUS_FILE (threadId -> "idle" | "active"); every request lands in FAKE_CODEX_LOG_FILE.
+  let threads = 0;
+  let turns = 0;
+  const toolCalls = new Map();
+  const statusOf = (threadId) => {
+    const file = process.env.FAKE_CODEX_STATUS_FILE;
+    if (!file || !existsSync(file)) return "idle";
+    try { return JSON.parse(readFileSync(file, "utf8"))[threadId] ?? "idle"; } catch { return "idle"; }
+  };
+  const thread = (id) => ({ thread: { id, status: { type: statusOf(id) }, turns: [] } });
+  const completed = (socket, threadId, turnId, item) => socket.send(JSON.stringify({
+    method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [item] } },
+  }));
   server.on("connection", (socket) => socket.on("message", (raw) => {
     const message = JSON.parse(raw.toString());
+    if (process.env.FAKE_CODEX_LOG_FILE && typeof message.method === "string" && !message.method.startsWith("initialize")) {
+      appendFileSync(process.env.FAKE_CODEX_LOG_FILE, `${JSON.stringify({ method: message.method, params: message.params })}\n`);
+    }
+    if (message.method === undefined && toolCalls.has(message.id)) {
+      const call = toolCalls.get(message.id); toolCalls.delete(message.id);
+      completed(socket, call.threadId, call.turnId, { type: "toolResult", response: message });
+      return;
+    }
     if (message.method === "initialize") {
       socket.send(JSON.stringify({ id: message.id, result: { userAgent: "fake", platformFamily: "windows", platformOs: "windows", codexHome: "tmp" } }));
       const marker = process.env.FAKE_CODEX_EXIT_ONCE_FILE;
@@ -69,6 +93,22 @@ if (args[0] === "app-server") {
     else if (message.method === "initialized") {
       const marker = process.env.FAKE_CODEX_DROP_CONNECTION_ONCE_FILE;
       if (marker && !existsSync(marker)) void writeFile(marker, "dropped").then(() => setTimeout(() => socket.close(), 100));
+    }
+    else if (message.method === "thread/start") socket.send(JSON.stringify({ id: message.id, result: thread(`thread-${++threads}`) }));
+    else if (message.method === "thread/resume" || message.method === "thread/read") socket.send(JSON.stringify({ id: message.id, result: thread(message.params.threadId) }));
+    else if (message.method === "model/list") socket.send(JSON.stringify({ id: message.id, result: { data: [{ id: "fake-model", displayName: "Fake model", hidden: false }], nextCursor: null } }));
+    else if (message.method === "turn/steer") socket.send(JSON.stringify({ id: message.id, result: { turnId: message.params.expectedTurnId } }));
+    else if (message.method === "turn/start") {
+      const turnId = `turn-${++turns}`;
+      const threadId = message.params.threadId;
+      socket.send(JSON.stringify({ id: message.id, result: { turn: { id: turnId, status: "inProgress", items: [] } } }));
+      const text = message.params.input?.[0]?.text ?? "";
+      const tool = /^tool:(\S+)\s*(.*)$/su.exec(text);
+      if (tool) {
+        const callId = `call-${turnId}`;
+        toolCalls.set(callId, { threadId, turnId });
+        socket.send(JSON.stringify({ id: callId, method: "item/tool/call", params: { threadId, turnId, callId, tool: tool[1], arguments: JSON.parse(tool[2] || "{}") } }));
+      } else completed(socket, threadId, turnId, { type: "agentMessage", text: `echo: ${text}` });
     }
     else if (message.id !== undefined) socket.send(JSON.stringify({ id: message.id, result: {} }));
   }));

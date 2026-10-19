@@ -10,7 +10,7 @@ async function fixture(mode: "ready" | "absent" | "broken" = "ready") {
   const readPage = vi.fn(() => "<html>injected issue asset</html>");
   const call = vi.fn();
   const server = new LocalRouterServer({ tools: { call } as never,
-    codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "http-fixture",
+    instanceId: "http-fixture",
     ...(mode === "absent" ? {} : { issues: { readPage, ...(mode === "ready" ? { service: x.service } : {}) } }),
   } as ConstructorParameters<typeof LocalRouterServer>[0]);
   const { url } = await server.start(); cleanup.push(() => server.close());

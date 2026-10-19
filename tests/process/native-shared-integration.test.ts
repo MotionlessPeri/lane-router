@@ -12,16 +12,28 @@ import { RouterStateStore } from "../../src/router/state-store.js";
 import type { BackendName, CallerContext } from "../../src/router/types.js";
 
 const fixture = vi.hoisted(() => ({ state: undefined as RouterStateStore | undefined, notices: [] as unknown[], stopped: 0, requests: [] as string[] }));
-vi.mock("../../src/adapters/codex/codex-runtime.js", () => ({ createCodexRuntime: (options: { state: RouterStateStore }) => {
-  fixture.state = options.state;
-  return { start: async () => {}, stop: async () => { fixture.stopped++; }, endpoint: "ws://127.0.0.1:1",
-    client: { request: async (name: string) => { fixture.requests.push(name); if (name !== "model/list") throw new Error("model calls forbidden"); return { data: [], nextCursor: null }; } },
-    backend: { name: "codex", notifyNormal: async (_b: unknown, n: unknown) => { fixture.notices.push(n); return "sent"; }, notifyCorrection: async () => "sent",
-      onAttentionOpportunity: () => () => {}, waitUntilReplaceable: async () => {}, restorePresence: () => "offline",
-      reach: () => ({ state: "no_channel", connectedAt: null, lastLifecycleAt: null, lastNotifiedAt: null, believedBusy: null }),
-      resolveIdentity: (ctx: CallerContext) => ({ value: ctx.conversationId, source: "caller" }) },
-  };
+// The Codex host is a separate process now; the core's side of it is the hub and the backend.
+// Faking both keeps this test where it was: a linked host whose only App Server call is model/list.
+vi.mock("../../src/process/codex-host-hub.js", () => ({ CodexHostHub: class {
+  readonly client = { request: async (name: string) => { fixture.requests.push(name); if (name !== "model/list") throw new Error("model calls forbidden"); return { data: [], nextCursor: null }; },
+    isConnected: () => true, onNotification: () => () => {} };
+  constructor(options: { state: RouterStateStore }) { fixture.state = options.state; }
+  connect() {} close() { fixture.stopped++; } hasVisibleClient() { return false; }
+  onReady(handler: () => void) { queueMicrotask(handler); return () => {}; }
+  status() { return { connected: true, hostBuild: "fixture", coreBuild: "fixture" }; }
 } }));
+vi.mock("../../src/backends/codex-backend.js", () => ({ CodexBackend: class {
+  readonly name = "codex";
+  async notifyNormal(_b: unknown, n: unknown) { fixture.notices.push(n); return "sent"; }
+  async notifyCorrection() { return "sent"; }
+  onAttentionOpportunity() { return () => {}; }
+  async waitUntilReplaceable() {}
+  restorePresence() { return "offline"; }
+  reach() { return { state: "no_channel", connectedAt: null, lastLifecycleAt: null, lastNotifiedAt: null, believedBusy: null }; }
+  resolveIdentity(ctx: CallerContext) { return { value: ctx.conversationId, source: "caller" }; }
+  reportReconnect() {}
+} }));
+vi.mock("../../src/process/ensure-codex-host.js", () => ({ ensureCodexHost: async () => undefined }));
 vi.mock("../../src/process/codex-profiles.js", () => ({ defaultCodexModelProvider: () => "openai", listCodexModelProviders: () => [], listCodexProfiles: () => [], profileModelProvider: () => undefined }));
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.unstubAllEnvs(); fixture.notices = []; fixture.requests = []; });
@@ -61,7 +73,7 @@ async function setup(scope?: 'company-active-task') {
   const localState = new RouterStateStore(localDb);
   localState.createLane({ address: permit.address, project: "fixture", roleDescription: "private Lead", now: 1 });
   const localBinding = localState.createBinding({ id: "private-L", laneAddress: permit.address, backend: "codex", conversationId: "lead-thread", generation: 7, startup: {}, now: 2 });
-  const localServer = new LocalRouterServer({ tools: {} as never, codex: {} as never, instanceId: "private-fixture" });
+  const localServer = new LocalRouterServer({ tools: {} as never, instanceId: "private-fixture" });
   await localServer.start(); cleanups.push(() => localServer.close());
   return { root, runtime, permit, client, shared, state, rpc, call, indices, signal, discovery, sockets, frames, localState, localBinding };
 }

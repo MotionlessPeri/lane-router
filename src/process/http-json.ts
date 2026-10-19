@@ -14,6 +14,33 @@ export function json(response: ServerResponse, status: number, value: unknown): 
   response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value));
 }
 
+/**
+ * Keep web pages out of the entries that change state. Any page open in a browser on this machine
+ * can POST to the loopback port; it cannot read the answer, but a "simple" request — text/plain, no
+ * custom headers — is sent without a preflight, so its side effect happens regardless. Two checks,
+ * each enough on its own, so either can fail without the other going with it:
+ *
+ *   - Origin present ⇒ 403. A browser always sends it on a cross-site POST, and nothing meant to
+ *     call these entries — the command line, the lane server — sends one, so no list is needed.
+ *   - Content type other than application/json ⇒ 400. A page can only send JSON after a preflight,
+ *     and the Router grants no cross-origin permission, so that request is never sent.
+ *
+ * Both run before the body is read: a refused request must not cost the Router a parse, and must
+ * not reach the code that would act on it. Answers true when it has already written the refusal.
+ */
+export function refuseWebPage(request: IncomingMessage, response: ServerResponse): boolean {
+  if (request.headers.origin !== undefined) {
+    json(response, 403, { error: "requests from a web page are not accepted here" });
+    return true;
+  }
+  const contentType = request.headers["content-type"];
+  if (typeof contentType !== "string" || !contentType.toLowerCase().startsWith("application/json")) {
+    json(response, 400, { error: "content-type must be application/json" });
+    return true;
+  }
+  return false;
+}
+
 /** Shared browser action checks, in their established order; malformed/large JSON still throws. */
 export async function readPageAction(request: IncomingMessage, response: ServerResponse, options: {
   readonly origin: () => string; readonly action: string; readonly actionToken: string;

@@ -49,6 +49,7 @@
   <span id="router" class="dim"></span>
   <span id="status" class="dim"></span>
 </header>
+<div id="codex-host" class="warn" hidden></div>
 
 <!--
   Ordered by what the reader does, not by what the snapshot contains. The launcher is the one
@@ -635,12 +636,25 @@
     replace(document.getElementById("messages"), host);
   }
 
+  // The Codex host survives core restarts, so a deploy can leave it on the previous build; nothing
+  // else on the board would show that.
+  function renderCodexHost(snapshot) {
+    var host = snapshot.codexHost;
+    var notice = document.getElementById("codex-host");
+    var stale = Boolean(host && host.connected && host.hostBuild !== host.coreBuild);
+    notice.hidden = !stale;
+    notice.textContent = stale
+      ? "Codex 宿主的构建与核心不同（宿主 " + host.hostBuild + "，核心 " + host.coreBuild + "），用 scripts/restart-router.ps1 -CodexHost 换代；换代会断开开着的 Codex 对话。"
+      : "";
+  }
+
   function render(snapshot) {
     currentSnapshot = snapshot;
     document.getElementById("router").textContent =
       "pid " + snapshot.router.pid + " · 端口 " + snapshot.router.port + " · schema v" + snapshot.router.schemaVersion;
     document.getElementById("status").textContent = "快照 " + clock(snapshot.capturedAt);
     document.getElementById("status").className = "dim";
+    renderCodexHost(snapshot);
     renderLanes(snapshot);
     renderLauncher(snapshot);
     renderBacklog(snapshot);

@@ -76,8 +76,13 @@ export class CodexBackend implements PlatformBackend {
     return () => this.attentionHandlers.delete(handler);
   }
 
+  /**
+   * The link to the App Server is back — its own reconnect, or the Codex host relinking to a
+   * restarted Router. That is a chance to deliver and to re-check takeovers, but not a lifecycle
+   * report: nothing here says the thread ran, so reach keeps what was actually observed.
+   */
   reportReconnect(threadIds: readonly string[]): void {
-    for (const threadId of threadIds) this.signalOpportunity(threadId);
+    for (const threadId of threadIds) this.signalOpportunity(threadId, false);
   }
 
   observeNotification(message: CodexNotification): void {
@@ -160,10 +165,10 @@ export class CodexBackend implements PlatformBackend {
     this.observed.set(threadId, current);
   }
 
-  private signalOpportunity(threadId: string): void {
+  private signalOpportunity(threadId: string, observed = true): void {
     // A turn ending or a status change is the Codex-side counterpart of a Claude lifecycle
     // event: it is the App Server telling us this thread is really there and really running.
-    this.observe(threadId, "lifecycle");
+    if (observed) this.observe(threadId, "lifecycle");
     const waiters = this.replaceWaiters.get(threadId);
     if (waiters) {
       this.replaceWaiters.delete(threadId);

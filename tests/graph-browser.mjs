@@ -30,7 +30,7 @@ const backends = new BackendRegistry([backend]); const pump = new NotificationPu
 const core = new RouterCore({ state, mailbox, backends, pump, newId: () => randomUUID(), now: Date.now }); const tools = new ToolService(core);
 const graphs = openGraphs(join(root, "graphs.sqlite"), core); let origin;
 const applicationTools = bindBuiltinTools(tools, undefined, productToolCatalog, graphs.service, () => origin);
-const server = new LocalRouterServer({ tools, applicationTools, graphs: { service: graphs.service }, codex: { endpoint: "ws://127.0.0.1:1" }, instanceId: randomUUID() });
+const server = new LocalRouterServer({ tools, applicationTools, graphs: { service: graphs.service }, instanceId: randomUUID() });
 let browser; let page;
 const timeout = setTimeout(() => { process.stderr.write("Browser verification timed out\n"); process.exit(1); }, 120_000);
 const caller = { backend: "codex", conversationId: "graph-browser-fixture", requestKey: "attach", cwd: root };

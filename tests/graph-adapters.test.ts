@@ -25,7 +25,7 @@ async function setup(enabled = true, available = true) {
   writeFileSync(join(assetsDirectory, "assets", "viewer.js"), "// viewer");
   writeFileSync(join(assetsDirectory, "asset-manifest.json"), JSON.stringify(["assets/viewer.js"]));
   const server = new LocalRouterServer({ tools, applicationTools, ...(enabled ? { graphs: { service: available ? service : undefined, assetsDirectory } } : {}),
-    codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: randomUUID() });
+    instanceId: randomUUID() });
   origin = (await server.start()).url; closes.push(() => server.close());
   const client = new LocalRouterClient(async () => origin);
   return { ...x, service, origin, client, get: (path: string, init?: RequestInit) => fetch(`${origin}${path}`, init) };

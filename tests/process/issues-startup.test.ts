@@ -5,22 +5,22 @@ import { afterEach, expect, test, vi } from "vitest";
 import Database from "better-sqlite3";
 import { runRouterProcess } from "../../src/process/main.js";
 import { LocalRouterClient } from "../../src/process/local-client.js";
-import { CodexBackend } from "../../src/backends/codex-backend.js";
 import { MailboxStore } from "../../src/router/mailbox-store.js";
 import { NotificationPump } from "../../src/router/notification-pump.js";
 import { openIssuesModule, openIssueStore } from "../../src/modules/issues/index.js";
 import { openGraphStore } from "../../src/modules/graphs/index.js";
 
-const fake = vi.hoisted(() => ({ options: [] as any[], stopError: false, modelError: false, moduleStartError: false, moduleCloseError: false, events: [] as string[] }));
-vi.mock("../../src/adapters/codex/codex-runtime.js", () => ({ createCodexRuntime: (options: any) => {
-  fake.options.push(options);
-  const client = { request: vi.fn(async () => { if (fake.modelError) throw new Error("fixture models fail"); return { data: [], nextCursor: null }; }), isConnected: () => false, onNotification: () => () => {} };
-  return { client, endpoint: "ws://127.0.0.1:1", start: async () => "ws://127.0.0.1:1",
-    stop: async () => { fake.events.push("codex-stop"); if (fake.stopError) throw new Error("fixture stop fail"); },
-    backend: new CodexBackend({ client, resolveLane: () => undefined }),
-    decorateThreadStart: (params: any) => params, claimThread: () => {}, openThreadClient: () => {}, closeThreadClient: () => {}, ownsThread: () => false,
-  };
+const fake = vi.hoisted(() => ({ options: [] as any[], stopError: false, modelError: false, moduleStartError: false, moduleCloseError: false, events: [] as string[], ensured: 0 }));
+// The core's whole Codex side is the host link's hub; the host itself runs in another process.
+vi.mock("../../src/process/codex-host-hub.js", () => ({ CodexHostHub: class {
+  readonly client = { request: vi.fn(async () => { if (fake.modelError) throw new Error("fixture models fail"); return { data: [], nextCursor: null }; }), isConnected: () => false, onNotification: () => () => {} };
+  constructor(options: any) { fake.options.push(options); }
+  connect() {} hasVisibleClient() { return false; }
+  onReady(handler: () => void) { queueMicrotask(handler); return () => {}; }
+  status() { return { connected: false, hostBuild: null, coreBuild: "fixture" }; }
+  close() { fake.events.push("codex-host-close"); if (fake.stopError) throw new Error("fixture stop fail"); }
 } }));
+vi.mock("../../src/process/ensure-codex-host.js", () => ({ ensureCodexHost: async () => { fake.ensured += 1; } }));
 vi.mock("../../src/process/codex-profiles.js", () => ({ defaultCodexModelProvider: () => "fixture", listCodexProfiles: () => [], listCodexModelProviders: () => [], profileModelProvider: () => "fixture" }));
 vi.mock("../../src/modules/issues/index.js", async importOriginal => {
   const original = await importOriginal<typeof import("../../src/modules/issues/index.js")>();
@@ -37,8 +37,10 @@ afterEach(async () => {
   for (const runtime of running.splice(0)) await runtime.close().catch(() => {});
   vi.restoreAllMocks(); vi.unstubAllEnvs();
   roots.splice(0).forEach(root => rmSync(root, { recursive: true, force: true }));
-  fake.events.length = 0; fake.options.length = 0;
+  fake.events.length = 0; fake.options.length = 0; fake.ensured = 0;
 });
+const codexCall = (name: string, args: Record<string, unknown>) =>
+  fake.options[0].callTool(name, args, { ...caller, requestKey: `codex:${name}` }, new AbortController().signal);
 function root() {
   const path = mkdtempSync(join(tmpdir(), "issue-startup-task5-")); roots.push(path);
   writeFileSync(join(path, "config.json"), "{}"); vi.stubEnv("LANE_ROUTER_CONFIG", join(path, "config.json"));
@@ -56,8 +58,11 @@ test("standalone explicitly assembles issues after reconciliation and exposes pr
   const original = MailboxStore.prototype.reconcile;
   vi.spyOn(MailboxStore.prototype, "reconcile").mockImplementation(function (...args) { fake.events.push("reconcile"); return original.apply(this, args); });
   const x = await boot(path);
-  expect(fake.options[0].catalog.definitions).toHaveLength(13);
+  // Codex tool calls arrive over the host link and reach the same product tools as /rpc.
+  await expect(codexCall("lane_issue_read", {})).rejects.toThrow(/attach|NOT_ATTACHED|lane/iu);
+  await expect(codexCall("lane_no_such_tool", {})).rejects.toThrow(/Unknown Lane Router tool/u);
   expect(fake.events.indexOf("reconcile")).toBeLessThan(fake.events.indexOf("issues-start"));
+  expect(fake.ensured).toBe(1);
   expect(existsSync(join(path, "issues.sqlite"))).toBe(true);
   expect(existsSync(join(path, "graphs.sqlite"))).toBe(true);
   await x.client.call("lane_attach_current", { address: "fixture/work", role_description: "Fixture role" }, caller);
@@ -70,7 +75,7 @@ test("standalone explicitly assembles issues after reconciliation and exposes pr
   expect(listing.status).toBe(200);
   expect(await listing.json()).toMatchObject({ result: { items: [{ id: saved.issueId }] }, actionToken: expect.any(String) });
   await x.runtime.close();
-  expect(fake.events.indexOf("issues-close")).toBeLessThan(fake.events.indexOf("codex-stop"));
+  expect(fake.events.indexOf("issues-close")).toBeLessThan(fake.events.indexOf("codex-host-close"));
   expect(existsSync(join(path, "router.lock"))).toBe(false);
 });
 
@@ -78,7 +83,7 @@ test("core-only assembly never constructs the module or creates its database", a
   const path = root();
   const before = vi.mocked(openIssuesModule).mock.calls.length;
   const x = await boot(path, false);
-  expect(fake.options[0].catalog.definitions).toHaveLength(5);
+  await expect(codexCall("lane_issue_read", {})).rejects.toThrow(/Unknown Lane Router tool/u);
   expect(vi.mocked(openIssuesModule).mock.calls).toHaveLength(before);
   expect(existsSync(join(path, "issues.sqlite"))).toBe(false);
   expect(existsSync(join(path, "graphs.sqlite"))).toBe(false);
@@ -116,9 +121,16 @@ test.each(["corrupt", "future"])("%s module failure leaves core available and re
   expect(readFileSync(databasePath)).toEqual(before);
 });
 
-test("abnormal startup and shutdown release core lock and database even when runtime stop fails", async () => {
+// The Codex model list comes from the host and may not be there at all, so failing to read it no
+// longer stops the core; the menu simply lacks Codex models until the host answers.
+test("a Codex model list failure no longer aborts startup; shutdown releases the core even when the host link fails to close", async () => {
   const path = root(); fake.modelError = true;
-  await expect(runRouterProcess({ dataRoot: path })).rejects.toThrow("fixture models fail");
+  const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  const first = await boot(path);
+  await vi.waitFor(() => expect(stderr.mock.calls.some(([line]) => String(line).includes("fixture models fail"))).toBe(true));
+  stderr.mockRestore();
+  expect(existsSync(join(path, "router.lock"))).toBe(true);
+  await first.runtime.close();
   expect(existsSync(join(path, "router.lock"))).toBe(false);
   fake.modelError = false;
   const x = await boot(path); fake.stopError = true;
@@ -138,7 +150,7 @@ test("failed module recovery closes its started worker and leaves its configured
 test("module close errors still release the runtime and core lock", async () => {
   const path = root(); const x = await boot(path); fake.moduleCloseError = true;
   await expect(x.runtime.close()).rejects.toThrow("fixture module close fail");
-  expect(fake.events).toContain("codex-stop");
+  expect(fake.events).toContain("codex-host-close");
   expect(existsSync(join(path, "router.lock"))).toBe(false);
 });
 
@@ -146,7 +158,8 @@ test("startup failure after module start drains and closes its database before r
   const path = root();
   vi.spyOn(NotificationPump.prototype, "onStartup").mockRejectedValueOnce(new Error("fixture startup fail"));
   await expect(runRouterProcess({ dataRoot: path })).rejects.toThrow("fixture startup fail");
-  expect(fake.events).toEqual(["issues-start", "issues-close", "codex-stop"]);
+  expect(fake.events).toEqual(["issues-start", "issues-close", "codex-host-close"]);
+  expect(fake.ensured).toBe(0);
   expect(existsSync(join(path, "router.lock"))).toBe(false);
   const db = new Database(join(path, "issues.sqlite")); db.close();
 });

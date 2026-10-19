@@ -101,6 +101,17 @@ export interface DashboardSnapshot {
   readonly messages: readonly DashboardMessage[];
   readonly truncated: { readonly messages: boolean; readonly limit: number };
   readonly launcher?: DashboardLauncherChoices;
+  readonly codexHost?: DashboardCodexHost;
+}
+
+/**
+ * The Codex host outlives core restarts, so after a deploy it may still run the previous build.
+ * Both builds are published as they are; the page compares them.
+ */
+export interface DashboardCodexHost {
+  readonly connected: boolean;
+  readonly hostBuild: string | null;
+  readonly coreBuild: string;
 }
 
 interface DashboardDependencies {
@@ -109,6 +120,7 @@ interface DashboardDependencies {
   readonly backends: BackendRegistry;
   readonly now: () => number;
   readonly launcherChoices?: DashboardLauncherChoices;
+  readonly codexHost?: () => DashboardCodexHost;
 }
 
 /**
@@ -172,6 +184,7 @@ export function dashboardSnapshot(
     // Said out loud, because a list that was cut and does not say so gets read as the whole of it.
     truncated: { messages: state.countMessages() > limit, limit },
     ...(dependencies.launcherChoices === undefined ? {} : { launcher: dependencies.launcherChoices }),
+    ...(dependencies.codexHost === undefined ? {} : { codexHost: dependencies.codexHost() }),
   };
 }
 

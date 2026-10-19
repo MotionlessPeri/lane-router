@@ -5,7 +5,6 @@ import { LocalRouterServer } from "../../src/process/local-server.js";
 function startServer(pendingSummary: (conversationId: string) => { laneAddress: string; pendingCount: number } | undefined) {
   return new LocalRouterServer({
     tools: { call: vi.fn() } as never,
-    codex: { endpoint: "ws://127.0.0.1:1" } as never,
     instanceId: "instance-1",
     pendingSummary,
   });
@@ -33,7 +32,6 @@ test("answers the backlog of the conversation's lane, or 404 when it owns none",
 test("the surface is absent when the Router serves no summary provider", async () => {
   const server = new LocalRouterServer({
     tools: { call: vi.fn() } as never,
-    codex: { endpoint: "ws://127.0.0.1:1" } as never,
     instanceId: "instance-1",
   });
   const discovery = await server.start();

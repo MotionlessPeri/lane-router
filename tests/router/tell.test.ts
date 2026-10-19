@@ -295,7 +295,7 @@ describe("what a caller may put in", () => {
 describe("telling a lane through the command line and a real Router", () => {
   async function startRouter(x: Setup) {
     const server = new LocalRouterServer({
-      tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "tell-e2e",
+      tools: { call: vi.fn() } as never, instanceId: "tell-e2e",
       tell: (input) => x.tell(input),
     });
     const discovery = await server.start();

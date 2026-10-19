@@ -10,7 +10,8 @@ export interface CodexTuiBridgeHost {
   claimThread(threadId: string, cwd?: string, startup?: Readonly<{ profile?: string; modelProvider?: string; transient?: boolean }>): void;
   openThreadClient(threadId: string): void;
   closeThreadClient(threadId: string): void;
-  ownsThread(threadId: string): boolean;
+  /** A Promise when the answer has to come from elsewhere; a rejection refuses the resume with its message. */
+  ownsThread(threadId: string): boolean | Promise<boolean>;
   dispatchTool(request: DynamicToolCallParams): Promise<unknown>;
   observeNotification(method: string, params: Readonly<Record<string, unknown>>): void;
   admitModelRequest?(method: string, admission?: string, params?: unknown): AccountRequestFinish;
@@ -56,9 +57,9 @@ export class CodexTuiBridge {
       for (const message of queued) upstream.send(message);
       queued.length = 0;
     });
-    downstream.on("message", (raw) => {
-      const incoming = parseRecord(raw.toString());
-      let forwarded = raw.toString();
+    const fromDownstream = async (raw: string): Promise<void> => {
+      const incoming = parseRecord(raw);
+      let forwarded = raw;
       if (incoming && "accountAdmissionToken" in incoming) {
         const { accountAdmissionToken: _admission, ...upstreamMessage } = incoming;
         forwarded = JSON.stringify(upstreamMessage);
@@ -73,13 +74,20 @@ export class CodexTuiBridge {
           return;
         }
       }
-      const message = this.fromTui(forwarded, pendingClaims, downstream);
+      const message = await this.fromTui(forwarded, pendingClaims, downstream);
       if (message === undefined) {
         if (incoming && isId(incoming.id)) { admissions.get(incoming.id)?.(); admissions.delete(incoming.id); }
         return;
       }
       if (upstream.readyState === WebSocket.OPEN) upstream.send(message);
       else if (upstream.readyState === WebSocket.CONNECTING) queued.push(message);
+    };
+    // One frame at a time per TUI: an ownership answer may have to come from the Router core, and
+    // a frame forwarded past it could reach the App Server before the resume it depends on.
+    let inbound = Promise.resolve();
+    downstream.on("message", (raw) => {
+      const text = raw.toString();
+      inbound = inbound.then(() => fromDownstream(text)).catch(() => undefined);
     });
     upstream.on("message", (raw) => {
       const response = parseRecord(raw.toString());
@@ -121,7 +129,7 @@ export class CodexTuiBridge {
     if (server) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 
-  private fromTui(raw: string, pendingClaims: Map<JsonRpcId, string | undefined>, downstream: WebSocket): string | undefined {
+  private async fromTui(raw: string, pendingClaims: Map<JsonRpcId, string | undefined>, downstream: WebSocket): Promise<string | undefined> {
     const message = parseRecord(raw);
     if (!message) return raw;
     if (message.method === "thread/start" && isId(message.id) && isRecord(message.params)) {
@@ -136,7 +144,13 @@ export class CodexTuiBridge {
     }
     if (message.method === "thread/resume" && isId(message.id) && isRecord(message.params)) {
       const threadId = message.params.threadId;
-      if (typeof threadId !== "string" || !this.host.ownsThread(threadId)) {
+      let owned: boolean;
+      try { owned = typeof threadId === "string" && await this.host.ownsThread(threadId); }
+      catch (error) {
+        downstream.send(JSON.stringify({ id: message.id, error: { code: -32600, message: error instanceof Error ? error.message : String(error) } }));
+        return undefined;
+      }
+      if (!owned) {
         downstream.send(JSON.stringify({ id: message.id, error: { code: -32600, message: `Codex thread is not owned by Lane Router: ${String(threadId)}` } }));
         return undefined;
       }

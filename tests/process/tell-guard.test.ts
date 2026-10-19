@@ -3,6 +3,7 @@ import { request as httpRequest } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
+import { CodexHostServer } from "../../src/process/codex-host.js";
 import { LocalRouterServer } from "../../src/process/local-server.js";
 import type { TellInput } from "../../src/router/tell.js";
 
@@ -18,7 +19,7 @@ import type { TellInput } from "../../src/router/tell.js";
 // hang elsewhere still fails fast.
 vi.setConfig({ testTimeout: 30_000 });
 
-const servers: LocalRouterServer[] = [];
+const servers: Array<LocalRouterServer | CodexHostServer> = [];
 afterEach(async () => { for (const server of servers.splice(0)) await server.close(); });
 
 async function startServer() {
@@ -29,16 +30,21 @@ async function startServer() {
   }));
   const recordCwd = vi.fn();
   const zcodeSpawnLane = vi.fn(async (input: { address: string }) => ({ sessionId: "sess_1", address: input.address }));
+  const hostConnect = vi.fn();
   const server = new LocalRouterServer({
-    tools: { call } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x", archiveLane, tell, recordCwd, zcodeSpawnLane,
+    tools: { call } as never, codexHost: { connect: hostConnect, close: vi.fn() }, instanceId: "x", archiveLane, tell, recordCwd, zcodeSpawnLane,
   });
-  // Stand-ins for the two entries whose effect lands inside the server itself: a lifecycle report
+  // The provider entry moved to the Codex host with the bridges it creates; the same guard went with it.
+  const host = new CodexHostServer({ endpoint: "ws://127.0.0.1:1" } as never, () => ({ instanceId: "host" }));
+  // Stand-ins for the two entries whose effect lands inside a server itself: a lifecycle report
   // changes what the channel hub believes, and a provider request starts a new Codex endpoint.
   const reportLifecycle = vi.spyOn(server.claude, "reportLifecycle").mockReturnValue(true);
-  const providerEndpoint = vi.spyOn(server, "codexEndpointForProvider").mockResolvedValue("ws://127.0.0.1:9/provider");
-  servers.push(server);
+  const providerEndpoint = vi.spyOn(host, "codexEndpointForProvider").mockResolvedValue("ws://127.0.0.1:9/provider");
+  servers.push(server, host);
   const discovery = await server.start();
-  return { server, discovery, archiveLane, call, tell, recordCwd, zcodeSpawnLane, reportLifecycle, providerEndpoint };
+  const hostUrl = (await host.start()).url;
+  const urlFor = (entry: { readonly on: "core" | "host" }) => entry.on === "host" ? hostUrl : discovery.url;
+  return { server, discovery, urlFor, archiveLane, call, tell, recordCwd, zcodeSpawnLane, reportLifecycle, providerEndpoint, hostConnect };
 }
 
 type Started = Awaited<ReturnType<typeof startServer>>;
@@ -47,7 +53,7 @@ type Started = Awaited<ReturnType<typeof startServer>>;
 function expectNothingActed(x: Started): void {
   for (const [name, spy] of Object.entries({
     archiveLane: x.archiveLane, call: x.call, tell: x.tell, recordCwd: x.recordCwd, zcodeSpawnLane: x.zcodeSpawnLane,
-    reportLifecycle: x.reportLifecycle, providerEndpoint: x.providerEndpoint,
+    reportLifecycle: x.reportLifecycle, providerEndpoint: x.providerEndpoint, hostConnect: x.hostConnect,
   })) expect(spy, name).not.toHaveBeenCalled();
 }
 
@@ -71,14 +77,14 @@ function send(url: string, options: { method: string; path: string; headers?: Re
 
 const BOUND_CALLER = { backend: "claude", conversationId: "session-1", requestKey: "forged-1" };
 const ENTRIES = [
-  { path: "/lanes/tell", body: JSON.stringify({ address: "alpha/victim", origin: "vikunja", subject: "x" }) },
-  { path: "/lanes/archive", body: JSON.stringify({ address: "alpha/victim" }) },
-  { path: "/rpc", body: JSON.stringify({ method: "lane_send", params: { target: "alpha/victim", body: "x", kind: "normal" }, context: BOUND_CALLER }) },
-  { path: "/claude/lifecycle", body: JSON.stringify({ conversationId: "session-1", event: "Stop", cwd: "C:/forged" }) },
-  { path: "/codex/provider-endpoint", body: JSON.stringify({ modelProvider: "forged" }) },
+  { on: "core", path: "/lanes/tell", body: JSON.stringify({ address: "alpha/victim", origin: "vikunja", subject: "x" }) },
+  { on: "core", path: "/lanes/archive", body: JSON.stringify({ address: "alpha/victim" }) },
+  { on: "core", path: "/rpc", body: JSON.stringify({ method: "lane_send", params: { target: "alpha/victim", body: "x", kind: "normal" }, context: BOUND_CALLER }) },
+  { on: "core", path: "/claude/lifecycle", body: JSON.stringify({ conversationId: "session-1", event: "Stop", cwd: "C:/forged" }) },
+  { on: "host", path: "/codex/provider-endpoint", body: JSON.stringify({ modelProvider: "forged" }) },
   // What a page would want from this one: a new lane in a directory it picks, whose first
   // instruction it wrote.
-  { path: "/zcode/spawn", body: JSON.stringify({ address: "alpha/victim", role: "r", cwd: "C:/forged", intro: "forged first turn" }) },
+  { on: "core", path: "/zcode/spawn", body: JSON.stringify({ address: "alpha/victim", role: "r", cwd: "C:/forged", intro: "forged first turn" }) },
 ] as const;
 
 describe("entries that change state refuse what a web page can send", () => {
@@ -87,7 +93,7 @@ describe("entries that change state refuse what a web page can send", () => {
   for (const entry of ENTRIES) {
     it(`refuses a text/plain request to ${entry.path} without acting on it`, async () => {
       const x = await startServer();
-      const response = await send(x.discovery.url, {
+      const response = await send(x.urlFor(entry), {
         method: "POST", path: entry.path, headers: { "content-type": "text/plain" }, body: entry.body,
       });
       expect(response.status).toBe(400);
@@ -100,7 +106,7 @@ describe("entries that change state refuse what a web page can send", () => {
     it(`refuses any request to ${entry.path} that carries an Origin`, async () => {
       const x = await startServer();
       for (const origin of ["http://evil.example", "null", x.discovery.url]) {
-        const response = await send(x.discovery.url, {
+        const response = await send(x.urlFor(entry), {
           method: "POST", path: entry.path, headers: { "content-type": "application/json", origin }, body: entry.body,
         });
         expect(response.status, origin).toBe(403);
@@ -112,7 +118,7 @@ describe("entries that change state refuse what a web page can send", () => {
     // without any permission to proceed, so the real request is never sent.
     it(`grants no cross-origin permission on a preflight to ${entry.path}`, async () => {
       const x = await startServer();
-      const response = await send(x.discovery.url, {
+      const response = await send(x.urlFor(entry), {
         method: "OPTIONS", path: entry.path,
         headers: { origin: "http://evil.example", "access-control-request-method": "POST", "access-control-request-headers": "content-type" },
       });
@@ -126,11 +132,11 @@ describe("entries that change state refuse what a web page can send", () => {
     it(`refuses ${entry.path} before reading an oversized body`, async () => {
       const x = await startServer();
       const huge = "x".repeat(2 * 1024 * 1024);
-      const plain = await send(x.discovery.url, { method: "POST", path: entry.path, headers: { "content-type": "text/plain" }, body: huge });
+      const plain = await send(x.urlFor(entry), { method: "POST", path: entry.path, headers: { "content-type": "text/plain" }, body: huge });
       expect(plain).toMatchObject({ status: 400 });
       expect(plain.body).toMatch(/application\/json/u);
       expect(plain.body).not.toMatch(/too large/u);
-      const withOrigin = await send(x.discovery.url, {
+      const withOrigin = await send(x.urlFor(entry), {
         method: "POST", path: entry.path, headers: { "content-type": "application/json", origin: "http://evil.example" }, body: huge,
       });
       expect(withOrigin.status).toBe(403);
@@ -141,7 +147,7 @@ describe("entries that change state refuse what a web page can send", () => {
   it("still accepts what the command line and the lane server send", async () => {
     const x = await startServer();
     for (const entry of ENTRIES) {
-      const response = await send(x.discovery.url, {
+      const response = await send(x.urlFor(entry), {
         method: "POST", path: entry.path, headers: { "content-type": "application/json; charset=utf-8" }, body: entry.body,
       });
       expect(response.status, entry.path).toBe(200);
@@ -162,7 +168,7 @@ describe("entries that change state refuse what a web page can send", () => {
 // sends the same Stop the way the hook does, to show the forgeries were refused rather than harmless.
 describe("a forged lifecycle report", () => {
   it("neither releases a waiting takeover nor clears the conversation's busy flag", async () => {
-    const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x" });
+    const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: "x" });
     servers.push(server);
     const { url } = await server.start();
     const socket = new WebSocket(`${url.replace("http", "ws")}/claude?conversationId=session-1`);
@@ -255,5 +261,22 @@ describe("the channel handshake refuses a web page", () => {
       socket.close();
       await closed;
     }
+  });
+
+  // The Codex host link receives lane tool calls and can start turns, so a page standing in for the
+  // host would be worse than one standing in for a channel. Same judgment: any Origin is a page.
+  it("refuses a Codex host link that carries an Origin and accepts one without", async () => {
+    const x = await startServer();
+    const refused = new WebSocket(`${x.discovery.url.replace("http", "ws")}/codex/host`, { origin: "http://evil.example" });
+    await expect(new Promise<string>((resolve) => {
+      refused.once("open", () => resolve("open"));
+      refused.once("error", () => resolve("refused"));
+    })).resolves.toBe("refused");
+    expect(x.hostConnect).not.toHaveBeenCalled();
+
+    const accepted = new WebSocket(`${x.discovery.url.replace("http", "ws")}/codex/host`);
+    await new Promise<void>((resolve, reject) => { accepted.once("open", () => resolve()); accepted.once("error", reject); });
+    expect(x.hostConnect).toHaveBeenCalledOnce();
+    accepted.terminate();
   });
 });

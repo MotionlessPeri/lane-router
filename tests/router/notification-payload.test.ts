@@ -83,7 +83,7 @@ it("produces byte-identical payloads on the Claude and the Codex path", async ()
   await expect(codex.notifyNormal({ ...binding, backend: "codex", conversationId: "thread-1" }, notification)).resolves.toBe("sent");
   const codexPayload = (request.mock.calls[1]![1] as { input: Array<{ text: string }> }).input[0]!.text;
 
-  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: "x" });
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: "x" });
   const discovery = await server.start();
   const channel = await connectClaudeChannel(async () => discovery.url, "session-1");
   const claudePayloads: string[] = [];

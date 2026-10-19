@@ -51,6 +51,26 @@ function setup(status: "idle" | "active" | "notLoaded" | "systemError" = "idle")
 }
 
 describe("CodexBackend", () => {
+  // A reconnect — the App Server's, or the Codex host linking to a restarted Router — says the link
+  // is back, not that any thread ran. It must give pending mail and waiting takeovers their chance
+  // without letting reach call a thread live that has not reported a turn since.
+  it("a reconnect offers attention and wakes takeovers without claiming the thread is live", async () => {
+    const x = setup("active");
+    const attention = vi.fn();
+    x.backend.onAttentionOpportunity(attention);
+    let released = false;
+    const takeover = x.backend.waitUntilReplaceable(binding).then(() => { released = true; });
+    await vi.waitFor(() => expect(x.request).toHaveBeenCalledWith("thread/read", expect.anything()));
+    x.setStatus("idle");
+    x.backend.reportReconnect(["thread-1"]);
+    await takeover;
+    expect(released).toBe(true);
+    expect(attention).toHaveBeenCalledWith("alpha/design");
+    expect(x.backend.reach(binding).state).toBe("unconfirmed");
+    x.emit("turn/completed", { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } });
+    expect(x.backend.reach(binding).state).toBe("live");
+  });
+
   it("reports restore presence from the TUI client, not loaded thread state", () => {
     const x = setup("active");
     expect(x.backend.restorePresence(binding)).toBe("offline");

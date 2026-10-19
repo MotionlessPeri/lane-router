@@ -29,8 +29,7 @@ async function fixture(options: Partial<Options> = {}) {
   const dashboardOpen = vi.fn(async () => ({ results: ["opened"] }));
   const dashboardLaneSets = vi.fn(async () => ({ laneSets: [] }));
   const server = new LocalRouterServer({
-    tools: { call } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never,
-    instanceId: "http-contract", dashboardState, dashboardOpen, dashboardLaneSets, ...options,
+    tools: { call } as never, instanceId: "http-contract", dashboardState, dashboardOpen, dashboardLaneSets, ...options,
   });
   const discovery = await server.start();
   servers.push(server);
