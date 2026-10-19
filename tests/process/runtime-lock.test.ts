@@ -41,6 +41,17 @@ test("does not steal a lock held by a live process", () => {
   expect(RuntimeLock.acquire(path)).toBeUndefined();
 });
 
+test("isHeld reports a live owner without taking or disturbing the lock", () => {
+  const path = lockPath();
+  expect(RuntimeLock.isHeld(path)).toBe(false);
+  writeFileSync(path, String(process.pid), "utf8");
+  expect(RuntimeLock.isHeld(path)).toBe(true);
+  expect(readFileSync(path, "utf8")).toBe(String(process.pid));
+  writeFileSync(path, "2147483646", "utf8");
+  expect(RuntimeLock.isHeld(path)).toBe(false);
+  expect(readFileSync(path, "utf8")).toBe("2147483646");
+});
+
 test("reclaims a lock whose owner process is gone", () => {
   const path = lockPath();
   writeFileSync(path, "2147483646", "utf8");

@@ -23,6 +23,13 @@ export class RuntimeLock {
     return undefined;
   }
 
+  /**
+   * Whether a live process owns the lock, without taking it. A caller deciding whether to start
+   * the owner itself needs "is one already starting" separately from "is one ready", because
+   * starting a second while the first is still coming up is how one overwrote the other's log.
+   */
+  static isHeld(path: string): boolean { return lockHeld(path); }
+
   release(): void {
     if (this.released) return;
     this.released = true;

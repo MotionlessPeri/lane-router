@@ -75,6 +75,24 @@ test("the launcher hands back a running Router and then gets out of the way", ()
   expect(existsSync(space.log)).toBe(true);
 });
 
+test("append mode keeps what earlier starts wrote and marks where each start begins", async () => {
+  const space = workspace();
+  const noisy = join(space.root, "noisy.mjs");
+  writeFileSync(noisy, "process.stderr.write(`${process.env.START_MARK}\\n`);\n");
+  for (const mark of ["first start", "second start"]) {
+    const result = spawnSync(process.execPath, [tsx, launcher, noisy, space.log, "append"], { encoding: "utf8", env: { ...process.env, START_MARK: mark } });
+    expect(result.status).toBe(0);
+    const pid = Number.parseInt(result.stdout.trim(), 10);
+    strays.push(pid);
+    expect(await waitForExit(pid)).toBe(true);
+  }
+  const log = readFileSync(space.log, "utf8");
+  expect(log).toContain("first start");
+  expect(log).toContain("second start");
+  expect(log.indexOf("first start")).toBeLessThan(log.indexOf("second start"));
+  expect(log.match(/^--- start /gmu)).toHaveLength(2);
+});
+
 test("the launcher reports a missing Router entry point instead of leaving a silent failure", () => {
   const space = workspace();
   const result = spawnSync(process.execPath, [tsx, launcher, join(space.root, "absent.mjs"), space.log], { encoding: "utf8" });

@@ -19,7 +19,7 @@ interface EnsureOptions {
   readonly health?: (discovery: RouterDiscovery) => Promise<RouterDiscovery | undefined>;
 }
 
-interface RouterStartAttempt {
+export interface RouterStartAttempt {
   readonly failure: Promise<Error>;
   detach(): void;
 }
@@ -48,9 +48,10 @@ export async function ensureRouter(options: EnsureOptions = {}): Promise<RouterD
   return waitForRouter(discoveryPath, health, options.timeoutMs ?? 15_000);
 }
 
-async function readLive(path: string, health: NonNullable<EnsureOptions["health"]>): Promise<RouterDiscovery | undefined> {
+/** The discovery file's content, but only once its owner answers health for that same instance. */
+export async function readLive<T>(path: string, health: (discovery: T) => Promise<T | undefined>): Promise<T | undefined> {
   if (!existsSync(path)) return undefined;
-  try { return await health(JSON.parse(readFileSync(path, "utf8")) as RouterDiscovery); }
+  try { return await health(JSON.parse(readFileSync(path, "utf8")) as T); }
   catch { return undefined; }
 }
 
@@ -60,6 +61,16 @@ async function waitForRouter(
   timeoutMs: number,
   attempt?: RouterStartAttempt,
 ): Promise<RouterDiscovery> {
+  return waitForLive(path, health, timeoutMs, attempt, "Router process did not become ready");
+}
+
+export async function waitForLive<T>(
+  path: string,
+  health: (discovery: T) => Promise<T | undefined>,
+  timeoutMs: number,
+  attempt: RouterStartAttempt | undefined,
+  timeoutMessage: string,
+): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let failure: Error | undefined;
   const observedFailure = attempt?.failure.then((error) => { failure = error; });
@@ -70,7 +81,7 @@ async function waitForRouter(
     const delay = new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 25));
     await (observedFailure ? Promise.race([delay, observedFailure]) : delay);
   }
-  throw new Error("Router process did not become ready");
+  throw new Error(timeoutMessage);
 }
 
 async function checkHealth(discovery: RouterDiscovery): Promise<RouterDiscovery | undefined> {
@@ -80,7 +91,8 @@ async function checkHealth(discovery: RouterDiscovery): Promise<RouterDiscovery 
   } catch { return undefined; }
 }
 
-async function routerEnvironment(options: EnsureOptions): Promise<NodeJS.ProcessEnv> {
+/** The caller's environment plus the Windows system proxy, which the Codex App Server needs to reach the model. */
+export async function routerEnvironment(options: Pick<EnsureOptions, "environment" | "platform" | "readSystemProxy">): Promise<NodeJS.ProcessEnv> {
   const environment = { ...(options.environment ?? process.env) };
   if ((options.platform ?? process.platform) !== "win32") return environment;
 
@@ -170,6 +182,8 @@ interface StartObservation {
   readonly pollMs?: number;
   readonly isAlive?: (pid: number) => boolean;
   readonly readLog?: () => string;
+  /** What the failure messages call the process being started. */
+  readonly subject?: string;
 }
 
 /**
@@ -187,6 +201,7 @@ interface StartObservation {
 export function observeRouterStart(child: ChildProcess, logPath: string, options: StartObservation = {}): RouterStartAttempt {
   const isAlive = options.isAlive ?? processIsAlive;
   const readLog = options.readLog ?? (() => { try { return readFileSync(logPath, "utf8"); } catch { return ""; } });
+  const subject = options.subject ?? "Router";
   let resolveFailure!: (error: Error) => void;
   const failure = new Promise<Error>((resolveError) => { resolveFailure = resolveError; });
 
@@ -204,7 +219,7 @@ export function observeRouterStart(child: ChildProcess, logPath: string, options
     watch = setInterval(() => {
       if (isAlive(parsed)) return;
       stopWatching();
-      resolveFailure(new Error(readLog().trim() || "Router process exited before it was ready"));
+      resolveFailure(new Error(readLog().trim() || `${subject} process exited before it was ready`));
     }, options.pollMs ?? 25);
     watch.unref();
     return routerPid;
@@ -216,7 +231,7 @@ export function observeRouterStart(child: ChildProcess, logPath: string, options
   const onClose = (code: number | null) => {
     if (code === 0 && takePid() !== undefined) return;
     stopWatching();
-    resolveFailure(new Error(launcherStderr.trim() || `Router launcher exited with code ${code ?? "unknown"} before starting a Router`));
+    resolveFailure(new Error(launcherStderr.trim() || `${subject} launcher exited with code ${code ?? "unknown"} before starting a ${subject}`));
   };
 
   child.stdout?.on("data", onStdout);
