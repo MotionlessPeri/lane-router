@@ -464,22 +464,35 @@ scripts\open-vm-lane.ps1 -Lane ... -DryRun                       # 只打印命�
 - 第 7 步：隔离进程全部停掉；共享 Router 78704、它的 app-server 82292 未变，另一个不属于 Router 的 app-server 23828 也未变。
 - 顺带观测：宿主被杀后，它的 app-server 在 200 ms 内自行退出（单独复测一次：宿主 17652 被停后，app-server 11712 在 +200 ms 时已不在）。单机、单版本的观测，不当成保证。
 
-#### TC-CODEX-HOST-2：真模型三步（尚未执行，待全局授权恢复）
-
-**为什么没跑：** 2026-10-19 经隔离宿主给真实 app-server 发最小 turn，返回「Your access token could not be refreshed. Please log out and sign in again.」（`codexErrorInfo: unauthorized`）。`CODEX_HOME` 没有被隔离，这是全局 `~/.codex` 授权的状态（`auth.json` 最后写入 2026-09-15）。之后没有再发模型请求。是否重新登录由用户决定，登记在 Vikunja #315。
+#### TC-CODEX-HOST-2：真模型三步（已执行）
 
 **前置：** 全局 Codex 授权可用（用户在自己的终端里 `codex login`，不在验收窗口里登录）；TC-CODEX-HOST-1 第 1、2 步完成。
 
-1. 在验收窗口起真实 TUI，让它 attach 一条隔离 lane（如 `iso/tui`）。
-2. 停隔离核心。在 TUI 里发一句普通对话：期望模型照常回复。再让模型调 `lane_directory`：期望立即得到「Lane Router is not running」错误，不挂起。
-3. 用脚本重启隔离核心，等宿主重连（看板 `codexHost.connected`）。让模型再调 `lane_directory`：期望成功，`iso/tui` 的 generation 不变。
-4. 从另一条隔离 lane 给 `iso/tui` 发一封信：期望 TUI 被通知唤醒，读信并 ack。
+1. 让真实模型在一个经宿主 bridge 起的 thread 里 attach 一条隔离 lane（如 `iso/acc`）。
+2. 停隔离核心。发一句普通对话：期望模型照常回复。再让模型调 `lane_directory`：期望立即失败，而且**模型看到的是「Lane Router is not running」这句原因**，不挂起。
+3. 用脚本重启隔离核心，等宿主重连（看板 `codexHost.connected`）。让模型再调 `lane_directory`：期望成功，`iso/acc` 的 generation 与 attachedAt 不变。
+4. 从另一条隔离 lane 给 `iso/acc` 发一封信，期间保持一个客户端连在该 thread 上：期望核心经宿主发出 `turn/start`，模型读信并 ack。
+
+**谁来敲字：** 这一轮没有开可见的 TUI 窗口（避免桌面弹窗和 Codex 的目录信任提示），由 scratchpad 里的脚本客户端经**同一个宿主 bridge、同一套 App Server 协议**发 turn，模型和 app-server 都是真的。真实 TUI 进程在核心重启时连接不断，见 TC-CODEX-HOST-1 第 4、5 步。
+
+**第一次尝试（2026-10-19 上午）没跑成：** 经隔离宿主给真实 app-server 发最小 turn，返回「Your access token could not be refreshed. Please log out and sign in again.」（`codexErrorInfo: unauthorized`）。`CODEX_HOME` 没有被隔离，是全局 `~/.codex` 授权失效（`auth.json` 最后写入 2026-09-15）。用户下午在自己的终端里重新登录后再跑（Vikunja #315）。
+
+**2026-10-19 下午记录（隔离目录 `iso-2`，codex 0.154.0；第 1 至 4 步用构建 `d4b841571285928e`，第 2 步的复跑用 `a2e7493f1ae446bf`）：**
+
+- 授权核验：最小 turn 7.9 秒返回「在的」。
+- 第 1 步：模型调 `lane_attach_current` 与 `lane_directory` 都成功，`iso/acc` generation 1，`attachedAt` 1792399600541，`resumeInfo` 记下了 thread 的 cwd。
+- 第 2 步：核心 87564 停掉后，普通对话 2.5 秒返回「我还能对话。」；`lane_directory` 2 ms 就失败了，但模型看到的只有「dynamic tool request failed」。**发现：真实 app-server 收到 `item/tool/call` 的 JSON-RPC 错误应答时，只把这句笼统的话给模型**，原因文字丢了（master 上所有 Codex 的 lane 工具错误都是这样）。已改：宿主改用 `success: false` 的结果带回原因（`56974ca`）。换代宿主后复跑：工具 3 ms 失败，模型原样转述「Lane Router is not running (stopped or restarting), this call was not executed. Retry once it is back.」。
+- 第 3 步：脚本重启核心（新 pid 37472），宿主 85356 不变、重连；模型的 `lane_directory` 成功，`iso/acc` 仍是 generation 1、`attachedAt` 1792399600541；`reach` 为 `unconfirmed`（与设计一致）。
+- 第 4 步：`iso/sender` 经 `/rpc` 发信，回执 `notificationState: sent`；约 3 秒后该 thread 起了一个由通知开头的 turn，模型用 PowerShell 读了 pending 里的信、调 `lane_ack`（7 ms 成功），回复「已收到」；信从 `pending` 移到 `resolved`。
+- 换代：`restart-router.ps1 -DataRoot <iso-2> -CodexHost` 换到新构建后，新宿主经核心确认所有权，`resume` 原 thread 成功（模型回复「已恢复」）。
+- 这一轮 CPU 负载 97%。核心从拉起到写出 discovery 用了 15～17 秒，恰好超过脚本里 `ensureRouter` 的 15 秒默认等待，脚本报了失败，而核心其实起来了（Vikunja #182 说的正是这种误报）。脚本已改为等 60 秒，并保留 node 的完整错误输出（`3bca1d1`）。
+- 收尾：隔离核心、宿主及其 app-server 全部停掉；共享 Router 78704 和它的 app-server 82292 未变。
 
 ### Router 被换掉之后：部署时的 Codex 宿主
 
 - **第一次部署本构建**：旧核心自己持有 app-server，`restart-router.ps1` 按原逻辑停掉它的 app-server 子进程，开着的 Codex TUI 会最后再断一次；之后的核心重启不再断。
 - **之后的部署**：只改了核心的代码时，跑默认的 `restart-router.ps1` 即可，Codex 对话不断。宿主的代码也变了时，宿主不会自动换代（它跨核心重启存活）；看板顶部会显示「Codex 宿主的构建与核心不同」，用 `restart-router.ps1 -CodexHost` 换代，这一步会断开开着的 Codex 对话。
-- 核心不再等 Codex 起来，`restart-router.ps1` 的 15 秒等待只覆盖核心本身；`-CodexHost` 的宿主等待是 60 秒。
+- 核心不再等 Codex 起来；`restart-router.ps1` 等核心和宿主各最多 60 秒（2026-10-19 机器负载高时核心自己就用了 15～17 秒）。
 - **build 之后、重启核心之前不要开 Codex lane。** 这段窗口里新的 `lane-router-codex` 会拉起新构建的宿主，而旧核心没有 `/codex/host`：宿主连不上，lane 工具报「Lane Router is not running」（其实 Router 在跑），机器上会同时有两个 app-server；配置了账号切换时还会有两个 id 为 `router` 的账号 consumer。核心重启后这个宿主会自己连上新核心，问题随之消失，所以把 build 和重启放在同一个窗口里连着做即可。
 
 ### lane 声明的模型确实生效

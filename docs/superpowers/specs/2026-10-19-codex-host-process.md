@@ -1,6 +1,6 @@
 # Codex 宿主独立进程：需求与设计
 
-状态：2026-10-19 由 `lane-router/codex-host` 起草，`lane-router/design` 当天过目通过（回信 `8c65dc73`），并补了一条构建标识的要求，已并入 3.6。同日实施完成；自动测试和不依赖模型的真机部分已过，真模型那部分等全局 Codex 授权恢复后补跑（`docs/manual-tests.md` 的 TC-CODEX-HOST-2）。实施中对本稿的补充都在正文里注明了。任务书在仓库外（`handoffs/2026-10-19-codex-host/brief.md`），本稿把其中的目标、范围和验收口径收进来，实施只以本稿为准。
+状态：2026-10-19 由 `lane-router/codex-host` 起草，`lane-router/design` 当天过目通过（回信 `8c65dc73`），并补了一条构建标识的要求，已并入 3.6。同日实施完成；自动测试、不依赖模型的真机部分（TC-CODEX-HOST-1）和真模型三步（TC-CODEX-HOST-2，用户重新登录 Codex 后执行）都已通过，记录在 `docs/manual-tests.md`。实施中对本稿的补充都在正文里注明了。任务书在仓库外（`handoffs/2026-10-19-codex-host/brief.md`），本稿把其中的目标、范围和验收口径收进来，实施只以本稿为准。
 
 ## 术语表
 
@@ -96,7 +96,7 @@
 
 | 情形 | TUI 普通对话 | lane 工具调用 | 通知与恢复 |
 |---|---|---|---|
-| 核心停止或重启中 | 照常：TUI 到 bridge 到 app-server 全在宿主里。账号 gate 也在宿主里，照常接纳。 | 宿主见链路未连通，立即返回 `ROUTER_UNAVAILABLE`：「Lane Router is not running (stopped or restarting); this call was not executed. Retry once it is back.」核心收不到任何调用。 | 不发生。 |
+| 核心停止或重启中 | 照常：TUI 到 bridge 到 app-server 全在宿主里。账号 gate 也在宿主里，照常接纳。 | 宿主见链路未连通，立即返回 `ROUTER_UNAVAILABLE`：「Lane Router is not running (stopped or restarting), this call was not executed. Retry once it is back.」核心收不到任何调用。这句话以 `success: false` 的工具结果交给模型，而不是 JSON-RPC 错误：真机发现 app-server 收到错误应答时只给模型一句「dynamic tool request failed」，原因会丢（所有 lane 工具失败都按这条路走）。 | 不发生。 |
 | 调用途中核心退出 | 照常。 | 该调用以 `ROUTER_CONNECTION_LOST` 失败：结果未知（例如 `lane_send` 可能已落盘），提示先用只读工具核实再决定是否重试。核心侧的执行收到中止信号。 | — |
 | 核心回来 | 照常。 | 宿主重连成功后即可用。 | 宿主发 `hello`；核心对 `hello.threads` 与全部活跃 codex 绑定各发一次处理机会，通知泵补发 pending；拿到 app-server 就绪后刷新看板的 Codex 模型列表。绑定、generation 都在 SQLite 里，重连不改。 |
 | 宿主退出或被重启 | 断开，属预期：bridge 和 app-server 都在宿主里。需要 `lane-router-codex resume <thread-id>`，或从看板 / `lane-router-lane open` 恢复。 | 无 TUI 可调。 | 核心见链路断开，`ensureCodexHost` 一次（找到活宿主就不 spawn）；`reach` 报 `no_channel`，`restorePresence` 报 `unavailable`，直到新宿主连上。 |
