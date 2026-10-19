@@ -1,5 +1,13 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "Medium")]
-param()
+param(
+    # Also replace the Codex host. Without it the host and every open Codex conversation keep
+    # running across the Router restart, which is the point of the host; with it they are cut, which
+    # is what a deploy needs once the host's own code has changed.
+    [switch]$CodexHost,
+    # The Router's data root. Defaults to the shared one; point it at an isolated directory to
+    # exercise this script without touching the Router everyone else is using.
+    [string]$DataRoot = (Join-Path $env:USERPROFILE ".lane-router")
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -7,87 +15,131 @@ $ErrorActionPreference = "Stop"
 # path on each machine, and a hardcoded one fails on every machine but the author's - reporting a
 # missing build, which reads as "you forgot to compile" rather than "this path is not yours".
 $laneRouterRoot = Split-Path -Parent $PSScriptRoot
-$laneRouterDataRoot = Join-Path $env:USERPROFILE ".lane-router"
+$laneRouterDataRoot = [System.IO.Path]::GetFullPath($DataRoot)
 $discoveryPath = Join-Path $laneRouterDataRoot "discovery.json"
+$hostDiscoveryPath = Join-Path $laneRouterDataRoot "codex-host.json"
 $routerMainPath = Join-Path $laneRouterRoot "dist\process\main.js"
+$hostMainPath = Join-Path $laneRouterRoot "dist\process\codex-host.js"
 $ensureRouterPath = Join-Path $laneRouterRoot "dist\process\ensure-router.js"
+$ensureHostPath = Join-Path $laneRouterRoot "dist\process\ensure-codex-host.js"
 
-if (-not (Test-Path -LiteralPath $routerMainPath -PathType Leaf)) {
-    throw "Lane Router build is missing: $routerMainPath. Run npm run build in $laneRouterRoot first."
+foreach ($required in @($routerMainPath, $ensureRouterPath, $hostMainPath, $ensureHostPath)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "Lane Router build is missing: $required. Run npm run build in $laneRouterRoot first."
+    }
 }
-if (-not (Test-Path -LiteralPath $ensureRouterPath -PathType Leaf)) {
-    throw "Lane Router launcher is missing: $ensureRouterPath. Run npm run build in $laneRouterRoot first."
-}
 
-$routerProcess = $null
-$codexChildProcesses = @()
-
-if (Test-Path -LiteralPath $discoveryPath -PathType Leaf) {
-    $discovery = Get-Content -LiteralPath $discoveryPath -Raw | ConvertFrom-Json
+# A process named in a discovery file, but only if it really is the expected entry point of this
+# checkout: a pid outlives its process, and a reused one must never be stopped by mistake.
+function Get-OwnedProcess([string]$path, [string]$entryPoint, [string]$label) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    $discovery = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
     if ($discovery.pid -isnot [int] -and $discovery.pid -isnot [long]) {
-        throw "Lane Router discovery has an invalid pid: $discoveryPath"
+        throw "$label discovery has an invalid pid: $path"
     }
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($discovery.pid)" -ErrorAction SilentlyContinue
+    if ($null -eq $process) { return $null }
+    $normalizedCommandLine = ($process.CommandLine -replace '/', '\')
+    if ($process.Name -ne "node.exe" -or $normalizedCommandLine.IndexOf($entryPoint, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw "Refusing to stop PID $($discovery.pid): it is not this $label process."
+    }
+    return $process
+}
 
-    $routerProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $($discovery.pid)" -ErrorAction SilentlyContinue
-    if ($null -ne $routerProcess) {
-        $normalizedCommandLine = ($routerProcess.CommandLine -replace '/', '\')
-        if ($routerProcess.Name -ne "node.exe" -or $normalizedCommandLine.IndexOf($routerMainPath, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-            throw "Refusing to stop PID $($discovery.pid): it is not this Lane Router process."
+# Stopping a node process on Windows is a hard kill, so its children are not told; an App Server
+# left behind keeps its port and its loaded threads. Children keep the dead parent's pid, which is
+# how they are still found here.
+function Get-AppServerChildren($parent) {
+    if ($null -eq $parent) { return @() }
+    return @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($parent.ProcessId)" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq "codex.exe" -and $_.CommandLine -match '(?i)\bapp-server\b' })
+}
+
+function Stop-OwnedProcess($process, [string]$label) {
+    Stop-Process -Id $process.ProcessId
+    try {
+        Wait-Process -Id $process.ProcessId -Timeout 10 -ErrorAction Stop
+    } catch {
+        if (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue) {
+            throw "$label PID $($process.ProcessId) did not stop within 10 seconds."
         }
-
-        $codexChildProcesses = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($discovery.pid)" -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -eq "codex.exe" -and $_.CommandLine -match '(?i)\bapp-server\b' })
     }
 }
+
+$routerProcess = Get-OwnedProcess $discoveryPath $routerMainPath "Lane Router"
+# The Router has no App Server of its own since the Codex host took it over. Only a Router from
+# before that change still has one, and this is what stops it during the first upgrade.
+# @() again at the call: a function that returns one object hands back the object itself, which
+# has no Count.
+$routerAppServers = @(Get-AppServerChildren $routerProcess)
+$hostProcess = if ($CodexHost) { Get-OwnedProcess $hostDiscoveryPath $hostMainPath "Codex host" } else { $null }
+$hostAppServers = @(Get-AppServerChildren $hostProcess)
 
 if ($WhatIfPreference) {
     if ($null -ne $routerProcess) {
-        Write-Host "Would restart Lane Router PID $($routerProcess.ProcessId) and $($codexChildProcesses.Count) Codex app-server child process(es)."
+        Write-Host "Would restart Lane Router PID $($routerProcess.ProcessId) and $($routerAppServers.Count) Codex app-server child process(es) of an older Router build."
     } else {
         Write-Host "Would start Lane Router (no live Router process was found)."
+    }
+    if ($CodexHost) {
+        if ($null -ne $hostProcess) {
+            Write-Host "Would restart Codex host PID $($hostProcess.ProcessId) and its $($hostAppServers.Count) Codex app-server child process(es); open Codex conversations would disconnect."
+        } else {
+            Write-Host "Would start a Codex host (no live Codex host process was found)."
+        }
     }
     return
 }
 
 if ($null -ne $routerProcess -and $PSCmdlet.ShouldProcess("Lane Router PID $($routerProcess.ProcessId)", "Restart")) {
-    Stop-Process -Id $routerProcess.ProcessId
+    Stop-OwnedProcess $routerProcess "Lane Router"
+    foreach ($child in $routerAppServers) {
+        if (Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue) { Stop-Process -Id $child.ProcessId }
+    }
+}
+
+# After the Router, so that a Router still running cannot bring the old host straight back.
+if ($null -ne $hostProcess -and $PSCmdlet.ShouldProcess("Codex host PID $($hostProcess.ProcessId)", "Restart")) {
+    Stop-OwnedProcess $hostProcess "Codex host"
+    foreach ($child in $hostAppServers) {
+        if (Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue) { Stop-Process -Id $child.ProcessId }
+    }
+}
+
+function Invoke-Ensure([string]$module, [string]$function, [string]$label) {
+    Push-Location -LiteralPath $laneRouterRoot
     try {
-        Wait-Process -Id $routerProcess.ProcessId -Timeout 10 -ErrorAction Stop
+        # The data root travels as an argument, not inside the code: Windows PowerShell mangles
+        # double quotes embedded in a native command's arguments.
+        $output = @(& node --input-type=module -e "import { $function } from './dist/process/$module'; console.log(JSON.stringify(await $function({ dataRoot: process.argv[1] })));" $laneRouterDataRoot 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "$label failed to start:`n$($output -join [Environment]::NewLine)"
+        }
+    } finally {
+        Pop-Location
+    }
+    $line = $output | Where-Object { $_.ToString().Trim().Length -gt 0 } | Select-Object -Last 1
+    try {
+        $result = $line.ToString() | ConvertFrom-Json
     } catch {
-        if (Get-Process -Id $routerProcess.ProcessId -ErrorAction SilentlyContinue) {
-            throw "Lane Router PID $($routerProcess.ProcessId) did not stop within 10 seconds."
-        }
+        throw "$label started but returned unexpected output:`n$($output -join [Environment]::NewLine)"
     }
-
-    foreach ($codexChild in $codexChildProcesses) {
-        if (Get-Process -Id $codexChild.ProcessId -ErrorAction SilentlyContinue) {
-            Stop-Process -Id $codexChild.ProcessId
-        }
+    $health = Invoke-RestMethod -Uri "$($result.url)/health" -TimeoutSec 5
+    if ($health.instanceId -ne $result.instanceId -or $health.pid -ne $result.pid) {
+        throw "$label health check did not match the newly started instance."
     }
+    return $result
 }
 
-Push-Location -LiteralPath $laneRouterRoot
-try {
-    $launcherOutput = @(& node --input-type=module -e "import { ensureRouter } from './dist/process/ensure-router.js'; console.log(JSON.stringify(await ensureRouter()));" 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        throw "Lane Router failed to start:`n$($launcherOutput -join [Environment]::NewLine)"
-    }
-} finally {
-    Pop-Location
-}
-
-$resultLine = $launcherOutput | Where-Object { $_.ToString().Trim().Length -gt 0 } | Select-Object -Last 1
-try {
-    $result = $resultLine.ToString() | ConvertFrom-Json
-} catch {
-    throw "Lane Router started but returned unexpected output:`n$($launcherOutput -join [Environment]::NewLine)"
-}
-
-$health = Invoke-RestMethod -Uri "$($result.url)/health" -TimeoutSec 5
-if ($health.instanceId -ne $result.instanceId -or $health.pid -ne $result.pid) {
-    throw "Lane Router health check did not match the newly started instance."
-}
-
+$router = Invoke-Ensure "ensure-router.js" "ensureRouter" "Lane Router"
 Write-Host "Lane Router restarted successfully."
-Write-Host "PID: $($result.pid)"
-Write-Host "Dashboard: $($result.url)/dashboard"
+Write-Host "PID: $($router.pid)"
+Write-Host "Dashboard: $($router.url)/dashboard"
+
+if ($CodexHost) {
+    # The new Router ensures a host on its own; asking here as well waits for it and checks it, and
+    # the startup lock keeps the two from starting a second one.
+    $codexHostResult = Invoke-Ensure "ensure-codex-host.js" "ensureCodexHost" "Codex host"
+    Write-Host "Codex host restarted successfully."
+    Write-Host "Codex host PID: $($codexHostResult.pid)"
+}
