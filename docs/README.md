@@ -18,6 +18,7 @@
 - [图资源接入技术设计](superpowers/specs/2026-10-18-graph-resource-design.md)
 - [Claude 账号：开窗注入已回退，改为按账号查余量（需求与设计，以文末修订为准）](superpowers/specs/2026-10-19-claude-account-at-launch.md)
 - [议题页：两栏在一屏内各自滚动（需求与设计）](superpowers/specs/2026-10-19-issue-inbox-scroll-layout.md)
+- [Codex 宿主独立进程：需求与设计](superpowers/specs/2026-10-19-codex-host-process.md)
 
 ## 界面样稿
 
