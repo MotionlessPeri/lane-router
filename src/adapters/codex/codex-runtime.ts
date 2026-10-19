@@ -94,7 +94,7 @@ export class CodexRuntime {
     this.unsubscribers = [
       this.client.onServerRequest((request) => request.method === "account/chatgptAuthTokens/refresh"
         ? this.refreshAccount(request.params)
-        : this.dispatcher.dispatch(request.params)),
+        : this.dispatchTool(request.params)),
       this.client.onNotification((message) => this.observeNotification(message.method, message.params)),
       this.client.onTransportLoss(() => {
         this.accountConsumer?.runtimeChanged();
@@ -149,8 +149,16 @@ export class CodexRuntime {
     return this.claims.has(threadId) || this.options.core.ownsThread(threadId);
   }
 
+  /**
+   * A failure goes back as a failed result rather than a JSON-RPC error: the App Server answers the
+   * model with a bare "dynamic tool request failed" for an error (measured with codex 0.154.0), and
+   * the reason — above all "Lane Router is not running" — is what the model needs to act on.
+   */
   dispatchTool(request: DynamicToolCallParams): Promise<unknown> {
-    return this.dispatcher.dispatch(request);
+    return this.dispatcher.dispatch(request).catch((error: unknown) => ({
+      success: false as const,
+      contentItems: [{ type: "inputText" as const, text: error instanceof Error ? error.message : String(error) }],
+    }));
   }
 
   admitModelRequest(method: string, admission?: string, params?: unknown): AccountRequestFinish {

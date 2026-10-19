@@ -106,7 +106,10 @@ test("a Codex conversation keeps talking while the core is down, gets an immedia
   const startedAt = Date.now();
   const refused = await codex.startTurn(threadId, 'tool:lane_directory {"project":"alpha"}');
   expect(Date.now() - startedAt).toBeLessThan(1_000);
-  expect(refused.response.error.message).toMatch(/Lane Router is not running/u);
+  // A failed result, not a JSON-RPC error: the real App Server shows the model only a generic text
+  // for an error, and this sentence is the part the model has to see.
+  expect(refused.response.result.success).toBe(false);
+  expect(refused.response.result.contentItems[0].text).toMatch(/Lane Router is not running/u);
 
   await w.startCore();
   await w.linked();
@@ -163,7 +166,8 @@ test("a tool call in flight when the core exits fails as unknown rather than han
   await w.state.core!.close();
 
   const outcome = await takeover;
-  expect(outcome.response.error.message).toMatch(/result is unknown/u);
+  expect(outcome.response.result.success).toBe(false);
+  expect(outcome.response.result.contentItems[0].text).toMatch(/result is unknown/u);
 });
 
 test("restore presence and reach follow the link and the TUI, and a lost host is ensured again", async () => {

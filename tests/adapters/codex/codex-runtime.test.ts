@@ -56,7 +56,22 @@ test("the host runtime decorates threads and sends their tool calls to the core 
     requestKey: 'codex:["owned","turn","call"]',
   });
   await expect(runtime.dispatchTool({ threadId: "stranger", turnId: "t", callId: "c", tool: "lane_directory", arguments: { project: "alpha" } }))
-    .rejects.toThrow(/not owned/u);
+    .resolves.toEqual({ success: false, contentItems: [{ type: "inputText", text: expect.stringMatching(/not owned/u) }] });
+});
+
+// The App Server turns a JSON-RPC error answer to item/tool/call into a bare "dynamic tool request
+// failed" (measured with codex 0.154.0), so the reason never reached the model. A failed result
+// carries it: "Lane Router is not running" is what tells the model to wait instead of retrying.
+test("a lane tool that fails reaches the model as a failed result carrying the reason", async () => {
+  const fake = fakeProcess();
+  const { core } = fakeCore();
+  core.callTool.mockRejectedValue(Object.assign(new Error("Lane Router is not running (stopped or restarting), this call was not executed."), { code: "ROUTER_UNAVAILABLE" }));
+  const runtime = new CodexRuntime({ core, process: fake.process });
+  await runtime.start();
+  runtime.claimThread("owned");
+  const failed = { success: false, contentItems: [{ type: "inputText", text: "Lane Router is not running (stopped or restarting), this call was not executed." }] };
+  await expect(runtime.dispatchTool({ threadId: "owned", turnId: "t", callId: "bridge", tool: "lane_directory", arguments: { project: "alpha" } })).resolves.toEqual(failed);
+  await expect(fake.serverRequest("item/tool/call", { threadId: "owned", turnId: "t", callId: "raw", tool: "lane_directory", arguments: { project: "alpha" } })).resolves.toEqual(failed);
 });
 
 test("tool calls the App Server sends on the host's own connection go to the core too", async () => {
