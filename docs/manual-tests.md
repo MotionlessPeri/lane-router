@@ -865,6 +865,24 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 ⚠️ 两个发现：① `restart-router.ps1` 的等待比 Router 启动短，脚本报失败不等于 Router 没起来，下次先看 `discovery.json` 的 pid 再判断；② 期间有一条 lane 的 MCP 自己去拉 Router，被 `router.lock` 挡回（`router-start.log` 首行「Another Router process is already running」），这是预期的守卫，但那次尝试把日志开头覆盖掉了一截，属于已记录的启动竞态问题。
 
+### 2026-10-19 上线：拉取另一台机器的 39 个提交后，在用库从 v10 到 v11
+
+**来源：** `master` 从 `34f69c4` 快进到 `98cee44`（议题收件箱、账号切换、图资源、原生 Company Lead 接入、看板 HTTP 边界重构等，166 个文件）。本机 Router 之前跑的是 lane set 构建（schema 10）。
+
+**步骤与结果：**
+
+1. 依赖。`npm ci` **失败且把 `node_modules` 清掉了大半**：它先删整个目录，而 `better-sqlite3\prebuilds\win32-x64.node` 被在跑的 Router 和二十多个 lane 的 MCP 进程映射着，`unlink` 报 EPERM 中止（在跑的进程不受影响，但此刻任何新起的 MCP / CLI / Router 都会缺包）。处置：把被占用的 `.node` **改名挪到仓库外同一个盘** `E:\xd_projects\lane-router-inuse\`（已加载的文件 Windows 允许移动、不允许删除），删掉残留目录，再 `npm install` 补齐，退出 0。⚠️ 以后在跑着 Router 和 lane 的共享树里用 `npm install`，不用 `npm ci`；账号切换文档说的「在独立安装目录构建」就是为了这个。挪出去的旧文件等映射它的旧进程都退了再删。
+2. `tsc --noEmit` 退出 0；`npm run build` 退出 0（含新加的 vite 图资源前端，rolldown 对 `@xyflow/react` 的 `"use client"` 指令有一条告警，不影响产物）。
+3. 第 1 步读数：`user_version` 10；后端列表 `'claude','codex','dsh','zcode'`；`lane` / `binding` / `message` / `message_archive` 92 / 156 / 12385 / 3077；`lane_set` 2、`lane_set_member` 13；带 label 6；`foreign_key_check` 空。
+4. 备份 `router.sqlite.bak-20261019-093729-v10-pre-v11`（v10，`integrity_check` ok，行数同上）。
+5. `scripts/restart-router.ps1`：这次脚本自己报成功（启动在 15 秒内完成）。旧 pid 77532 停，新 pid 78704、端口 65291。
+6. 重启后：`user_version` 11；后端列表 `'claude','codex','dsh','zcode','native-codex'`；四张表行数、两个 set 及 13 条成员、带 label 6 封全部不变；`foreign_key_check` 空。`issues.sqlite`、`graphs.sqlite` 首次建出；`router-start.log` 没有 `ISSUES_UNAVAILABLE` / `GRAPHS_UNAVAILABLE`。
+7. 页面：`/dashboard`、`/issues`、`/issues/api/threads`、`/issues/assets/markdown-it.js` 都是 200；快照 schema 11、92 条 lane、2 个 set、有 actionToken。重启后一分钟内 channel 重连 18 条，可达状态 live 4 / unconfirmed 15 / no_channel 56。
+8. 送信：`lane_send` 到 `lane-router/impl` 为 `sent`；`lane-router-lane tell lane-router/design` 退出 0、`delivered: true`，通知当场叫醒了 design 的会话。
+9. **虚拟机桥在这次之前就已经不在了**（`start-vm-bridge.ps1` 的窗口没了，只剩 10-12 起的静态文件服务还在），不是这次重启造成的；已重新在独立窗口里拉起。
+
+**没有做、留给现场验收的：** 议题收件箱、图资源、账号切换三项的真实 lane / 浏览器验收仍按上面各节「尚未执行」。看板顶部的「账号切换」链接指向 `http://127.0.0.1:47839/`，本机没有部署 `lane-router-accounts` 后台，点了打不开；账号切换需要 Company 侧一起接入，不在这次上线范围。
+
 ## 当前记录
 
 ### TC-PROJECT-RESTORE-1：重启后从主 lane 恢复同项目原对话
