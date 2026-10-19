@@ -19,6 +19,8 @@
 param(
     [string] $Lane,
     [switch] $New,
+    [switch] $Rotate,
+    [string] $HandoffPath,
     [string] $Role,
     [string] $Cwd,
     [string] $Model,
@@ -122,6 +124,10 @@ if (-not $Tmux) {
     $Tmux = if ($sessionMap -and $sessionMap.PSObject.Properties[$Lane]) { $sessionMap.PSObject.Properties[$Lane].Value } else { ($Lane.Split("/")[1] -replace "[^A-Za-z0-9_-]", "-") }
 }
 $slug = $Lane -replace "[^A-Za-z0-9_-]", "-"
+# A large prompt (a rotation handoff) is delivered as a file over scp, not inlined: as an ssh
+# command argument it is truncated past a few KB and the remote shell then chokes on the broken
+# quoting. /tmp always exists, and an absolute path works whether or not switchUser is set.
+$vmPrompt = "/tmp/lane-router-prompt-$slug.txt"
 $claude = "claude --dangerously-load-development-channels server:lane"
 if ($Model) { $claude += " --model '$Model'" }
 
@@ -131,7 +137,24 @@ if ($New) {
     $fullRole = "$Role`n$roleSuffix"
     $prompt = "This is an approved creation of the new lane $Lane.`n`nRead the repository AGENTS.md and applicable referenced instructions completely. Call lane_directory for the project and verify the address is free, then call lane_attach_current with address ``$Lane``" + $(if ($Model) { " and model ``$Model``" } else { "" }) + " and exactly this role_description:`n`n$fullRole`n`nAfterwards report that the lane is ready and wait for direction; do not start feature work on your own."
     $windowName = $project
-    $runner = "cd '$Cwd' || exit 1`nexec $claude `"`$(cat `"`$HOME/.lane-router/vm-prompts/$slug.txt`")`""
+    $runner = "cd '$Cwd' || exit 1`nexec $claude --name '$Lane' -- `"`$(cat `"$vmPrompt`")`""
+} elseif ($Rotate) {
+    # Rotation on the VM: the outgoing session has written its handoff to a file there; the successor
+    # starts in a new tmux session with the same bootstrap prompt lane-router-rotate uses, attaches
+    # without a role and so becomes the next generation. The old session is left for the user to
+    # close once the takeover is reported.
+    if ($info.state -ne "bound") { throw "Lane $Lane is $($info.state); only a bound lane can be rotated" }
+    if ($info.backend -ne "claude") { throw "Lane $Lane runs on $($info.backend); this script only rotates Claude lanes on the VM" }
+    if (-not $HandoffPath -or $HandoffPath -match "\s") { throw "-Rotate needs -HandoffPath <file on the VM, no spaces>" }
+    if (-not $Cwd) { $Cwd = $info.cwd }
+    if (-not $Cwd -or -not $Cwd.StartsWith("/")) { throw "Lane $Lane has no Linux working directory recorded; pass -Cwd" }
+    $handoff = (& ssh -o BatchMode=yes -o ConnectTimeout=8 -p $port "$loginUser@$vmHost" "cat $HandoffPath") -join "`n"
+    if ($LASTEXITCODE -ne 0 -or -not $handoff.Trim()) { throw "could not read the handoff at $HandoffPath on the VM (empty or unreadable)" }
+    $next = $info.generation + 1
+    if (-not $PSBoundParameters.ContainsKey("Tmux")) { $Tmux = (($Lane.Split("/")[1] -replace "[^A-Za-z0-9_-]", "-") + "-gen$next") }
+    $prompt = "This is an approved automatic rotation of the existing lane $Lane.`n`nRead the repository AGENTS.md and applicable referenced instructions completely. Call lane_directory for the project, verify the existing lane and role, then call lane_attach_current with address ``$Lane`` and no role_description. Read every pending mailbox .md file returned by pendingPath and process or acknowledge it as appropriate (this lane runs on the VM: read mailbox files through http://127.0.0.1:$mailboxPort/ as the role description says). Restore the handoff below, but do not start new feature work; only report that takeover is complete and ready to continue.`n`n## Handoff`n`n$handoff"
+    $windowName = if ($info.laneSet) { $info.laneSet } else { $project }
+    $runner = "cd '$Cwd' || exit 1`nexec $claude --name '$Lane gen$next' -- `"`$(cat `"$vmPrompt`")`""
 } else {
     if ($info.state -ne "bound") { throw "Lane $Lane is $($info.state); only a bound lane can be resumed (use -New to create one)" }
     if ($info.backend -ne "claude") { throw "Lane $Lane runs on $($info.backend); this script only opens Claude lanes on the VM" }
@@ -152,12 +175,11 @@ export PATH="$pathPrepend`:`$PATH"
 mkdir -p "`$HOME/.lane-router/vm-run" "`$HOME/.lane-router/vm-prompts"
 echo '$(B64 $runner)' | base64 -d > "`$HOME/.lane-router/vm-run/$slug.sh"
 "@
-if ($prompt) { $inner += "`necho '$(B64 $prompt)' | base64 -d > `"`$HOME/.lane-router/vm-prompts/$slug.txt`"" }
 $inner += @"
 
 if tmux has-session -t '$Tmux' 2>/dev/null; then exec tmux attach-session -t '$Tmux'; fi
 "@
-if (-not $New -and $info.restorePresence -eq "online" -and -not $Force) {
+if (-not $New -and -not $Rotate -and $info.restorePresence -eq "online" -and -not $Force) {
     $inner += "`necho 'Lane $Lane is online but tmux session $Tmux does not exist here; it is running elsewhere. Use -Tmux <name> or -Force.'; exec bash -l"
 } else {
     $inner += "`nexec tmux new-session -s '$Tmux' -c '$Cwd' `"bash '`$HOME/.lane-router/vm-run/$slug.sh'; echo; echo '[lane exited]'; exec bash -l`""
@@ -172,6 +194,16 @@ $outer = if ($switchUser) {
     else { "exec sudo -iu '$switchUser' bash -c '$run'" }
 } else { $run }
 
+# ---- a large prompt goes over scp before the terminal opens; the runner cats it from /tmp ----
+if ($prompt -and -not $DryRun) {
+    $promptLocal = Join-Path $env:TEMP "lane-router-vm\$slug.prompt.txt"
+    New-Item -ItemType Directory -Force (Split-Path -Parent $promptLocal) | Out-Null
+    Write-Utf8NoBom $promptLocal $prompt
+    $scpOpts = @("-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-P", "$port"); if ($keyFile) { $scpOpts += @("-i", $keyFile) }
+    & scp @scpOpts $promptLocal "${loginUser}@${vmHost}:$vmPrompt"
+    if (-not $?) { throw "scp of the prompt to $vmHost failed" }
+}
+
 # ---- the bridge, without which the lane cannot reach the Router ----
 if ($ensureBridge -and -not $DryRun) {
     $tunnel = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "ssh.exe" -and $_.CommandLine -match "-R $($discovery.port):127" }
@@ -182,7 +214,7 @@ if ($ensureBridge -and -not $DryRun) {
 }
 
 # ---- the terminal ----
-$title = "$Lane (vm)"
+$title = if ($Rotate) { "$Lane gen$next (vm)" } else { "$Lane (vm)" }
 $cmdDir = Join-Path $env:TEMP "lane-router-vm"; New-Item -ItemType Directory -Force $cmdDir | Out-Null
 if ($transport -eq "ssh") {
     # The remote command goes through a local launcher file rather than the wt command line: wt,
@@ -201,7 +233,7 @@ if ($transport -eq "ssh") {
     ) -join "`n")
     $psArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $launcher)
     $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
-    if ($DryRun) { Write-Host "launcher: $launcher"; Write-Host (Get-Content $launcher -Raw); Write-Host "wt window: $windowName"; Write-Host "---- remote script ----"; Write-Host $inner; return }
+    if ($DryRun) { Write-Host "launcher: $launcher"; Write-Host (Get-Content $launcher -Raw); if ($prompt) { Write-Host "prompt scp -> ${loginUser}@${vmHost}:$vmPrompt ($($prompt.Length) chars)" }; Write-Host "wt window: $windowName"; Write-Host "---- remote script ----"; Write-Host $inner; return }
     if ($wt) { Start-Process wt.exe -ArgumentList (@("-w", $windowName, "new-tab", "--title", "`"$title`"", "--suppressApplicationTitle", "powershell") + $psArgs) }
     else { Start-Process powershell -ArgumentList $psArgs }
 } elseif ($transport -eq "putty") {
@@ -211,7 +243,7 @@ if ($transport -eq "ssh") {
     $puttyArgs = @("-ssh", "$loginUser@$vmHost", "-P", "$port", "-t", "-m", $cmdFile)
     if ($keyFile) { $puttyArgs += @("-i", $keyFile) }
     if ($password) { $puttyArgs += @("-pw", $password) }
-    if ($DryRun) { Write-Host ("putty " + (($puttyArgs | ForEach-Object { if ($_ -eq $password) { "********" } else { $_ } }) -join " ")); Write-Host "---- remote script ----"; Write-Host $inner; return }
+    if ($DryRun) { Write-Host ("putty " + (($puttyArgs | ForEach-Object { if ($_ -eq $password) { "********" } else { $_ } }) -join " ")); if ($prompt) { Write-Host "prompt scp -> ${loginUser}@${vmHost}:$vmPrompt ($($prompt.Length) chars)" }; Write-Host "---- remote script ----"; Write-Host $inner; return }
     Start-Process $puttyExe -ArgumentList $puttyArgs
 } else { throw "transport must be putty or ssh, not $transport" }
 Write-Host "opened $Lane on $vmHost (tmux '$Tmux', cwd $Cwd)"
