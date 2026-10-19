@@ -10,5 +10,15 @@
   </section>
   <section aria-labelledby="runtime-title"><h2 id="runtime-title">运行端当前账号</h2><div id="consumers" class="consumers"></div></section>
   <section class="status-box" aria-live="polite"><h2 id="status-title">准备就绪</h2><p id="status-detail">添加或选择一个账号开始。</p><p id="action-error" class="error" hidden></p><button id="cancel-login" hidden>取消授权</button></section>
-  <footer>授权凭据由本机后台与系统凭据库保管。切换保留原会话；运行端离线时会显示未完成。</footer>
+  <section id="claude" aria-labelledby="claude-title" hidden><div class="section-heading"><div><h2 id="claude-title">Claude lane（下次打开时生效）</h2><p id="claude-current"></p></div><button id="claude-add" type="button">添加 Claude 账号</button></div>
+    <div id="claude-profiles" class="claude-profiles" role="radiogroup" aria-label="Claude 账号"></div>
+    <div id="claude-form" class="claude-form" hidden>
+      <label for="claude-email">邮箱</label><input id="claude-email" type="text" autocomplete="off" spellcheck="false">
+      <label for="claude-token">token</label><input id="claude-token" type="password" autocomplete="off">
+      <p class="hint">在终端运行 <code>claude setup-token</code>，在打开的浏览器页面里授权，把输出的 token 粘到这里。token 一年有效，到期后重跑一次。邮箱只用来在这里区分账号。</p>
+      <div class="actions"><button id="claude-submit" class="primary" type="button">保存</button><button id="claude-form-cancel" type="button">取消</button></div>
+    </div>
+    <p id="claude-error" class="error" hidden></p>
+  </section>
+  <footer>Codex 授权凭据由本机后台与系统凭据库保管；Claude 的 token 存在本机后台的受限目录里。切换保留原会话；运行端离线时会显示未完成。Claude 账号只影响之后新开的 Claude lane。</footer>
 </main></body></html>

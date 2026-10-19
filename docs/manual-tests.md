@@ -797,6 +797,44 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 **最后验证：** 2026-08-27 用真实离线 Codex thread 和隔离 Router 验证离线分支：`resume-info` 为 `reach=unconfirmed`、`restorePresence=offline`，批量脚本报告 `1 opened, 0 skipped, 0 failed`；开出的真实 Codex 进程使用隔离 endpoint，ownership 建立后同一接口变为 `restorePresence=online`。所有 child 都保留同一 `LANE_ROUTER_DATA_ROOT`。在线跳过、backend unavailable 与逐 lane 失败隔离仍由自动测试覆盖；本次真机 fixture 没有额外构造这三种分支。
 
+## Claude 切号：下次打开的 lane 用选中的账号
+
+需求与设计见 `docs/superpowers/specs/2026-10-19-claude-account-at-launch.md`，使用说明见 `docs/account-switching.md`「Claude lane 账号」。
+
+自动测试覆盖以下几方面，全部用临时目录和合成 token：
+- 账号后台：Claude 账号的添加、选中、取消选中、删除；后台重启后账号与选中项仍在。
+- 启动文件：选中时以受限 ACL 原子写出，取消选中或删除选中项时删除；启动时按保存的选中项修正启动文件。
+- HTTP：沿用账号页的四道守卫，每条路由只收自己的字段，任何响应都不含 token。
+- terminal child：只给 Claude 窗口加 `CLAUDE_CODE_OAUTH_TOKEN`；没有启动文件时环境与之前逐字相同；启动文件坏了照旧，并在 stderr 打一行原因；连接文件的两种取法；两处都没写时不读启动文件。
+- 页面：添加之后 token 不留在 DOM 或任何输入框里。
+
+设计稿第六节的五个变异都让预定的用例变红。下面这条要真的登录 Claude 账号、真的开 Claude 窗口，自动测试代替不了。
+
+**前提：** 账号后台受控重启到含此功能的构建，时机与部署由 design 安排。开窗口的进程（Router，以及在 shell 里跑 `lane-router-lane` 的那个终端）能找到账号后台的连接文件：环境变量 `LANE_ROUTER_ACCOUNTS_CONNECTION`，或 Router 配置里的 `accounts.connectionFile`。准备一个和本机 `~\.claude` 当前登录不同的 Claude 账号 A。
+
+### TC-CLAUDE-ACCOUNT-1：选中的账号只作用于之后新开的 Claude lane
+
+1. 用账号 A 在终端跑 `claude setup-token`，复制输出的 token。
+2. 打开账号页，在「Claude lane（下次打开时生效）」里添加 A（邮箱填 A 的邮箱，粘贴 token），然后选中 A。
+   确认顶部写「当前选用：A……」。确认后台数据目录里出现 `claude-launch.json`。
+3. 选一条已关闭的 Claude lane，在 shell 里跑 `lane-router-lane open <地址>`。
+   确认新窗口第一行是 `lane 账号：A（来自账号页的选择）`，会话里 `/status` 显示账号 A。
+4. 不关第 3 步的窗口。在账号页选「不选用」，确认 `claude-launch.json` 消失。
+5. 再开另一条已关闭的 Claude lane，确认窗口里没有 `lane 账号` 那一行，`/status` 显示 `~\.claude` 当前登录的账号。
+6. 回到第 3 步的窗口跑 `/status`，确认仍是 A。
+7. 收尾：在账号页删除 A。
+
+**预期：** 第 3 步是 A；第 5 步是本机 `/login` 的账号；第 6 步仍是 A，因为已开着的窗口不换号。整个过程中：
+- `lane-status` 下的状态文件不含 token；
+- 账号后台的 `service-stdout.log` 与 `service-stderr.log` 不含 token；
+- 浏览器开发者工具里 `/api/state` 的响应不含 token。
+
+**关键看点：**
+- 看 `/status` 里的账号，不看窗口里那一行提示：那一行只说明 terminal child 读到了选择，不证明 Claude 认了这个 token。
+- 第 4 步之前已开着的窗口不能被取消选中影响，这是「下次打开才换」的另一半。
+
+**最后验证：** 尚未真机执行。
+
 ## 从 lane 之外捎话：`lane-router-lane tell`
 
 2026-10-17 的[投递底座抽取](superpowers/plans/2026-10-17-tell-user-delivery.md)保留本节 tell 对外验收。新增进程内 `UserMessageDelivery` 的完整正文、重试、ack 后重试、文件先写恢复和归档/地址复用由隔离 fixture 自动验证；它不提供公开 CLI/HTTP/MCP。新 tell 的内部请求键与 `lane_send` 隔离，新文件另带稳定 `target_lane_id` 恢复头；内部编码不是对外契约，下面历史现场记录仍描述当时构建。

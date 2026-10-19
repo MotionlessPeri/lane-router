@@ -16,6 +16,10 @@
     LOGIN_BUSY: "授权正在进行，请先完成或取消。",
     LOGIN_FAILED: "授权未完成，请重新打开官方授权页面。",
     OPERATION_FAILED: "操作未完成，请检查状态后重试。",
+    INVALID_CLAUDE_TOKEN: "这不是 claude setup-token 生成的 token（应以 sk-ant-oat 开头），请重新粘贴。",
+    INVALID_CLAUDE_EMAIL: "请填写邮箱，用来在这里区分这个 Claude 账号。",
+    INVALID_PROFILE: "这个账号已经不在了，请看刷新后的列表。",
+    STORAGE_UNAVAILABLE: "后台无法写入它的受限数据目录。",
   };
   const describe = code => errors[code] || "操作未完成，请重试。";
   async function action(path, body = {}) {
@@ -92,6 +96,48 @@
       if (operation.phase === "complete" && state.consumers.some(c => c.state !== "synced")) { title = "同步状态已变化"; detail = "有运行端断开或重新连接，等待重新核实。"; }
     }
     $("status-title").textContent = title; $("status-detail").textContent = detail;
+    renderClaude();
+  }
+  /* Claude accounts take effect when a lane window opens, not here: the page only picks one. Tokens
+     go to the backend once, from the add form, and are never part of any state this page reads. */
+  async function claudeAction(path, body) {
+    busy = true; render(); $("claude-error").hidden = true;
+    try {
+      const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Account-Action": "1" }, body: JSON.stringify(body) });
+      const result = await response.json(); if (!response.ok) throw new Error(describe(result.error));
+      return true;
+    } catch (error) { $("claude-error").textContent = error instanceof Error ? error.message : "后台连接失败。"; $("claude-error").hidden = false; return false; }
+    finally { busy = false; await poll(false); }
+  }
+  const day = value => { const date = new Date(value); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; };
+  function claudeChoice(value, title, detail, checked) {
+    const row = document.createElement("div"); row.className = "claude-profile";
+    const label = document.createElement("label");
+    const radio = document.createElement("input"); radio.type = "radio"; radio.name = "claude-selected"; radio.value = value; radio.checked = checked; radio.disabled = busy;
+    radio.onchange = () => { if (radio.checked) void claudeAction("/api/claude/select", value ? { profileId: value } : {}); };
+    const name = document.createElement("strong"); name.textContent = title;
+    const note = document.createElement("small"); note.textContent = detail;
+    label.append(radio, name, note); row.append(label);
+    return row;
+  }
+  function renderClaude() {
+    const claude = state.claude;
+    $("claude").hidden = !claude;
+    if (!claude) return;
+    const selected = claude.profiles.find(p => p.id === claude.selectedId);
+    $("claude-current").textContent = selected
+      ? `当前选用：${selected.email}。之后新开的 Claude lane 用它；已开着的不受影响。`
+      : "未选用：新开的 Claude lane 用本机 /login 的账号。";
+    const rows = [claudeChoice("", "不选用", "新开的 Claude lane 用本机 /login 的账号", !selected)];
+    for (const profile of claude.profiles) {
+      const row = claudeChoice(profile.id, profile.email, `添加于 ${day(profile.createdAt)}`, profile.id === claude.selectedId);
+      const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "删除"; remove.disabled = busy;
+      remove.dataset.claudeDelete = profile.id;
+      remove.onclick = () => void claudeAction("/api/claude/profiles/delete", { profileId: profile.id });
+      row.append(remove); rows.push(row);
+    }
+    $("claude-profiles").replaceChildren(...rows);
+    $("claude-add").disabled = busy; $("claude-submit").disabled = busy;
   }
   async function poll(repeat = true) {
     try { const response = await fetch("/api/state"); if (!response.ok) throw new Error(); state = await response.json(); $("connection").textContent = "本机后台已连接"; render(); }
@@ -105,6 +151,8 @@
       const note = document.createElement("p"); note.textContent = "Company 与 Codex lane 的当前账号尚未核实。"; $("consumers").append(note);
       $("switch").disabled = true; $("add").disabled = true; $("reauthorize").disabled = true;
       $("cancel").hidden = true; $("cancel-login").hidden = true;
+      $("claude-add").disabled = true; $("claude-submit").disabled = true;
+      for (const control of document.querySelectorAll("#claude-profiles input, #claude-profiles button")) control.disabled = true;
     }
     if (repeat) setTimeout(() => void poll(), 1000);
   }
@@ -113,5 +161,13 @@
   $("switch").onclick = () => void action("/api/switch", { profileId: selected });
   $("cancel").onclick = () => void action("/api/switch/cancel");
   $("cancel-login").onclick = () => void action("/api/login/cancel");
+  $("claude-add").onclick = () => { $("claude-form").hidden = false; $("claude-email").focus(); };
+  $("claude-form-cancel").onclick = () => { $("claude-email").value = ""; $("claude-token").value = ""; $("claude-form").hidden = true; };
+  $("claude-submit").onclick = async () => {
+    const email = $("claude-email").value, token = $("claude-token").value;
+    // Out of the page before the request leaves it, whatever the backend answers.
+    $("claude-token").value = "";
+    if (await claudeAction("/api/claude/profiles", { email, token })) { $("claude-email").value = ""; $("claude-form").hidden = true; }
+  };
   void poll();
 })();

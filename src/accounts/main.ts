@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { RuntimeLock } from "../process/runtime-lock.js";
+import { ClaudeProfiles } from "./claude-profiles.js";
 import { AccountError, safeError } from "./contracts.js";
 import { AccountHttpServer } from "./http-server.js";
 import { ManagedAccounts } from "./managed-login.js";
@@ -23,9 +24,12 @@ export async function startAccountService(options: { root: string; executable: s
   const connectionFile = join(root, "connection.json");
   try {
     await accounts.initialize();
+    // Before the page opens, so the launch file already agrees with the saved selection.
+    const claude = new ClaudeProfiles({ root });
+    await claude.initialize();
     const service = new AccountSwitchService({ source: accounts, expected: ["router", "company"], desired: accounts.desiredProfileId, saveDesired: id => accounts.saveDesired(id) });
     const token = randomBytes(32).toString("base64url");
-    http = new AccountHttpServer({ accounts, service, token });
+    http = new AccountHttpServer({ accounts, service, token, claude });
     const url = await http.start(options.port ?? 47839);
     await atomicPrivateJson(connectionFile, { version: 1, url: url.replace("http:", "ws:") + "/consumer", token });
     let closed = false;

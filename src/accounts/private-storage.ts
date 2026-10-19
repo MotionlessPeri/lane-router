@@ -74,7 +74,11 @@ export async function ensurePrivateDirectory(root: string): Promise<void> {
   } catch { throw new AccountError("STORAGE_UNAVAILABLE"); }
 }
 
-/** Managed OAuth credentials remain in Codex's keyring, never in these JSON files. */
+/**
+ * Codex's managed OAuth credentials stay in its keyring and never reach these JSON files. Claude
+ * setup tokens do: Claude Code reads no keyring this service could use, so `claude-profiles.ts`
+ * keeps them here, under the same ACL as Claude's own `~/.claude/.credentials.json`.
+ */
 export async function atomicPrivateJson(path: string, value: unknown): Promise<void> {
   let temporary: string | undefined;
   try {

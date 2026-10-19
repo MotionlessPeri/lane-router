@@ -16,6 +16,7 @@
 - [用户议题收件箱架构草案](superpowers/specs/2026-10-17-user-issue-inbox-design.md)
 - [统一账号切换设计](superpowers/specs/2026-10-18-account-switching.md)
 - [图资源接入技术设计](superpowers/specs/2026-10-18-graph-resource-design.md)
+- [Claude 切号：下次打开的 lane 用选中的账号（需求与设计）](superpowers/specs/2026-10-19-claude-account-at-launch.md)
 
 ## 界面样稿
 
