@@ -25,15 +25,16 @@ describe("issue identity and lifecycle", () => {
     const original = x.lanes.get("lane-one")!;
     x.lanes.set("lane-one", { ...original, archivedAt: 100 });
     const replacement = x.addLane("new-lane", original.address);
-    expect(x.service.detail(result.issueId).owner).toEqual({ laneId: "lane-one", address: original.address, state: "archived" });
-    expect(x.service.list({ filter: "all" }).items[0]?.owner).toEqual({ laneId: "lane-one", address: original.address, state: "archived" });
+    // Presence is the Router's belief about an active lane; an archived one has none to show.
+    expect(x.service.detail(result.issueId).owner).toEqual({ laneId: "lane-one", address: original.address, state: "archived", presence: null });
+    expect(x.service.list({ filter: "all" }).items[0]?.owner).toEqual({ laneId: "lane-one", address: original.address, state: "archived", presence: null });
     expect(x.service.listForLane(replacement, { filter: "all" }).items).toEqual([]);
     expect(() => x.service.readForLane(replacement, result.issueId)).toThrowError(expect.objectContaining({ code: "ISSUE_NOT_FOUND" }));
     expect(x.service.readForLane(x.caller, result.issueId).thread.ownerLaneId).toBe("lane-one");
     expect(() => x.service.append(x.caller, { operationKey: "archived", issueId: result.issueId, kind: "answer", body: "no" })).toThrowError(expect.objectContaining({ code: "LANE_UNAVAILABLE" }));
     expect(() => x.service.reply({ operationKey: "archived", issueId: result.issueId, body: "no" })).toThrowError(expect.objectContaining({ code: "LANE_UNAVAILABLE" }));
     x.lanes.delete("lane-one");
-    expect(x.service.detail(result.issueId).owner).toEqual({ laneId: "lane-one", address: null, state: "missing" });
+    expect(x.service.detail(result.issueId).owner).toEqual({ laneId: "lane-one", address: null, state: "missing", presence: null });
     expect(() => x.service.reply({ operationKey: "missing", issueId: result.issueId, body: "no" })).toThrowError(expect.objectContaining({ code: "LANE_UNAVAILABLE" }));
   });
 

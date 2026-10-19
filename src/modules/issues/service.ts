@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { LaneCallerIdentity } from "../../router/lane-access.js";
+import type { LaneAccessFacts, LaneCallerIdentity } from "../../router/lane-access.js";
 import type { CallerContext } from "../../router/types.js";
 import type { IssuesServiceOptions, IssueStore } from "./ports.js";
 import {
   IssueError,
   type AppendIssueInput, type AttentionReason, type CloseIssueInput, type IssueDetail,
   type IssueEntry, type IssueEntryResult, type IssueHistoryQuery, type IssueList,
-  type IssueListQuery, type IssueOwner, type IssueProcessedResult, type IssueQuestion, type IssueThread,
+  type IssueListQuery, type IssueOwner, type IssuePresence, type IssueProcessedResult, type IssueQuestion, type IssueThread,
   type PublishIssueInput, type ReadIssueInput, type RecordProcessedInput, type ReplyIssueInput, type UpdateIssueQuestionInput,
 } from "./types.js";
 
@@ -222,7 +222,9 @@ export class IssuesService {
 
   private owner(laneId: string): IssueOwner {
     const facts = this.options.lanes.readLane(laneId);
-    return { laneId, address: facts?.address ?? null, state: facts === null ? "missing" : facts.archivedAt === null ? "active" : "archived" };
+    if (facts === null) return { laneId, address: null, state: "missing", presence: null };
+    if (facts.archivedAt !== null) return { laneId, address: facts.address, state: "archived", presence: null };
+    return { laneId, address: facts.address, state: "active", presence: presence(facts) };
   }
 
   private agentWrite<T>(context: CallerContext, operation: string, key: string, payload: object, issueId: string | undefined, work: (actor: LaneCallerIdentity) => T, allowClosed = false): T {
@@ -324,6 +326,12 @@ export class IssuesService {
     this.store.updateThread({ ...thread, status: "closed", closedAt: entry.createdAt });
     return result(entry);
   }
+}
+
+function presence(facts: LaneAccessFacts): IssuePresence {
+  if (facts.binding === null) return "offline";
+  if (facts.reach?.state === "live") return facts.reach.believedBusy === true ? "busy" : "online";
+  return facts.reach?.state === "unconfirmed" ? "unconfirmed" : "offline";
 }
 
 function result(entry: IssueEntry, questionId?: string): IssueEntryResult {

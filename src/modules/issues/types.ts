@@ -91,7 +91,10 @@ export interface IssueOwner {
   readonly laneId: string;
   readonly address: string | null;
   readonly state: "active" | "archived" | "missing";
+  /** The Router's belief about reaching the lane, not whether it is handling anything; null unless active. */
+  readonly presence: IssuePresence | null;
 }
+export type IssuePresence = "online" | "busy" | "unconfirmed" | "offline";
 export interface IssueSummary extends IssueThread {
   readonly owner: IssueOwner;
   readonly waitingUserCount: number;
