@@ -64,6 +64,9 @@ export class IssuesService {
       if (input.kind === "question") return result(entry, this.addQuestion(entry, "user", "waiting_user").id);
       if (tui) return result(entry, this.userTurn(entry, question).id);
       if (input.kind === "explanation" && question) this.waitFor(question, "waiting_user");
+      // The user has replied and is waiting on this lane; an answer naming that question is the
+      // end of it. A question still waiting on the user is not the lane's to settle.
+      if (input.kind === "answer" && question?.status === "waiting_lane") this.resolve(issueId, question, "answered", entry.id, null, actor);
       return result(entry, question?.id);
     });
   }
@@ -83,12 +86,7 @@ export class IssuesService {
         const answer = this.store.entry(issueId, answerEntryId);
         if (!answer || !["answer", "reply"].includes(answer.kind)) reference("An answered question needs a specific answer or reply in this issue");
       }
-      this.store.updateQuestion({ ...question, status: input.status, answerEntryId, reason });
-      // Later turns replace current status, so retain completion facts in immutable history.
-      const body = input.status === "answered"
-        ? `问题 ${questionId} 已回答（answered）。\n答复 entry ID: ${answerEntryId}`
-        : `问题 ${questionId} 无需回答（not_needed）。\n原因：${reason}`;
-      this.addEntry(issueId, "event", "lane", "agent", body, question.promptEntryId, actor);
+      this.resolve(issueId, question, input.status, answerEntryId, reason, actor);
       return { issueId, questionId };
     });
   }
@@ -167,6 +165,7 @@ export class IssuesService {
         ...(prompt ? [`关联问题：\n${prompt.body}`] : []),
         `用户回复：\n${body}`,
         `查询完整议题：调用 lane_issue_read，参数 ${JSON.stringify({ issueId })}。`,
+        `下一步：处理完后，用 lane_issue_append（kind: answer，questionId: ${round.id}）答复，该问题会自动标为已回答；再用 lane_issue_update 的 record_processed（deliveryId: ${deliveryId}）记录这次投递；最后用 lane_ack 确认这封邮件。`,
         "处理回执使用上述 delivery ID；入箱与处理完成是分别记录的事实。",
       ].join("\n\n");
       const now = this.now();
@@ -298,6 +297,15 @@ export class IssuesService {
     const question: IssueQuestion = { id: this.newId(), issueId: prompt.issueId, promptEntryId: prompt.id, askedTo, status, answerEntryId, reason: null };
     this.store.insertQuestion(question);
     return question;
+  }
+
+  /** Later turns replace current status, so a completion is also kept in immutable history. */
+  private resolve(issueId: string, question: IssueQuestion, status: "answered" | "not_needed", answerEntryId: string | null, reason: string | null, actor: LaneCallerIdentity): void {
+    this.store.updateQuestion({ ...question, status, answerEntryId, reason });
+    const body = status === "answered"
+      ? `问题 ${question.id} 已回答（answered）。\n答复 entry ID: ${answerEntryId}`
+      : `问题 ${question.id} 无需回答（not_needed）。\n原因：${reason}`;
+    this.addEntry(issueId, "event", "lane", "agent", body, question.promptEntryId, actor);
   }
 
   private waitFor(question: IssueQuestion, status: "waiting_user" | "waiting_lane"): IssueQuestion {

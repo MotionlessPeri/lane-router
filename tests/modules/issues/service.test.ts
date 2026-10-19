@@ -111,7 +111,9 @@ describe("issue conversation business", () => {
     expect(x.service.list({ filter: "all" }).items[0]?.attentionReasons).toEqual([]);
     x.service.reply({ operationKey: "follow-up", issueId, questionId, body: "Please explain the verification." });
     expect(x.service.detail(issueId).questions[0]).toMatchObject({ status: "waiting_lane", reason: null });
-    const answer = x.service.append(x.caller, { operationKey: "answer", issueId, questionId, kind: "answer", body: "B passed the full verification." });
+    // No questionId: an answer naming a question waiting on the lane now settles it by itself, and
+    // this case is about the explicit resolve_question below and its replay.
+    const answer = x.service.append(x.caller, { operationKey: "answer", issueId, kind: "answer", body: "B passed the full verification." });
     x.service.markRead({ operationKey: "answer-read", issueId, throughSeq: answer.entrySeq });
     const answered = { operationKey: "answered", issueId, questionId, status: "answered", answerEntryId: answer.entryId } as const;
     const savedAnswered = x.service.updateQuestion(x.caller, answered);
