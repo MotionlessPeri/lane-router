@@ -59,9 +59,12 @@
   .entry-body :is(h3, h4, h5, h6) { font-size: 16px; }
   .entry-body :is(ul, ol) { padding-left: 25px; margin: 9px 0; }
   .entry-body blockquote { margin: 12px 0; padding: 1px 13px; border-left: 3px solid var(--line); color: var(--muted); }
-  .entry-body code { font: .9em/1.6 ui-monospace, Consolas, monospace; background: var(--bg); padding: 2px 5px; border-radius: 4px; }
-  .entry-body pre { max-width: 100%; overflow-x: auto; padding: 13px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); white-space: pre; overflow-wrap: normal; }
+  .entry-body code { font: .9em/1.6 ui-monospace, Consolas, monospace; background: var(--bg); padding: 2px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+  /* Long lines wrap instead of scrolling sideways: a one-line shell command that runs off the
+     right edge cannot be read, and the copy button hands over the exact text anyway. */
+  .entry-body pre { position: relative; max-width: 100%; overflow-x: auto; padding: 13px 64px 13px 13px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); white-space: pre-wrap; overflow-wrap: anywhere; }
   .entry-body pre code { padding: 0; background: transparent; }
+  .entry-body pre .copy-code { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 2px 8px; }
   .entry-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 12px 0; }
   .entry-body :is(th, td) { border: 1px solid var(--line); padding: 7px 12px; text-align: left; }
   .entry-body th { background: var(--bg); }
@@ -157,7 +160,26 @@
     // HTML input stays escaped; only the parser's own markup reaches this sink.
     if (markdown) body.innerHTML = markdown.render(text);
     else { body.classList.add("plain-text"); body.textContent = text; }
+    body.querySelectorAll("pre").forEach(addCopyButton);
     return body;
+  }
+  // The window's navigator rather than the bare global, so the page and its tests look at the same
+  // clipboard. The label stays on "已复制" until the entry is next rendered: no timer, because the
+  // page's timers are reserved for request timeouts.
+  function addCopyButton(pre) {
+    const button = node("button", "copy-code", "复制");
+    button.type = "button";
+    button.addEventListener("click", async () => {
+      const source = pre.querySelector("code") || pre;
+      const text = source.textContent.replace(/\n$/, "");
+      const clipboard = document.defaultView.navigator && document.defaultView.navigator.clipboard;
+      try {
+        if (!clipboard || typeof clipboard.writeText !== "function") throw new Error("no clipboard");
+        await clipboard.writeText(text);
+        button.textContent = "已复制";
+      } catch { button.textContent = "复制失败，请手动选中"; }
+    });
+    pre.append(button);
   }
   const ownerText = owner => (owner.address || owner.laneId) + (owner.state === "archived" ? " · 已归档" : owner.state === "missing" ? " · 已缺失" : "");
   const time = value => new Date(value).toLocaleString("zh-CN", { hour12: false });

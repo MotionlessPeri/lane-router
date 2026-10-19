@@ -382,3 +382,27 @@ test("a detail response arriving after the page becomes hidden does not mark its
   f.document.dispatchEvent(new (f.document.defaultView!.Event)("visibilitychange"));
   await vi.waitFor(() => expect(f.x.service.detail(f.first.issueId).thread.readSeq).toBe(2));
 });
+
+// A one-line shell command in a code block is the common case on this board, and it used to run
+// off the right edge with nothing to copy it by (user, 2026-10-19).
+test("code blocks wrap long lines and carry a copy button that copies the code without its trailing newline", async () => {
+  const command = "$env:CLAUDE_CONFIG_DIR=\"$env:USERPROFILE\\.claude-probe-accounts\"; & \"$env:APPDATA\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe\" auth login";
+  const f = await boot({ firstBody: ["先跑这一行：", "", "```powershell", command, "```", "", "行内 `lane_issue_read` 不变。"].join("\n") });
+  await f.selected(f.first.issueId);
+  const pre = f.query("#history pre");
+  expect(pre).not.toBeNull();
+  expect(pre.querySelector("code").textContent).toBe(command + "\n");
+  // Wrapping is a stylesheet fact; the page is the only place it can live, so it is asserted there.
+  expect(page).toMatch(/\.entry-body pre \{[^}]*white-space: pre-wrap/);
+  expect(page).toMatch(/\.entry-body pre \{[^}]*overflow-wrap: anywhere/);
+
+  const button = pre.querySelector("button.copy-code");
+  expect(button?.textContent).toBe("复制");
+  const writeText = vi.fn(async () => undefined);
+  Object.defineProperty(f.document.defaultView!.navigator, "clipboard", { configurable: true, value: { writeText } });
+  button.click();
+  await vi.waitFor(() => expect(button.textContent).toBe("已复制"));
+  expect(writeText).toHaveBeenCalledExactlyOnceWith(command);
+  // The button is chrome, not content: it must not leak into the code that gets copied or shown.
+  expect(pre.querySelector("code").textContent).not.toContain("复制");
+});
