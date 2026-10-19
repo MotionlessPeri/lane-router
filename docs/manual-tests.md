@@ -480,6 +480,7 @@ scripts\open-vm-lane.ps1 -Lane ... -DryRun                       # 只打印命�
 - **第一次部署本构建**：旧核心自己持有 app-server，`restart-router.ps1` 按原逻辑停掉它的 app-server 子进程，开着的 Codex TUI 会最后再断一次；之后的核心重启不再断。
 - **之后的部署**：只改了核心的代码时，跑默认的 `restart-router.ps1` 即可，Codex 对话不断。宿主的代码也变了时，宿主不会自动换代（它跨核心重启存活）；看板顶部会显示「Codex 宿主的构建与核心不同」，用 `restart-router.ps1 -CodexHost` 换代，这一步会断开开着的 Codex 对话。
 - 核心不再等 Codex 起来，`restart-router.ps1` 的 15 秒等待只覆盖核心本身；`-CodexHost` 的宿主等待是 60 秒。
+- **build 之后、重启核心之前不要开 Codex lane。** 这段窗口里新的 `lane-router-codex` 会拉起新构建的宿主，而旧核心没有 `/codex/host`：宿主连不上，lane 工具报「Lane Router is not running」（其实 Router 在跑），机器上会同时有两个 app-server；配置了账号切换时还会有两个 id 为 `router` 的账号 consumer。核心重启后这个宿主会自己连上新核心，问题随之消失，所以把 build 和重启放在同一个窗口里连着做即可。
 
 ### lane 声明的模型确实生效
 

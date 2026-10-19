@@ -100,7 +100,7 @@
 | 调用途中核心退出 | 照常。 | 该调用以 `ROUTER_CONNECTION_LOST` 失败：结果未知（例如 `lane_send` 可能已落盘），提示先用只读工具核实再决定是否重试。核心侧的执行收到中止信号。 | — |
 | 核心回来 | 照常。 | 宿主重连成功后即可用。 | 宿主发 `hello`；核心对 `hello.threads` 与全部活跃 codex 绑定各发一次处理机会，通知泵补发 pending；拿到 app-server 就绪后刷新看板的 Codex 模型列表。绑定、generation 都在 SQLite 里，重连不改。 |
 | 宿主退出或被重启 | 断开，属预期：bridge 和 app-server 都在宿主里。需要 `lane-router-codex resume <thread-id>`，或从看板 / `lane-router-lane open` 恢复。 | 无 TUI 可调。 | 核心见链路断开，`ensureCodexHost` 一次（找到活宿主就不 spawn）；`reach` 报 `no_channel`，`restorePresence` 报 `unavailable`，直到新宿主连上。 |
-| 宿主的 app-server 自愈中 | 与今天相同：上游断开会让 TUI 断开。 | 与今天相同。 | 宿主发 `appServer` 事件；核心视为未连通。恢复后宿主发 `opportunity`。 |
+| 宿主的 app-server 自愈中 | 与今天相同：上游断开会让 TUI 断开。app-server 换端口重启后，bridge 的新连接连到新端口（实施审查发现：原先端点只在启动时取一次，master 上就是如此，以前靠重启 Router 清掉；宿主跨核心重启存活后必须跟随当前端点，已改）。 | 与今天相同。 | 宿主发 `appServer` 事件；核心视为未连通。恢复后宿主发 `opportunity`。 |
 
 ### 3.5 各入口的适配
 
@@ -122,7 +122,8 @@
 
 宿主跨核心重启存活，所以部署新构建并重启核心之后，宿主仍跑旧代码，直到有人带 `-CodexHost` 重启它。处理方式：
 
-- `hello` 带 `protocolVersion`。核心不认识的版本，以关闭码 4001 和原因文字关掉连接并写 stderr；宿主记下原因，之后的工具调用错误里带上这句原因和「用 `restart-router.ps1 -CodexHost` 重启宿主」的提示。
+- `hello` 带 `protocolVersion`。核心不认识的版本，以关闭码 4001 和原因文字关掉连接并写 stderr；宿主记下原因，之后的工具调用错误里带上这句原因和「用 `restart-router.ps1 -CodexHost` 重启宿主」的提示。被拒之后宿主每 60 秒才再试一次，同一原因只记一行日志：拒绝不会自己消失，按普通的 5 秒节奏重试只会把两边的日志写满。
+- 核心只在 `hello` 被接受时才替换当前宿主连接；一条只连上、不打招呼的连接不会把正在工作的宿主挤掉。
 - 协议号相同、但宿主代码有修复（例如 bridge 的 bug）时，版本号发现不了。为此 `hello` 再带构建标识 `build`：进程启动时对自己所在构建目录（`dist/`）下全部 `.js` 文件按相对路径排序后连同内容取 SHA-256。核心启动时用同一函数算出自己的标识。看板快照加一项 `codexHost: { connected, hostBuild, coreBuild }`，两者不同时看板显示一行提示：「Codex 宿主的构建与核心不同，用 `restart-router.ps1 -CodexHost` 换代」。不新增构建戳机制，只读已有产物。
 - 线上格式不变的改动（例如工具实现）不涉及版本；动态工具清单仍在 `thread/start` 时由宿主注入，旧 thread 不热刷新，与今天的约定相同。
 
