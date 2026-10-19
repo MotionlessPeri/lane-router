@@ -22,6 +22,7 @@
 - [产品工具 schema 根节点改为平表（需求与设计）](superpowers/specs/2026-10-19-tool-schema-flat-root.md)
 - [问答页已读：有焦点且条目末尾进入视野才算读过（需求与设计）](superpowers/specs/2026-10-19-issue-read-on-sight.md)
 - [问答页小修五项（需求与设计）](superpowers/specs/2026-10-19-issue-ui-touchups.md)
+- [问答页改成左侧边栏布局（需求与设计）](superpowers/specs/2026-10-20-issue-page-sidebar-layout.md)
 - [Codex 宿主独立进程：需求与设计](superpowers/specs/2026-10-19-codex-host-process.md)
 
 ## 界面样稿

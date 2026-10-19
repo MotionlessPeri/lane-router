@@ -15,23 +15,27 @@
   button:disabled { opacity: .5; cursor: default; }
   :focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
   a { color: var(--blue); }
-  header { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--panel); }
-  header strong { font-weight: 600; }
-  header small { margin-left: auto; color: var(--muted); }
-  main { max-width: 1280px; margin: 0 auto; padding: 24px; }
-  h1 { font-size: 23px; font-weight: 550; margin: 0 0 6px; }
+  h1 { font-size: 19px; font-weight: 600; margin: 0; cursor: help; }
   h2 { font-size: 18px; font-weight: 550; margin: 0 0 5px; }
   p { margin: 6px 0; }
   .muted, .meta { color: var(--muted); }
   .meta { font-size: 12px; }
   .warning { color: var(--warm); }
-  #filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 20px 0 12px; }
-  #filters button { border-color: transparent; background: transparent; }
+  .sidebar { display: flex; flex-direction: column; gap: 10px; padding: 14px 12px 0; background: var(--panel); }
+  .sidebar-head { display: flex; align-items: baseline; gap: 12px; padding: 0 4px; }
+  .sidebar-head a { margin-left: auto; font-size: 13px; }
+  #filters { display: flex; flex-wrap: wrap; gap: 4px; }
+  #filters button { border-color: transparent; background: transparent; padding: 5px 9px; }
   #filters [aria-pressed="true"] { background: var(--text); color: var(--panel); }
-  #refresh { margin-left: auto; }
-  #list-status { min-height: 24px; margin-bottom: 10px; }
-  .columns { display: grid; grid-template-columns: minmax(245px, 31%) minmax(0, 1fr); min-height: 590px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-  .list-panel { border-right: 1px solid var(--line); padding: 12px; }
+  .list-bar { display: flex; align-items: center; gap: 8px; padding: 0 4px; }
+  /* One line: only the time is written there, the full date and the polling interval go in its
+     title, and the ellipsis is a fallback. A read error is shown whole. */
+  #list-status { flex: 1 1 auto; min-width: 0; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #list-status.warning { white-space: normal; }
+  #refresh { flex: none; padding: 3px 10px; }
+  .list-panel { margin: 0 -12px; padding: 8px 12px 12px; border-top: 1px solid var(--line); }
+  main { min-width: 0; background: var(--panel); }
+  #markdown-status { margin: 0; padding: 12px 16px 0; }
   .topic { display: block; width: 100%; text-align: left; padding: 16px 13px; margin-bottom: 6px; border-color: transparent; background: transparent; border-radius: 9px; }
   .topic[aria-current="true"] { background: var(--active); border-color: var(--line); }
   .topic.kept { opacity: .55; }
@@ -41,7 +45,7 @@
   .badge { display: inline-block; margin-right: 9px; font-size: 12px; color: var(--muted); }
   .badge.ask { color: var(--warm); }
   .badge.unread { color: var(--blue); }
-  #issue-detail { min-width: 0; background: var(--panel); padding: 24px; }
+  #issue-detail { min-width: 0; background: var(--panel); padding: 16px; }
   .detail-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 16px; }
   #close-issue { white-space: nowrap; }
   .empty { padding: 24px 12px; color: var(--muted); }
@@ -79,7 +83,8 @@
   #compose-region { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 6px; }
   /* Folded to two lines until it is in use: the reply area stays on screen under the history, and
      every line it holds is a line the history does not get. */
-  #reply-form { display: grid; gap: 8px; }
+  /* minmax(0, …): 回复对象 shows the question's text, which must not widen the form past the window. */
+  #reply-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #reply-body { width: 100%; height: calc(2 * 1.65em + 22px); min-height: calc(2 * 1.65em + 22px); padding: 11px; resize: vertical; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
   #compose[data-expanded="true"] #reply-body { height: calc(6 * 1.65em + 22px); }
@@ -93,29 +98,28 @@
   #operation-status { white-space: pre-wrap; margin-top: 12px; }
   #operation-recovery { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
   [hidden] { display: none !important; }
-  /* Wide screens: the two columns take the rest of the viewport, never less than 420px, and each
-     scrolls on its own; on the right only the history does, between a fixed title bar and a fixed
+  /* Wide screens: a sidebar down the left edge holds the title, the filters and the issue list, and
+     the open issue fills the rest of the window, which never counts as less than 420px high. The list
+     and the history each scroll on their own; the history sits between a fixed title bar and a fixed
      reply area. The page itself stops growing with the content. Narrow screens keep scrolling the
      whole page: a scroll box inside a phone screen is harder to use than none. */
   @media (min-width: 681px) {
-    html, body { height: 100%; }
-    body { display: flex; flex-direction: column; }
-    header { flex: none; }
-    main { flex: 1 1 auto; min-height: 0; width: 100%; display: flex; flex-direction: column; }
+    body { display: flex; height: 100vh; min-height: 420px; }
+    .sidebar { flex: none; width: clamp(240px, 24vw, 320px); border-right: 1px solid var(--line); }
+    .sidebar > * { flex: none; }
+    .sidebar > .list-panel { flex: 1 1 0; min-height: 0; overflow-y: auto; }
+    main { flex: 1 1 0; display: flex; flex-direction: column; }
     main > * { flex: none; }
-    main > .columns { flex: 1 1 0; min-height: 420px; grid-template-rows: minmax(0, 1fr); }
-    .list-panel { min-height: 0; overflow-y: auto; }
-    #issue-detail { min-height: 0; display: flex; flex-direction: column; padding-bottom: 16px; }
+    #markdown-status { padding: 12px 32px 0; }
+    #issue-detail { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; padding: 16px 32px; }
     #detail-content { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
     #detail-header, #compose-region { flex: none; }
     #history-region { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
     #compose-region { max-height: 50%; overflow-y: auto; }
   }
   @media (max-width: 680px) {
-    header, main { padding: 14px; }
-    .columns { grid-template-columns: minmax(0, 1fr); }
-    .list-panel { border-right: 0; border-bottom: 1px solid var(--line); }
-    #issue-detail { padding: 16px; }
+    .sidebar { padding: 14px 14px 0; border-bottom: 1px solid var(--line); }
+    .list-panel { margin: 0 -14px; padding: 8px 14px 12px; }
     .detail-head { flex-wrap: wrap; }
     #reply-body { font-size: 16px; }
   }
@@ -123,47 +127,44 @@
 </style>
 </head>
 <body>
-<header><strong>Lane Router</strong><a href="/dashboard">运行看板</a><small>议题从 TUI 发起 · 本页可直接继续讨论</small></header>
-<main>
-  <h1>问答</h1>
-  <p class="muted">集中查看答复与问题。看不懂可以继续追问，一轮回复不会自动结束议题。</p>
-  <p id="markdown-status" class="warning" role="status" hidden>Markdown 组件未能加载，暂时显示原文。可刷新页面重试；回复仍可正常保存。</p>
+<aside class="sidebar">
+  <div class="sidebar-head"><h1 title="集中查看答复与问题。看不懂可以继续追问，一轮回复不会自动结束议题。&#10;议题从 TUI 发起 · 本页可直接继续讨论">问答</h1><a href="/dashboard">运行看板</a></div>
   <nav id="filters" aria-label="议题筛选">
     <button type="button" data-filter="attention" aria-pressed="true">待我处理</button>
     <button type="button" data-filter="open" aria-pressed="false">进行中</button>
     <button type="button" data-filter="all" aria-pressed="false">全部</button>
     <button type="button" data-filter="closed" aria-pressed="false">已结束</button>
-    <button type="button" id="refresh">刷新</button>
   </nav>
-  <p id="list-status" class="meta" role="status">正在读取议题…</p>
-  <div class="columns">
-    <nav class="list-panel" aria-label="议题列表"><div id="thread-list"></div><button type="button" id="load-threads" hidden>加载更多议题</button></nav>
-    <section id="issue-detail" aria-label="议题详情">
-      <p id="detail-empty" class="empty">选择一个议题，查看完整讨论。</p>
-      <div id="detail-content" hidden>
-        <div id="detail-header">
-          <div class="detail-head"><div><h2 id="detail-title"></h2><p id="detail-meta" class="meta"></p></div><button type="button" id="close-issue">结束议题</button></div>
-          <div id="close-confirmation" hidden role="group" aria-label="确认结束议题" tabindex="-1">
-            <p>确定结束这个议题吗？历史将保留，结束后不能继续回复。已保存的输入仍会交给 lane 处理。</p>
-            <button type="button" id="confirm-close" class="primary">确认结束</button>
-            <button type="button" id="cancel-close">取消</button>
-          </div>
-          <p id="detail-status" class="meta" role="status"></p>
+  <div class="list-bar"><p id="list-status" class="meta" role="status">正在读取议题…</p><button type="button" id="refresh">刷新</button></div>
+  <nav class="list-panel" aria-label="议题列表"><div id="thread-list"></div><button type="button" id="load-threads" hidden>加载更多议题</button></nav>
+</aside>
+<main>
+  <p id="markdown-status" class="warning" role="status" hidden>Markdown 组件未能加载，暂时显示原文。可刷新页面重试；回复仍可正常保存。</p>
+  <section id="issue-detail" aria-label="议题详情">
+    <p id="detail-empty" class="empty">选择一个议题，查看完整讨论。</p>
+    <div id="detail-content" hidden>
+      <div id="detail-header">
+        <div class="detail-head"><div><h2 id="detail-title"></h2><p id="detail-meta" class="meta"></p></div><button type="button" id="close-issue">结束议题</button></div>
+        <div id="close-confirmation" hidden role="group" aria-label="确认结束议题" tabindex="-1">
+          <p>确定结束这个议题吗？历史将保留，结束后不能继续回复。已保存的输入仍会交给 lane 处理。</p>
+          <button type="button" id="confirm-close" class="primary">确认结束</button>
+          <button type="button" id="cancel-close">取消</button>
         </div>
-        <div id="history-region" tabindex="0" aria-label="讨论历史">
-          <div id="questions" aria-label="问题状态"></div>
-          <div id="history"></div>
-          <button type="button" id="load-history" hidden>继续加载历史</button>
-        </div>
-        <div id="compose-region">
-          <p id="read-status" class="meta" role="status"></p>
-          <div id="compose"></div>
-          <p id="operation-status" role="status"></p>
-          <div id="operation-recovery" hidden><button type="button" id="retry-operation">用同一操作重试</button><button type="button" id="check-history">查看后端历史</button></div>
-        </div>
+        <p id="detail-status" class="meta" role="status"></p>
       </div>
-    </section>
-  </div>
+      <div id="history-region" tabindex="0" aria-label="讨论历史">
+        <div id="questions" aria-label="问题状态"></div>
+        <div id="history"></div>
+        <button type="button" id="load-history" hidden>继续加载历史</button>
+      </div>
+      <div id="compose-region">
+        <p id="read-status" class="meta" role="status"></p>
+        <div id="compose"></div>
+        <p id="operation-status" role="status"></p>
+        <div id="operation-recovery" hidden><button type="button" id="retry-operation">用同一操作重试</button><button type="button" id="check-history">查看后端历史</button></div>
+      </div>
+    </div>
+  </section>
 </main>
 <script src="/issues/assets/markdown-it.js"></script>
 <script>
@@ -228,6 +229,7 @@
     return [ownerText(owner) + " · ", presence];
   }
   const time = value => new Date(value).toLocaleString("zh-CN", { hour12: false });
+  const clock = value => new Date(value).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
   const questionLabels = { waiting_user: "待我回答", waiting_lane: "等待 lane", answered: "已回答", not_needed: "无需回答" };
   // Within 40px of the end counts as at the end: a reader that close is following new content.
   const atBottom = element => element.scrollHeight - element.scrollTop - element.clientHeight <= 40;
@@ -324,11 +326,14 @@
         if (!cursor) break;
       }
       listItems = [...items.values()]; listCursor = cursor;
-      byId("list-status").textContent = "已刷新 " + time(Date.now()) + " · 每 5 秒读取后端";
+      const now = Date.now();
+      byId("list-status").textContent = "已刷新 " + clock(now);
+      byId("list-status").title = "最后一次读取：" + time(now) + " · 每 5 秒读取后端";
       byId("list-status").className = "meta";
     } catch (error) {
       if (version !== listVersion) return;
       byId("list-status").textContent = "读取失败，列表可能已过期：" + error.message;
+      byId("list-status").removeAttribute("title");
       byId("list-status").className = "meta warning";
     } finally {
       if (version === listVersion) { listLoading = false; renderList(); }

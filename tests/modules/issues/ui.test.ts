@@ -732,5 +732,22 @@ test("6. leaving the page asks first only while an operation's outcome is open, 
 test("7. the page is called 问答", async () => {
   const f = await boot();
   expect(f.document.title).toBe("问答 · Lane Router");
-  expect(f.query("main h1").textContent).toBe("问答");
+  expect(f.query("h1").textContent).toBe("问答");
+});
+
+// docs/superpowers/specs/2026-10-20-issue-page-sidebar-layout.md, 3.1: the status line fits the sidebar on one line.
+test("the list status shows the time of the last read, and the full date and the polling interval on hover", async () => {
+  let failing = false;
+  const f = await boot({ intercept: (call, send) => failing && call.path.startsWith("/issues/api/threads?")
+    ? Promise.resolve(new Response(JSON.stringify({ error: "后端暂不可用" }), { status: 503 })) : send() });
+  const status = f.query("#list-status");
+  await vi.waitFor(() => expect(status.textContent).toMatch(/^已刷新 \d{2}:\d{2}:\d{2}$/));
+  expect(status.getAttribute("title")).toMatch(/^最后一次读取：.+ · 每 5 秒读取后端$/);
+  expect(status.getAttribute("title")).toContain(status.textContent.slice("已刷新 ".length) + " · ");
+  expect(status.className).toBe("meta");
+
+  failing = true; f.poll();
+  await vi.waitFor(() => expect(status.className).toBe("meta warning"));
+  expect(status.textContent).toBe("读取失败，列表可能已过期：后端暂不可用（503）");
+  expect(status.hasAttribute("title")).toBe(false);
 });

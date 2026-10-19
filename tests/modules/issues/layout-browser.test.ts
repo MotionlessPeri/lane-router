@@ -248,8 +248,8 @@ describe.skipIf(browser === undefined)(`issue page layout in a real browser (${B
 // docs/superpowers/specs/2026-10-19-issue-read-on-sight.md.
 describe.skipIf(browser === undefined)(`reading position in a real browser (${BROWSER})`, () => {
   test("1. opening at five unread entries reads only those whose end shows, and the rest once scrolled to", async () => {
-    // Entries short enough that the history shows the first two unread ones whole.
-    let id = ""; const { x, page, reads } = await open((fixture) => { id = longIssue(fixture, 12, 7, 2); });
+    // Entries tall enough that the history opens at the divider and shows some of the five unread ones whole, not all.
+    let id = ""; const { x, page, reads } = await open((fixture) => { id = longIssue(fixture, 12, 7, 8); });
     await select(page, id);
     await vi.waitFor(() => expect(reads.length).toBeGreaterThan(0), { timeout: 10_000 });
     await settle(page);
@@ -263,8 +263,8 @@ describe.skipIf(browser === undefined)(`reading position in a real browser (${BR
     expect(await unreadBadge(page, id)).toBe(true);
 
     await scrollRegion(page, "bottom");
-    await vi.waitFor(() => expect(readSeq(x, id)).toBe(12), { timeout: 10_000 });
-    expect(reads.at(-1)).toBe(12);
+    // The backend can have the mark before Playwright reports the request that carried it.
+    await vi.waitFor(() => { expect(readSeq(x, id)).toBe(12); expect(reads.at(-1)).toBe(12); }, { timeout: 10_000 });
     await refresh(page, id);
     expect(await unreadBadge(page, id)).toBe(false);
   });
@@ -303,8 +303,7 @@ describe.skipIf(browser === undefined)(`reading position in a real browser (${BR
     expect(readSeq(x, id)).toBe(3);
 
     await setFocus(page, true);
-    await vi.waitFor(() => expect(readSeq(x, id)).toBe(4), { timeout: 10_000 });
-    expect(reads).toEqual([4]);
+    await vi.waitFor(() => { expect(readSeq(x, id)).toBe(4); expect(reads).toEqual([4]); }, { timeout: 10_000 });
   });
 
   test("4. nothing is read while the tab is hidden", async () => {
@@ -345,10 +344,12 @@ describe.skipIf(browser === undefined)(`reading position in a real browser (${BR
     expect(readSeq(x, id)).toBe(9);
   });
 
-  // Below about 520px the page itself scrolls and the bottom of the history region is off screen.
+  // Below 420px the page itself scrolls; below about 250px the bottom of the history region is off screen too.
   test("5. in a wide but short window, an end inside the history but below the window is not read", async () => {
-    let id = ""; const { x, page, reads } = await open((fixture) => { id = longIssue(fixture, 12, 7, 2); }, { width: 1280, height: 440 });
-    await select(page, id);
+    let id = ""; const { x, page, reads } = await open((fixture) => { id = longIssue(fixture, 12, 7, 2); }, { width: 1280, height: 160 });
+    // Playwright's click would first scroll the whole item into view, and the page with it.
+    await page.$eval(`#thread-list [data-issue-id="${id}"]`, (item) => (item as HTMLElement).click());
+    await page.waitForSelector(`#issue-detail[data-issue-id="${id}"]`);
     await settle(page);
     const cut = await page.evaluate(() => {
       const region = document.getElementById("history-region")!.getBoundingClientRect();
@@ -364,9 +365,106 @@ describe.skipIf(browser === undefined)(`reading position in a real browser (${BR
     expect(reads.filter((seq) => cut.hidden.includes(seq))).toEqual([]);
 
     // Scrolling the page brings the rest of the history region into the window.
-    await page.evaluate(() => scrollTo(0, document.scrollingElement!.scrollHeight));
+    await page.evaluate(() => scrollBy(0, document.getElementById("history-region")!.getBoundingClientRect().bottom - innerHeight));
     await vi.waitFor(() => expect(readSeq(x, id)).toBeGreaterThanOrEqual(Math.min(...cut.hidden)), { timeout: 10_000 });
     await settle(page);
     expect(reads.at(-1)).toBe((await lastEndInView(page, "region")).last);
+  });
+});
+
+// The wide layout is a sidebar down the left edge and the conversation filling the rest. Numbers
+// are the acceptance criteria of docs/superpowers/specs/2026-10-20-issue-page-sidebar-layout.md.
+describe.skipIf(browser === undefined)(`sidebar layout in a real browser (${BROWSER})`, () => {
+  const box = (page: Page, selector: string) => page.evaluate((query) => {
+    const rect = document.querySelector(query)!.getBoundingClientRect();
+    return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, width: rect.width, height: rect.height };
+  }, selector);
+  const heights = (page: Page) => page.evaluate(() => ({ viewport: innerHeight, document: document.scrollingElement!.scrollHeight }));
+
+  test("1. the sidebar runs down the left edge of the window and the page is one screen high", async () => {
+    const { page } = await open((x) => { longIssue(x, 1); });
+    const sidebar = await box(page, "aside.sidebar");
+    const m = await heights(page);
+    expect({ left: sidebar.left, top: sidebar.top, height: sidebar.height }).toEqual({ left: 0, top: 0, height: m.viewport });
+    expect(sidebar.width).toBeGreaterThanOrEqual(240);
+    expect(sidebar.width).toBeLessThanOrEqual(320);
+    expect(m.document).toBe(m.viewport);
+    // The status line is the time alone, which fits beside the refresh button with no ellipsis.
+    const status = await page.evaluate(() => { const line = document.getElementById("list-status")!; return { text: line.textContent, fits: line.scrollWidth <= line.clientWidth }; });
+    expect(status).toEqual({ text: expect.stringMatching(/^已刷新 \d{2}:\d{2}:\d{2}$/), fits: true });
+  });
+
+  test("2. a long issue gives its history most of the window, under a title bar at the top", async () => {
+    let id = ""; const { page } = await open((x) => { id = longIssue(x, 60); });
+    await select(page, id);
+    const m = await metrics(page);
+    expect(m.region.clientHeight).toBeGreaterThanOrEqual(500);
+    expect(m.head.top).toBeGreaterThanOrEqual(0);
+    expect(m.head.top).toBeLessThanOrEqual(24);
+    expect(m.send.top).toBeGreaterThanOrEqual(0);
+    expect(m.send.bottom).toBeLessThanOrEqual(m.viewport);
+  });
+
+  test("3. the sidebar holds the title, the dashboard link, the filters, refresh and the list, which scrolls on its own", async () => {
+    const { page } = await open((x) => {
+      for (let n = 0; n < 100; n++) x.service.publish(x.caller, { operationKey: `list-${n}`, kind: "question", title: `议题 ${n}`, body: "等待用户" });
+    });
+    await page.waitForFunction(() => document.querySelectorAll("#thread-list [data-issue-id]").length === 100);
+    const found = await page.evaluate(() => {
+      const sidebar = document.querySelector("aside.sidebar");
+      const parts = [document.querySelector("h1"), document.querySelector('a[href="/dashboard"]'), ...document.querySelectorAll("[data-filter]"),
+        document.getElementById("refresh"), document.getElementById("thread-list")];
+      return {
+        inside: parts.map((part) => sidebar !== null && part !== null && sidebar.contains(part)),
+        inOrder: parts.every((part, n) => n === 0 || (part !== null && parts[n - 1] !== null
+          && (parts[n - 1]!.compareDocumentPosition(part) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0)),
+        title: document.querySelector("h1")?.textContent,
+        filters: [...document.querySelectorAll("[data-filter]")].map((tab) => tab.textContent),
+        listInSidebar: sidebar !== null && sidebar.contains(document.querySelector(".list-panel")),
+      };
+    });
+    expect(found).toEqual({ inside: Array(8).fill(true), inOrder: true, title: "问答", filters: ["待我处理", "进行中", "全部", "已结束"], listInSidebar: true });
+    const list = await page.evaluate(() => { const panel = document.querySelector(".list-panel")!; return { scrollHeight: panel.scrollHeight, clientHeight: panel.clientHeight }; });
+    expect(list.scrollHeight).toBeGreaterThan(list.clientHeight);
+    expect(await page.evaluate(() => { const panel = document.querySelector(".list-panel")!; panel.scrollTop = 400; return panel.scrollTop; })).toBe(400);
+    expect((await box(page, ".list-panel")).bottom).toBeLessThanOrEqual((await box(page, "aside.sidebar")).bottom);
+    const m = await heights(page);
+    expect(m.document).toBe(m.viewport);
+  });
+
+  test("4. on a wide window the conversation fills the main area, with only the margins at its sides", async () => {
+    let id = ""; const { page } = await open((x) => { id = longIssue(x, 60); }, { width: 1920, height: 1000 });
+    await select(page, id);
+    const sidebar = await box(page, "aside.sidebar"), main = await box(page, "main");
+    const windowWidth = await page.evaluate(() => document.documentElement.clientWidth);
+    for (const selector of ["#detail-header", "#history-region", "#compose-region"]) {
+      const block = await box(page, selector);
+      expect(Math.abs(block.width - (main.width - 64)), selector).toBeLessThanOrEqual(2);
+      expect(Math.abs(block.left - sidebar.right - 32), selector).toBeLessThanOrEqual(2);
+      expect(Math.abs(windowWidth - block.right - 32), selector).toBeLessThanOrEqual(2);
+    }
+  });
+
+  test("5. on a narrow screen the sidebar's content sits above the issue and the page scrolls as a whole", async () => {
+    let id = ""; const { page } = await open((x) => { id = longIssue(x, 60); }, NARROW);
+    await select(page, id);
+    const sidebar = await box(page, "aside.sidebar"), detail = await box(page, "#issue-detail");
+    const m = await metrics(page);
+    expect(m.document).toBeGreaterThan(m.viewport);
+    expect(sidebar.bottom).toBeLessThanOrEqual(detail.top);
+    expect(m.region.scrollHeight).toBeLessThanOrEqual(m.region.clientHeight + 1);
+  });
+
+  // 回复对象 names the question by its text; a long one used to widen the whole reply form past the window.
+  test("a long question to reply to keeps the reply area inside the window", async () => {
+    for (const viewport of [NARROW, { width: 800, height: 700 }]) {
+      let id = ""; const { page } = await open((x) => { id = longIssue(x, 3); }, viewport);
+      await select(page, id);
+      const sideways = await page.evaluate(() => ({ page: document.scrollingElement!.scrollWidth, compose: document.getElementById("compose-region")!.scrollWidth, composeWidth: document.getElementById("compose-region")!.clientWidth }));
+      const send = await box(page, "#send-reply");
+      expect(sideways.page, `${viewport.width} wide`).toBe(viewport.width);
+      expect(sideways.compose, `${viewport.width} wide`).toBeLessThanOrEqual(sideways.composeWidth);
+      expect(send.right, `${viewport.width} wide`).toBeLessThanOrEqual(viewport.width);
+    }
   });
 });
