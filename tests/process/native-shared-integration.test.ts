@@ -35,6 +35,8 @@ vi.mock("../../src/backends/codex-backend.js", () => ({ CodexBackend: class {
 } }));
 vi.mock("../../src/process/ensure-codex-host.js", () => ({ ensureCodexHost: async () => undefined }));
 vi.mock("../../src/process/codex-profiles.js", () => ({ defaultCodexModelProvider: () => "openai", listCodexModelProviders: () => [], listCodexProfiles: () => [], profileModelProvider: () => undefined }));
+// The restart case starts the Router twice: 2.5 s alone, past 5 s when the full suite runs beside a browser.
+vi.setConfig({ testTimeout: 30_000 });
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.unstubAllEnvs(); fixture.notices = []; fixture.requests = []; });
 async function setup(scope?: 'company-active-task') {
