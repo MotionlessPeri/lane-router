@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>议题收件箱 · Lane Router</title>
+<title>问答 · Lane Router</title>
 <style>
   :root { color-scheme: light dark; --bg: light-dark(#f7f8fa, #15181e); --panel: light-dark(#fff, #1c2028); --text: light-dark(#202938, #edf0f6); --muted: light-dark(#667083, #aab3c3); --line: light-dark(#e2e6ed, #353c49); --hover: light-dark(#edf1f7, #29313e); --active: light-dark(#e9effc, #25334d); --blue: light-dark(#355ca8, #aac6ff); --warm: light-dark(#875b14, #efc478); }
   * { box-sizing: border-box; }
@@ -34,6 +34,7 @@
   .list-panel { border-right: 1px solid var(--line); padding: 12px; }
   .topic { display: block; width: 100%; text-align: left; padding: 16px 13px; margin-bottom: 6px; border-color: transparent; background: transparent; border-radius: 9px; }
   .topic[aria-current="true"] { background: var(--active); border-color: var(--line); }
+  .topic.kept { opacity: .55; }
   .topic-title, .topic-meta { display: block; }
   .topic-title { font-weight: 550; margin: 5px 0; }
   .topic-meta { color: var(--muted); font-size: 12px; }
@@ -49,6 +50,8 @@
   #history { display: grid; gap: 22px; padding: 22px 0; }
   .entry { border-left: 2px solid var(--line); padding-left: 13px; }
   .entry.user { border-color: var(--blue); }
+  .entry.event { border-left: 0; padding-left: 0; }
+  .event-line { margin: 0; font-size: 12px; color: var(--muted); }
   .entry-body { margin-top: 7px; }
   .entry-body.plain-text { white-space: pre-wrap; }
   .entry-body > :first-child { margin-top: 0; }
@@ -71,11 +74,18 @@
   .entry-body hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
   .entry-head { font-size: 12px; color: var(--muted); }
   .delivery { margin-top: 8px; font-size: 12px; color: var(--muted); }
-  #compose { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 18px; }
-  #compose label { display: block; margin-bottom: 7px; }
-  #reply-question { width: 100%; padding: 7px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
-  #reply-body { width: 100%; min-height: 100px; padding: 11px; resize: vertical; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
-  .compose-bottom { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+  .new-divider { display: flex; align-items: center; gap: 10px; color: var(--blue); font-size: 12px; }
+  .new-divider::before, .new-divider::after { content: ""; flex: 1; border-top: 1px solid var(--blue); }
+  #compose-region { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 6px; }
+  /* Folded to two lines until it is in use: the reply area stays on screen under the history, and
+     every line it holds is a line the history does not get. */
+  #reply-form { display: grid; gap: 8px; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  #reply-body { width: 100%; height: calc(2 * 1.65em + 22px); min-height: calc(2 * 1.65em + 22px); padding: 11px; resize: vertical; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  #compose[data-expanded="true"] #reply-body { height: calc(6 * 1.65em + 22px); }
+  .compose-bottom { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
+  #reply-question { flex: 1 1 180px; min-width: 0; padding: 5px 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+  .compose-bottom #send-reply { margin-left: auto; }
   .primary { background: var(--text); color: var(--panel); border-color: var(--text); }
   .primary:hover { background: var(--text); opacity: .9; }
   #close-confirmation { padding: 13px; margin-top: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
@@ -83,6 +93,24 @@
   #operation-status { white-space: pre-wrap; margin-top: 12px; }
   #operation-recovery { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
   [hidden] { display: none !important; }
+  /* Wide screens: the two columns take the rest of the viewport, never less than 420px, and each
+     scrolls on its own; on the right only the history does, between a fixed title bar and a fixed
+     reply area. The page itself stops growing with the content. Narrow screens keep scrolling the
+     whole page: a scroll box inside a phone screen is harder to use than none. */
+  @media (min-width: 681px) {
+    html, body { height: 100%; }
+    body { display: flex; flex-direction: column; }
+    header { flex: none; }
+    main { flex: 1 1 auto; min-height: 0; width: 100%; display: flex; flex-direction: column; }
+    main > * { flex: none; }
+    main > .columns { flex: 1 1 0; min-height: 420px; grid-template-rows: minmax(0, 1fr); }
+    .list-panel { min-height: 0; overflow-y: auto; }
+    #issue-detail { min-height: 0; display: flex; flex-direction: column; padding-bottom: 16px; }
+    #detail-content { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+    #detail-header, #compose-region { flex: none; }
+    #history-region { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+    #compose-region { max-height: 50%; overflow-y: auto; }
+  }
   @media (max-width: 680px) {
     header, main { padding: 14px; }
     .columns { grid-template-columns: minmax(0, 1fr); }
@@ -97,7 +125,7 @@
 <body>
 <header><strong>Lane Router</strong><a href="/dashboard">运行看板</a><small>议题从 TUI 发起 · 本页可直接继续讨论</small></header>
 <main>
-  <h1>议题收件箱</h1>
+  <h1>问答</h1>
   <p class="muted">集中查看答复与问题。看不懂可以继续追问，一轮回复不会自动结束议题。</p>
   <p id="markdown-status" class="warning" role="status" hidden>Markdown 组件未能加载，暂时显示原文。可刷新页面重试；回复仍可正常保存。</p>
   <nav id="filters" aria-label="议题筛选">
@@ -113,20 +141,26 @@
     <section id="issue-detail" aria-label="议题详情">
       <p id="detail-empty" class="empty">选择一个议题，查看完整讨论。</p>
       <div id="detail-content" hidden>
-        <div class="detail-head"><div><h2 id="detail-title"></h2><p id="detail-meta" class="meta"></p></div><button type="button" id="close-issue">结束议题</button></div>
-        <div id="close-confirmation" hidden role="group" aria-label="确认结束议题" tabindex="-1">
-          <p>确定结束这个议题吗？历史将保留，结束后不能继续回复。已保存的输入仍会交给 lane 处理。</p>
-          <button type="button" id="confirm-close" class="primary">确认结束</button>
-          <button type="button" id="cancel-close">取消</button>
+        <div id="detail-header">
+          <div class="detail-head"><div><h2 id="detail-title"></h2><p id="detail-meta" class="meta"></p></div><button type="button" id="close-issue">结束议题</button></div>
+          <div id="close-confirmation" hidden role="group" aria-label="确认结束议题" tabindex="-1">
+            <p>确定结束这个议题吗？历史将保留，结束后不能继续回复。已保存的输入仍会交给 lane 处理。</p>
+            <button type="button" id="confirm-close" class="primary">确认结束</button>
+            <button type="button" id="cancel-close">取消</button>
+          </div>
+          <p id="detail-status" class="meta" role="status"></p>
         </div>
-        <p id="detail-status" class="meta" role="status"></p>
-        <div id="questions" aria-label="问题状态"></div>
-        <div id="history" aria-label="讨论历史"></div>
-        <button type="button" id="load-history" hidden>继续加载历史</button>
-        <p id="read-status" class="meta" role="status"></p>
-        <div id="compose"></div>
-        <p id="operation-status" role="status"></p>
-        <div id="operation-recovery" hidden><button type="button" id="retry-operation">用同一操作重试</button><button type="button" id="check-history">查看后端历史</button></div>
+        <div id="history-region" tabindex="0" aria-label="讨论历史">
+          <div id="questions" aria-label="问题状态"></div>
+          <div id="history"></div>
+          <button type="button" id="load-history" hidden>继续加载历史</button>
+        </div>
+        <div id="compose-region">
+          <p id="read-status" class="meta" role="status"></p>
+          <div id="compose"></div>
+          <p id="operation-status" role="status"></p>
+          <div id="operation-recovery" hidden><button type="button" id="retry-operation">用同一操作重试</button><button type="button" id="check-history">查看后端历史</button></div>
+        </div>
       </div>
     </section>
   </div>
@@ -164,8 +198,9 @@
     return body;
   }
   // The window's navigator rather than the bare global, so the page and its tests look at the same
-  // clipboard. The label stays on "已复制" until the entry is next rendered: no timer, because the
-  // page's timers are reserved for request timeouts.
+  // clipboard. The label stays on "已复制" until the issue is next opened, when its entries are
+  // rebuilt (polls keep them as they are): no timer, because the page's timers are reserved for
+  // request timeouts.
   function addCopyButton(pre) {
     const button = node("button", "copy-code", "复制");
     button.type = "button";
@@ -182,11 +217,29 @@
     pre.append(button);
   }
   const ownerText = owner => (owner.address || owner.laneId) + (owner.state === "archived" ? " · 已归档" : owner.state === "missing" ? " · 已缺失" : "");
+  const presenceLabels = { online: "在线", busy: "可能在忙", unconfirmed: "未确认", offline: "离线" };
+  // The lane, then whether the Router believes it can reach it: a belief, and the page says so. A
+  // Router from before presence existed sends none, and none is shown.
+  function ownerNodes(owner) {
+    const label = presenceLabels[owner.presence];
+    if (!label) return [ownerText(owner)];
+    const presence = node("span", "presence", label);
+    presence.title = "Router 的判断，不代表 lane 正在处理你的回复";
+    return [ownerText(owner) + " · ", presence];
+  }
   const time = value => new Date(value).toLocaleString("zh-CN", { hour12: false });
   const questionLabels = { waiting_user: "待我回答", waiting_lane: "等待 lane", answered: "已回答", not_needed: "无需回答" };
+  // Within 40px of the end counts as at the end: a reader that close is following new content.
+  const atBottom = element => element.scrollHeight - element.scrollTop - element.clientHeight <= 40;
+  const toBottom = element => { element.scrollTop = element.scrollHeight; };
+  // What is on screen now, so a poll that brings nothing new changes nothing a reader is looking at.
+  let renderedList = "", renderedQuestions = "", historyFor = null, shownTopics = [];
+  // Which entries of the issue on screen have their end in view now; see watchSight.
+  let sight = null;
+  const entryFacts = new WeakMap();
   function viewFor(id) {
     if (!views.has(id)) views.set(id, { detail: null, entries: [], through: 0, hasMore: false, version: 0, loading: false,
-      draft: "", questionId: "", operation: null, notice: "", warning: false, confirmClose: false, readAck: 0, reads: new Map(), loadError: "", readError: "" });
+      draft: "", questionId: "", operation: null, notice: "", warning: false, confirmClose: false, seen: 0, readAck: 0, reads: new Map(), loadError: "", readError: "" });
     return views.get(id);
   }
 
@@ -213,22 +266,46 @@
   }
 
   function renderList() {
-    const host = byId("thread-list"); host.replaceChildren();
-    if (!listItems.length) host.append(node("p", "empty", "这里暂时没有议题。"));
-    for (const item of listItems) {
+    const host = byId("thread-list"), panel = host.closest(".list-panel");
+    const items = keepingSelected();
+    const signature = JSON.stringify([selectedId, items.map(item => [item.id, item.kept, item.title, item.status, item.attentionReasons, item.waitingLaneCount, ownerText(item.owner), item.owner.presence, item.updatedAt])]);
+    if (signature !== renderedList) { renderedList = signature; const scrollTop = panel.scrollTop; renderTopics(host, items); panel.scrollTop = scrollTop; }
+    shownTopics = items;
+    byId("load-threads").hidden = !listCursor; byId("load-threads").disabled = listLoading;
+  }
+  /**
+   * The issue on screen stays where it was in the list once it stops matching the filter (a reply
+   * takes it out of 待我处理), so it does not seem to vanish while it is open. It goes when another
+   * issue is chosen or the filter changes, and it is never part of the list's paging. What needed
+   * attention when it was last listed is out of date by then, so none of that is shown on it.
+   */
+  function keepingSelected() {
+    if (!selectedId || listItems.some(item => item.id === selectedId)) return listItems;
+    const index = shownTopics.findIndex(item => item.id === selectedId);
+    if (index < 0) return listItems;
+    const items = [...listItems];
+    items.splice(Math.min(index, items.length), 0, { ...shownTopics[index], kept: true, attentionReasons: [], waitingLaneCount: 0 });
+    return items;
+  }
+  function renderTopics(host, items) {
+    host.replaceChildren();
+    if (!items.length) host.append(node("p", "empty", "这里暂时没有议题。"));
+    for (const item of items) {
       const button = node("button", "topic"); button.type = "button";
       button.dataset.issueId = item.id; button.setAttribute("aria-current", String(item.id === selectedId));
+      if (item.kept) { button.classList.add("kept"); button.append(node("span", "badge", "已不在当前筛选")); }
       // These are facts returned by the list API; reading does not decide whether a question still needs an answer.
       if (item.status === "closed") button.append(node("span", "badge", "已结束"));
       for (const reason of item.attentionReasons) {
         if (reason === "waiting_user") button.append(node("span", "badge ask", "待我回答"));
         if (reason === "unread_lane_content") button.append(node("span", "badge unread", "未读答复"));
       }
-      if (item.waitingLaneCount > 0) button.append(node("span", "badge", "等待 lane"));
-      button.append(node("span", "topic-title", item.title), node("span", "topic-meta", ownerText(item.owner)), node("span", "topic-meta", time(item.updatedAt)));
+      // A closed issue waits on nobody, whatever its last round left open.
+      if (item.status !== "closed" && item.waitingLaneCount > 0) button.append(node("span", "badge", "等待 lane"));
+      const owner = node("span", "topic-meta"); owner.append(...ownerNodes(item.owner));
+      button.append(node("span", "topic-title", item.title), owner, node("span", "topic-meta", time(item.updatedAt)));
       button.addEventListener("click", () => selectIssue(item.id)); host.append(button);
     }
-    byId("load-threads").hidden = !listCursor; byId("load-threads").disabled = listLoading;
   }
   async function loadList(more = false) {
     if (listLoading) return;
@@ -258,15 +335,44 @@
     }
   }
 
+  /**
+   * Opening an issue starts its history afresh: entries are rebuilt, and where it opens is decided
+   * by the first detail fetched after this, whose reading position predates anything this opening
+   * marks read.
+   */
   function selectIssue(id) {
+    const region = byId("history-region");
+    // Where the reader was in the issue being left, to come back to.
+    if (selectedId && byId("issue-detail").dataset.issueId === selectedId) viewFor(selectedId).scrollTop = region.scrollTop;
     selectedId = id; renderList();
     const view = viewFor(id);
+    view.positioning = view.detail ? "return" : "open";
+    view.pickTarget = true;
+    historyFor = null;
     byId("detail-empty").hidden = Boolean(view.detail);
     byId("detail-empty").textContent = "正在读取议题…";
     byId("detail-content").hidden = !view.detail;
     byId("issue-detail").removeAttribute("data-issue-id");
-    if (view.detail) renderDetail(id);
+    if (view.detail) { renderDetail(id); region.scrollTop = view.scrollTop ?? region.scrollHeight; }
     void loadDetail(id, false, true);
+  }
+  /**
+   * Where an issue opens. With unread lane content loaded, a divider goes in front of the first of
+   * it and the history scrolls so the divider sits at the top. Without, a first opening goes to the
+   * latest entry and a return stays where the reader left off. An unread entry not loaded yet (the
+   * oldest page comes first) counts as none.
+   */
+  function placeOpened(id, mode, readSeq) {
+    const view = viewFor(id), region = byId("history-region"), history = byId("history");
+    history.querySelector("[data-new-divider]")?.remove();
+    const unread = view.entries.find(entry => entry.author === "lane" && entry.kind !== "event" && entry.seq > readSeq);
+    const article = unread ? history.querySelector('article[data-entry-seq="' + unread.seq + '"]') : null;
+    if (article) {
+      const divider = node("div", "new-divider", "以下是新内容");
+      divider.dataset.newDivider = ""; divider.setAttribute("role", "separator");
+      history.insertBefore(divider, article);
+      region.scrollTop += divider.getBoundingClientRect().top - region.getBoundingClientRect().top;
+    } else if (mode === "open") toBottom(region);
   }
   async function loadDetail(id, more = false, force = false) {
     const view = viewFor(id);
@@ -285,7 +391,18 @@
       view.entries = [...entries.values()].sort((a, b) => a.seq - b.seq);
       if (!metadataOnly) { view.through = Math.max(view.through, result.displayedThroughSeq); view.hasMore = result.hasMore; }
       view.detail = result; view.loadError = "";
-      if (selectedId === id) { renderDetail(id); markRenderedRead(id); }
+      if (view.pickTarget && !view.operation) { view.questionId = defaultTarget(view); view.pickTarget = false; }
+      if (selectedId === id) {
+        const region = byId("history-region");
+        const following = !more && byId("issue-detail").dataset.issueId === id && atBottom(region);
+        renderDetail(id);
+        // This response's readSeq predates any read mark for what it shows; that is the boundary wanted.
+        if (view.positioning) { placeOpened(id, view.positioning, result.thread.readSeq); view.positioning = null; }
+        else if (view.followOwnReply || following) toBottom(region);
+        view.followOwnReply = false;
+        // Only what was already seen; a read mark that failed goes again here.
+        markSeenRead(id);
+      }
     } catch (error) {
       if (version !== view.version) return;
       view.loadError = "读取详情失败，所示历史可能已过期：" + error.message;
@@ -298,6 +415,21 @@
     }
   }
 
+  /**
+   * The question a reply most likely answers: the newest one still waiting on the user. Worked out
+   * when an issue is opened and after a reply to it is sent, never on a poll, so a question arriving
+   * while a reply is being written cannot quietly take it over. A prompt not loaded yet is newer
+   * than every loaded one, since history loads oldest first.
+   */
+  function defaultTarget(view) {
+    const seqOf = question => view.entries.find(entry => entry.id === question.promptEntryId)?.seq ?? Infinity;
+    let target = null;
+    for (const question of view.detail.questions) {
+      if (question.askedTo !== "user" || question.status !== "waiting_user") continue;
+      if (target === null || seqOf(question) >= seqOf(target)) target = question;
+    }
+    return target ? target.id : "";
+  }
   function deliveryText(delivery) {
     const facts = [delivery.processedAt !== null ? "agent 已确认处理" : delivery.handoffState === "accepted" ? "已入 lane 收件箱，处理未确认" : "已保存，待入箱"];
     if (delivery.handoffState === "blocked") facts.push("交接受阻");
@@ -312,31 +444,17 @@
     const closed = detail.thread.status === "closed";
     byId("detail-empty").hidden = true; byId("detail-content").hidden = false;
     byId("detail-title").textContent = detail.thread.title;
-    byId("detail-meta").textContent = ownerText(detail.owner) + " · " + (closed ? "已结束" : "进行中") + " · " + id;
+    // Lanes refer to an issue by the first eight characters of its ID; the whole ID is on hover.
+    const meta = byId("detail-meta"), metaSignature = JSON.stringify([detail.owner, closed, id]);
+    if (meta.dataset.signature !== metaSignature) {
+      const shortId = node("span", "issue-id", id.slice(0, 8)); shortId.title = id;
+      meta.replaceChildren(...ownerNodes(detail.owner), " · " + (closed ? "已结束" : "进行中") + " · ", shortId);
+      meta.dataset.signature = metaSignature;
+    }
     byId("detail-status").textContent = view.loadError;
     byId("close-issue").hidden = closed; byId("close-issue").disabled = Boolean(view.operation);
-    const questions = byId("questions"); questions.replaceChildren();
-    for (const question of detail.questions) {
-      const entry = view.entries.find(item => item.id === question.promptEntryId);
-      const label = entry ? "#" + entry.seq + " " + entry.body.slice(0, 60) : question.id;
-      const row = node("p", "question", (questionLabels[question.status] || question.status) + " · " + label + (question.reason ? " · " + question.reason : ""));
-      if (question.answerEntryId) row.append(node("span", null, " · 答复 " + question.answerEntryId));
-      questions.append(row);
-    }
-    const history = byId("history"); history.replaceChildren();
-    for (const entry of view.entries) {
-      const article = node("article", "entry " + (entry.author === "user" ? "user" : ""));
-      article.dataset.entrySeq = String(entry.seq);
-      const source = entry.source === "agent_reported_tui_user" ? "用户（agent 记录的 TUI 原话）" : entry.author === "user" ? "我" : "lane";
-      const kind = { question: "提问", answer: "答复", reply: "回复", event: "记录" }[entry.kind] || entry.kind;
-      article.append(node("div", "entry-head", source + " · " + kind + " · #" + entry.seq + " · " + time(entry.createdAt)), entryBody(entry.body));
-      if (entry.relatedEntryId) {
-        const related = view.entries.find(item => item.id === entry.relatedEntryId);
-        article.append(node("div", "meta", "关联 " + (related ? "#" + related.seq : entry.relatedEntryId)));
-      }
-      for (const delivery of detail.deliveries.filter(item => item.entryId === entry.id)) article.append(node("div", "delivery", deliveryText(delivery)));
-      history.append(article);
-    }
+    renderQuestions(id, view, detail);
+    renderHistory(id, view, detail);
     byId("load-history").hidden = !view.hasMore;
     byId("read-status").textContent = view.readError;
     renderCompose(id, closed);
@@ -350,23 +468,110 @@
     byId("issue-detail").dataset.issueId = id;
   }
 
+  function renderQuestions(id, view, detail) {
+    const refs = references(view, detail);
+    const rows = detail.questions.map(question => {
+      const entry = view.entries.find(item => item.id === question.promptEntryId);
+      const label = entry ? "#" + entry.seq + " " + entry.body.slice(0, 60) : question.id;
+      return [(questionLabels[question.status] || question.status) + " · " + label + (question.reason ? " · " + question.reason : ""),
+        question.answerEntryId ? " · 答复 " + (refs.get(question.answerEntryId) ?? question.answerEntryId) : ""];
+    });
+    const signature = JSON.stringify([id, rows]);
+    if (signature === renderedQuestions) return;
+    renderedQuestions = signature;
+    const questions = byId("questions"); questions.replaceChildren();
+    for (const [text, answer] of rows) { const row = node("p", "question", text); if (answer) row.append(node("span", null, answer)); questions.append(row); }
+  }
+  /**
+   * Entries are only ever added, so a poll appends what is new and leaves every entry on screen as
+   * the same nodes: the reader keeps their place and whatever text they had selected. The parts of
+   * an entry that can still change — its delivery facts, and the link to an entry loaded later —
+   * are redrawn only when they did change.
+   */
+  function renderHistory(id, view, detail) {
+    const history = byId("history"), refs = references(view, detail);
+    if (historyFor !== id) { history.replaceChildren(); historyFor = id; watchSight(id); }
+    for (const entry of view.entries) {
+      let article = history.querySelector('article[data-entry-seq="' + entry.seq + '"]');
+      if (!article) {
+        article = entryArticle(entry);
+        const later = [...history.querySelectorAll("article[data-entry-seq]")].find(other => Number(other.dataset.entrySeq) > entry.seq);
+        history.insertBefore(article, later ?? null);
+        sight?.observer.observe(article.querySelector(".entry-end"));
+      }
+      if (entry.kind === "event") {
+        const line = article.querySelector(".event-line"), text = eventText(entry, refs);
+        if (line.textContent !== text) line.textContent = text;
+        continue;
+      }
+      const related = entry.relatedEntryId ? view.entries.find(item => item.id === entry.relatedEntryId) : null;
+      const facts = [
+        ...(entry.relatedEntryId ? [["meta", "关联 " + (related ? "#" + related.seq : entry.relatedEntryId)]] : []),
+        ...detail.deliveries.filter(item => item.entryId === entry.id).map(delivery => ["delivery", deliveryText(delivery)]),
+      ];
+      const signature = JSON.stringify(facts);
+      if (entryFacts.get(article) === signature) continue;
+      entryFacts.set(article, signature);
+      article.querySelector(".entry-facts").replaceChildren(...facts.map(([className, text]) => node("div", className, text)));
+    }
+  }
+  function entryArticle(entry) {
+    const end = node("div", "entry-end"); end.setAttribute("aria-hidden", "true");
+    // A system record is one quiet line, its time on hover; renderHistory writes the line.
+    if (entry.kind === "event") {
+      const article = node("article", "entry event"); article.dataset.entrySeq = String(entry.seq);
+      const line = node("p", "event-line"); line.title = time(entry.createdAt);
+      article.append(line, end);
+      return article;
+    }
+    const article = node("article", "entry " + (entry.author === "user" ? "user" : ""));
+    article.dataset.entrySeq = String(entry.seq);
+    const source = entry.source === "agent_reported_tui_user" ? "用户（agent 记录的 TUI 原话）" : entry.author === "user" ? "我" : "lane";
+    const kind = { question: "提问", answer: "答复", reply: "回复" }[entry.kind] || entry.kind;
+    article.append(node("div", "entry-head", source + " · " + kind + " · #" + entry.seq + " · " + time(entry.createdAt)), entryBody(entry.body), node("div", "entry-facts"), end);
+    return article;
+  }
+  /** "#<seq>" for each loaded entry, and for each question by its prompt, keyed by ID. */
+  function references(view, detail) {
+    const refs = new Map(view.entries.map(entry => [entry.id, "#" + entry.seq]));
+    for (const question of detail.questions) if (refs.has(question.promptEntryId)) refs.set(question.id, refs.get(question.promptEntryId));
+    return refs;
+  }
+  const oneLine = text => text.replace(/\s*\n\s*/g, " ").trim();
+  /**
+   * A system record as one line. The two a question's resolution leaves have fixed wording, written
+   * by resolve in service.ts; the tests run both sides, so a change to either shows up. Any other
+   * record is shown as written. An ID that names nothing loaded stays as it is.
+   */
+  function eventText(entry, refs) {
+    const ref = id => refs.get(id) ?? id;
+    const answered = /^问题 (\S+) 已回答（answered）。\n答复 entry ID: (\S+)$/.exec(entry.body);
+    if (answered) return "问题 " + ref(answered[1]) + " 已回答（答复 " + ref(answered[2]) + "）";
+    const dropped = /^问题 (\S+) 无需回答（not_needed）。\n原因：([\s\S]*)$/.exec(entry.body);
+    if (dropped) return "问题 " + ref(dropped[1]) + " 无需回答：" + oneLine(dropped[2]);
+    return oneLine(entry.body.replace(/[\w-]+/g, ref));
+  }
+
   function renderCompose(id, closed) {
     const host = byId("compose"), view = viewFor(id);
-    if (closed) { host.replaceChildren(node("p", "muted", "议题已结束。讨论历史保留。")); host.removeAttribute("data-for"); return; }
+    if (closed) { host.replaceChildren(node("p", "muted", "议题已结束。讨论历史保留。")); host.removeAttribute("data-for"); host.removeAttribute("data-expanded"); return; }
     if (host.dataset.for !== id) {
-      host.replaceChildren(); host.dataset.for = id;
+      host.replaceChildren(); host.dataset.for = id; host.removeAttribute("data-expanded");
       const form = node("form"); form.id = "reply-form";
+      const bodyLabel = node("label", "visually-hidden", "继续讨论"); bodyLabel.htmlFor = "reply-body";
+      const textarea = node("textarea"); textarea.id = "reply-body"; textarea.placeholder = "写下回复，或直接说哪里还不清楚…";
+      if (!view.draft) view.draft = storedDraft(id);
+      textarea.value = view.draft;
+      textarea.addEventListener("input", () => { if (!view.operation) { view.draft = textarea.value; storeDraft(id, view.draft); } sizeCompose(id); });
+      textarea.addEventListener("focus", () => sizeCompose(id, true));
+      textarea.addEventListener("blur", () => sizeCompose(id, false));
+      const bottom = node("div", "compose-bottom");
       const questionLabel = node("label", null, "回复对象"); questionLabel.htmlFor = "reply-question";
       const select = node("select"); select.id = "reply-question";
-      select.addEventListener("change", () => { if (!view.operation) view.questionId = select.value; });
-      const bodyLabel = node("label", null, "继续讨论"); bodyLabel.htmlFor = "reply-body";
-      const textarea = node("textarea"); textarea.id = "reply-body"; textarea.placeholder = "写下回复，或直接说哪里还不清楚…";
-      textarea.value = view.draft;
-      textarea.addEventListener("input", () => { if (!view.operation) view.draft = textarea.value; });
-      const bottom = node("div", "compose-bottom");
-      bottom.append(node("span", "meta", "保存后交给原 lane，无需回 TUI 重复。"));
-      const send = node("button", "primary", "发送回复"); send.id = "send-reply"; send.type = "submit"; bottom.append(send);
-      form.append(questionLabel, select, bodyLabel, textarea, bottom);
+      select.addEventListener("change", () => { if (!view.operation) { view.questionId = select.value; view.pickTarget = false; } });
+      const send = node("button", "primary", "发送回复"); send.id = "send-reply"; send.type = "submit";
+      bottom.append(questionLabel, select, node("span", "meta", "保存后交给原 lane，无需回 TUI 重复。"), send);
+      form.append(bodyLabel, textarea, bottom);
       form.addEventListener("submit", event => { event.preventDefault(); startReply(id); }); host.append(form);
     }
     const select = byId("reply-question");
@@ -376,14 +581,73 @@
     })];
     if (select.dataset.options !== JSON.stringify(options)) {
       select.replaceChildren(); for (const [value, label] of options) { const option = node("option", null, label); option.value = value; select.append(option); }
-      select.dataset.options = JSON.stringify(options); select.value = view.questionId;
+      select.dataset.options = JSON.stringify(options);
     }
+    if (select.value !== view.questionId) select.value = view.questionId;
     byId("reply-body").disabled = Boolean(view.operation); select.disabled = Boolean(view.operation); byId("send-reply").disabled = Boolean(view.operation);
+    sizeCompose(id);
+  }
+  // A draft is kept in this browser, per issue, so a reload does not lose it. A browser that refuses
+  // storage (a private window, blocked site data) keeps drafts in memory only, as before.
+  const DRAFT_KEY = "lane-router.issues.draft.";
+  function storedDraft(id) {
+    try { return document.defaultView.localStorage.getItem(DRAFT_KEY + id) ?? ""; } catch { return ""; }
+  }
+  function storeDraft(id, text) {
+    try {
+      const storage = document.defaultView.localStorage;
+      if (text) storage.setItem(DRAFT_KEY + id, text); else storage.removeItem(DRAFT_KEY + id);
+    } catch { /* memory only */ }
+  }
+  /**
+   * The reply area opens to about six lines while it is in use — focused, holding a draft, or with
+   * an operation in flight or unresolved — and folds back to two otherwise. A history that was at
+   * its end stays at its end when the area changes size underneath it.
+   */
+  function sizeCompose(id, focused) {
+    const host = byId("compose"), textarea = byId("reply-body");
+    if (!textarea || host.dataset.for !== id) return;
+    const inUse = (focused ?? document.activeElement === textarea) || textarea.value !== "" || Boolean(viewFor(id).operation);
+    const expanded = String(inUse);
+    if (host.dataset.expanded === expanded) return;
+    const region = byId("history-region"), following = atBottom(region);
+    host.dataset.expanded = expanded;
+    if (following) toBottom(region);
   }
 
-  function markRenderedRead(id) {
+  /**
+   * An entry is read once its end has been in view while the tab is visible and the window has
+   * focus: a page left open on another screen reads nothing, and a long answer is not read from its
+   * first lines. In view means what the window shows: the observer has no root of its own, so the
+   * window is clipped by the history region where that scrolls on its own, and a wide but short
+   * window that cuts the region off reads nothing below its edge. The reading position is the
+   * furthest entry seen, as the backend keeps it. Without IntersectionObserver nothing is ever
+   * marked read.
+   */
+  function watchSight(id) {
+    sight?.observer.disconnect(); sight = null;
+    const Observer = document.defaultView.IntersectionObserver;
+    if (typeof Observer !== "function") return;
+    const inView = new Set();
+    const observer = new Observer(records => {
+      if (sight?.observer !== observer) return;
+      for (const record of records) {
+        const seq = Number(record.target.closest("article").dataset.entrySeq);
+        if (record.isIntersecting) inView.add(seq); else inView.delete(seq);
+      }
+      noteSeen(id);
+    });
+    sight = { id, observer, inView };
+  }
+  function noteSeen(id) {
+    if (sight?.id !== id || document.visibilityState === "hidden" || !document.hasFocus()) return;
+    const view = viewFor(id);
+    for (const seq of sight.inView) view.seen = Math.max(view.seen, seq);
+    markSeenRead(id);
+  }
+  function markSeenRead(id) {
     if (document.visibilityState === "hidden" || selectedId !== id || byId("issue-detail").dataset.issueId !== id) return;
-    const view = viewFor(id), throughSeq = view.through;
+    const view = viewFor(id), throughSeq = view.seen;
     if (throughSeq <= Math.max(view.readAck, view.detail.thread.readSeq)) return;
     if (!view.reads.has(throughSeq)) view.reads.set(throughSeq, { operationKey: crypto.randomUUID(), sending: false });
     const read = view.reads.get(throughSeq);
@@ -410,11 +674,14 @@
     try {
       const result = await post(id, operation.action, { ...operation.payload, operationKey: operation.operationKey });
       if (!result || result.issueId !== id || typeof result.entryId !== "string") throw new Error("未取得可核对的保存结果");
-      if (operation.action === "replies") { view.draft = ""; view.questionId = ""; }
+      if (operation.action === "replies") { view.draft = ""; view.questionId = ""; storeDraft(id, ""); }
       view.operation = null; view.confirmClose = false; view.warning = false;
       view.notice = operation.action === "replies" ? "已保存，待入箱。请在历史中查看后续交接与处理事实。" : "议题已结束，历史仍可查看。";
       // The shared composer can now belong to another issue; only reset this issue's controls.
       if (selectedId === id) { byId("compose").removeAttribute("data-for"); renderDetail(id); }
+      // The reply just sent is the newest entry; the reader is taken to it once it is back, and
+      // the next reply's target is worked out again from what the lane is now waiting on.
+      if (operation.action === "replies") { view.followOwnReply = true; view.pickTarget = true; }
       await loadDetail(id, false, true); void loadList();
     } catch (error) {
       if (wasUncertain || error.uncertain !== false) {
@@ -425,7 +692,7 @@
   }
 
   for (const button of document.querySelectorAll("[data-filter]")) button.addEventListener("click", () => {
-    filter = button.dataset.filter; listPages = 1; listCursor = null; listItems = []; listVersion++; listLoading = false;
+    filter = button.dataset.filter; listPages = 1; listCursor = null; listItems = []; shownTopics = []; listVersion++; listLoading = false;
     for (const tab of document.querySelectorAll("[data-filter]")) tab.setAttribute("aria-pressed", String(tab === button));
     renderList(); void loadList();
   });
@@ -444,7 +711,12 @@
   });
   byId("retry-operation").addEventListener("click", () => { if (selectedId) void runOperation(selectedId); });
   byId("check-history").addEventListener("click", () => { if (selectedId) void loadDetail(selectedId, false, true); });
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState !== "hidden") refresh(); });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState !== "hidden") { refresh(); if (sight) noteSeen(sight.id); } });
+  // Coming back to the window reads what is in front of the reader without another scroll.
+  document.defaultView.addEventListener("focus", () => { if (sight) noteSeen(sight.id); });
+  // An operation in flight or of unknown outcome holds a key a reload would lose, so leaving asks
+  // first. A draft alone does not: it is kept in storage.
+  document.defaultView.addEventListener("beforeunload", event => { if ([...views.values()].some(view => view.operation)) event.preventDefault(); });
   void loadList();
   setInterval(() => { if (document.visibilityState !== "hidden") refresh(); }, 5000);
 })();

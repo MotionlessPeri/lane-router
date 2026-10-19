@@ -181,7 +181,8 @@ test("hostile text in a snapshot is shown, not run", async () => {
 
 test("the dashboard links to the issue inbox alongside its existing launcher", async () => {
   const document = await render();
-  expect(document.querySelector('header a[href="/issues"]')?.textContent).toContain("议题");
+  // The page is called 问答 (docs/superpowers/specs/2026-10-19-issue-ui-touchups.md, 3.5).
+  expect(document.querySelector('header a[href="/issues"]')?.textContent).toBe("问答");
   expect(document.querySelector("#launcher")).not.toBeNull();
   const accounts = document.querySelector('header a[href="http://127.0.0.1:47839/"]');
   expect(accounts?.textContent).toBe("账号切换");

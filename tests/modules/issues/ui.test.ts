@@ -11,8 +11,34 @@ afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await c
 
 type Call = { path: string; init?: RequestInit; body: any };
 type Intercept = (call: Call, send: () => Promise<Response>) => Promise<Response>;
-async function boot(options: { firstTitle?: string; firstBody?: string; secondBody?: string; skipMarkdown?: boolean; prepare?: (x: ReturnType<typeof setupIssues>) => void; intercept?: Intercept } = {}) {
-  const x = setupIssues(); cleanup.push(() => x.dispose());
+/**
+ * happy-dom lays nothing out, and its IntersectionObserver never reports. This one stands in for a
+ * window tall enough to show every entry whole: each target observed is reported in view, those
+ * observed in one go in one call, as a browser does.
+ */
+class EverythingInView {
+  private pending: unknown[] = [];
+  private connected = true;
+  constructor(private readonly callback: (records: Array<{ target: unknown; isIntersecting: boolean }>, observer: unknown) => void) {}
+  observe(target: unknown) {
+    if (this.pending.push(target) > 1) return;
+    setTimeout(() => {
+      const targets = this.pending.splice(0);
+      if (this.connected) this.callback(targets.map(target => ({ target, isIntersecting: true })), this);
+    }, 0);
+  }
+  unobserve() {}
+  disconnect() { this.connected = false; this.pending = []; }
+}
+/** The browser's local storage, kept across reloads of the page; or one that refuses every use, as a private window may. */
+class MemoryStorage {
+  readonly items = new Map<string, string>();
+  getItem(key: string) { return this.items.get(key) ?? null; }
+  setItem(key: string, value: string) { this.items.set(key, String(value)); }
+  removeItem(key: string) { this.items.delete(key); }
+}
+async function boot(options: { firstTitle?: string; firstBody?: string; secondBody?: string; skipMarkdown?: boolean; prepare?: (x: ReturnType<typeof setupIssues>) => void; intercept?: Intercept; withoutObserver?: boolean; uuids?: boolean; storage?: "refused" } = {}) {
+  const x = setupIssues(options.uuids ? { newId: randomUUID } : {}); cleanup.push(() => x.dispose());
   const first = x.service.publish(x.caller, { operationKey: "first", kind: "question", title: options.firstTitle ?? "Choose", body: options.firstBody ?? "请选 A，或直接追问" });
   const second = x.service.publish(x.other, { operationKey: "second", kind: "answer", title: "研究答复", originalQuestion: "原来的问题", body: options.secondBody ?? "已有答复" });
   options.prepare?.(x);
@@ -20,13 +46,22 @@ async function boot(options: { firstTitle?: string; firstBody?: string; secondBo
     codex: { endpoint: "ws://127.0.0.1:1" } as never, instanceId: randomUUID(), issues: { service: x.service },
   } as ConstructorParameters<typeof LocalRouterServer>[0]);
   const { url } = await server.start(); cleanup.push(() => server.close());
+  const storage = new MemoryStorage();
+  return { x, first, second, storage, ...await load(url, storage, options), reload: () => load(url, storage, options) };
+}
+/** One load of the page, as a browser tab would: its own window and script, the shared backend and storage. */
+async function load(url: string, storage: MemoryStorage, options: Parameters<typeof boot>[0] & {}) {
   const window = new Window({ url: `${url}/issues` }); cleanup.push(() => window.happyDOM.abort());
+  Object.defineProperty(window, "localStorage", options.storage === "refused"
+    ? { configurable: true, get() { throw new DOMException("The operation is insecure.", "SecurityError"); } }
+    : { configurable: true, value: storage });
   const calls: Call[] = [];
   const browserFetch = async (path: string, init?: RequestInit) => {
     const call = { path, init, body: init?.body ? JSON.parse(String(init.body)) : undefined }; calls.push(call);
     const send = () => fetch(new URL(path, url), { ...init, headers: { ...init?.headers, ...(init?.method === "POST" ? { origin: url } : {}) } });
     return options.intercept ? options.intercept(call, send) : send();
   };
+  Object.defineProperty(window, "IntersectionObserver", { configurable: true, writable: true, value: options.withoutObserver ? undefined : EverythingInView });
   window.document.write(page);
   for (const asset of window.document.querySelectorAll("script[src]")) {
     if (options.skipMarkdown) continue;
@@ -50,7 +85,7 @@ async function boot(options: { firstTitle?: string; firstBody?: string; secondBo
   const change = (selector: string, value: string) => { const element = query(selector); expect(element, selector).not.toBeNull(); element.value = value; element.dispatchEvent(new window.Event("input", { bubbles: true })); element.dispatchEvent(new window.Event("change", { bubbles: true })); };
   const selected = async (id: string) => { click(`[data-issue-id="${id}"]`); await vi.waitFor(() => expect(query("#issue-detail")?.getAttribute("data-issue-id")).toBe(id)); };
   await vi.waitFor(() => expect(document.querySelectorAll("#thread-list [data-issue-id]").length).toBeGreaterThan(0));
-  return { x, first, second, calls, document, query, click, change, selected, poll: () => poll(), expireRequests: () => { for (const callback of timeouts.values()) callback(); } };
+  return { calls, document, window, query, click, change, selected, poll: () => poll(), expireRequests: () => { for (const callback of timeouts.values()) callback(); } };
 }
 
 test("list shows backend attention reasons separately and opens either real thread without reading the list", async () => {
@@ -383,6 +418,132 @@ test("a detail response arriving after the page becomes hidden does not mark its
   await vi.waitFor(() => expect(f.x.service.detail(f.first.issueId).thread.readSeq).toBe(2));
 });
 
+// Without a way to tell what is on screen the page cannot know what was read, and marking all it
+// shows would bring back what the read-on-sight change removed.
+test("a browser without IntersectionObserver never marks anything read", async () => {
+  const f = await boot({ withoutObserver: true });
+  await f.selected(f.first.issueId);
+  f.x.service.append(f.x.caller, { operationKey: "later", issueId: f.first.issueId, kind: "explanation", questionId: f.first.questionId, body: "后来的解释" });
+  f.poll(); await vi.waitFor(() => expect(f.query("#issue-detail").textContent).toContain("后来的解释"));
+  const window = f.document.defaultView!;
+  window.dispatchEvent(new window.Event("focus"));
+  f.document.dispatchEvent(new window.Event("visibilitychange"));
+  await f.selected(f.second.issueId); await f.selected(f.first.issueId);
+  await vi.waitFor(() => expect(f.calls.filter(c => c.path.includes(`${f.first.issueId}?`)).length).toBeGreaterThan(3));
+  await new Promise(resolve => setTimeout(resolve, 100));
+  expect(f.calls.filter(c => c.path.endsWith("/read"))).toEqual([]);
+  expect(f.x.service.detail(f.first.issueId).thread.readSeq).toBe(0);
+});
+
+// The history scrolls inside its own region; the reply area and the status lines must not be in
+// it, or they scroll away with the history.
+test("the reply area and its status lines sit outside the scrolling history", async () => {
+  const f = await boot(); await f.selected(f.first.issueId);
+  const region = f.query("#history-region");
+  expect(region.getAttribute("tabindex")).toBe("0");
+  expect(region.getAttribute("aria-label")).toBe("讨论历史");
+  for (const inside of ["#questions", "#history", "#load-history"]) expect(region.contains(f.query(inside)), inside).toBe(true);
+  for (const outside of ["#compose", "#reply-body", "#send-reply", "#operation-status", "#read-status", "#operation-recovery"]) {
+    expect(region.contains(f.query(outside)), outside).toBe(false);
+  }
+});
+
+// A poll that rebuilt the history would throw away the reader's place and anything they had
+// selected; entries only ever get added, so the ones on screen are kept as they are.
+test("polling keeps rendered entries as the same nodes and appends new ones in order", async () => {
+  const f = await boot(); await f.selected(f.first.issueId);
+  const first = f.query('#history article[data-entry-seq="1"]');
+  f.poll(); await vi.waitFor(() => expect(f.calls.filter(c => c.path.includes(`${f.first.issueId}?`)).length).toBeGreaterThan(1));
+  expect(f.query('#history article[data-entry-seq="1"]')).toBe(first);
+  f.x.service.append(f.x.caller, { operationKey: "later", issueId: f.first.issueId, kind: "explanation", questionId: f.first.questionId, body: "后来的解释" });
+  f.poll(); await vi.waitFor(() => expect(f.query('#history article[data-entry-seq="2"]')).not.toBeNull());
+  expect(f.query('#history article[data-entry-seq="1"]')).toBe(first);
+  const seqs = [...f.document.querySelectorAll("#history article[data-entry-seq]")].map(e => Number(e.getAttribute("data-entry-seq")));
+  expect(seqs).toEqual([1, 2]);
+  expect(f.query("#history").lastElementChild.getAttribute("data-entry-seq")).toBe("2");
+});
+
+test("the reply area opens while it is in use and folds back when it is not", async () => {
+  let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+  const f = await boot({ intercept: async (call, send) => { if (call.path.endsWith("/close")) await held; return send(); } });
+  await f.selected(f.first.issueId);
+  const expanded = () => f.query("#compose").dataset.expanded;
+  expect(expanded()).toBe("false");
+  f.query("#reply-body").focus(); expect(expanded()).toBe("true");
+  f.query("#reply-body").blur(); expect(expanded()).toBe("false");
+  f.change("#reply-body", "还没写完的草稿"); expect(expanded()).toBe("true");
+  f.query("#reply-body").blur(); expect(expanded()).toBe("true");
+  f.change("#reply-body", ""); expect(expanded()).toBe("false");
+  // An operation in flight keeps it open even with nothing typed.
+  f.click("#close-issue"); f.click("#confirm-close");
+  await vi.waitFor(() => expect(f.calls.some(c => c.path.endsWith("/close"))).toBe(true));
+  expect(expanded()).toBe("true");
+  release();
+  await vi.waitFor(() => expect(f.query("#reply-body")).toBeNull());
+});
+
+// Nobody chose a reply target on the real board (0 of 19 replies), so every answer to a lane's
+// question left that question waiting on the user and opened a new one waiting on the lane.
+test("a reply goes by default to the question waiting on the user, and answering it opens no new question", async () => {
+  const f = await boot(); await f.selected(f.first.issueId);
+  expect(f.query("#reply-question").value).toBe(f.first.questionId);
+  f.change("#reply-body", "选 A"); f.click("#send-reply");
+  await vi.waitFor(() => expect(f.x.service.detail(f.first.issueId).deliveries).toHaveLength(1));
+  expect(f.calls.find(c => c.path.endsWith("/replies"))!.body.questionId).toBe(f.first.questionId);
+  const questions = f.x.service.detail(f.first.issueId).questions;
+  expect(questions.map(q => [q.id, q.status])).toEqual([[f.first.questionId, "waiting_lane"]]);
+});
+
+test("the default is the newest question waiting on the user, and with none it is the open discussion", async () => {
+  let newer = "";
+  const f = await boot({ prepare(x) {
+    const target = x.service.list().items.find(i => i.originKind === "question")!;
+    newer = x.service.append(x.caller, { operationKey: "newer", issueId: target.id, kind: "question", body: "第二个问题" }).questionId!;
+  } });
+  await f.selected(f.first.issueId);
+  expect(f.query("#reply-question").value).toBe(newer);
+  // The answer issue's only question is already answered: nothing waits on the user there.
+  await f.selected(f.second.issueId);
+  expect(f.query("#reply-question").value).toBe("");
+  f.change("#reply-body", "继续聊"); f.click("#send-reply");
+  await vi.waitFor(() => expect(f.calls.some(c => c.path.includes(f.second.issueId) && c.path.endsWith("/replies"))).toBe(true));
+  expect(f.calls.find(c => c.path.endsWith("/replies"))!.body).not.toHaveProperty("questionId");
+});
+
+test("a target the user chose, or one picked before a new question arrived, holds until the reply is sent", async () => {
+  const f = await boot(); await f.selected(f.first.issueId);
+  const later = () => f.x.service.append(f.x.caller, { operationKey: `later-${randomUUID()}`, issueId: f.first.issueId, kind: "question", body: "后来的问题" }).questionId!;
+
+  // Picked by default, then a newer question arrives while the reply is being written.
+  later(); f.poll();
+  await vi.waitFor(() => expect(f.query("#reply-question").querySelectorAll("option")).toHaveLength(3));
+  expect(f.query("#reply-question").value).toBe(f.first.questionId);
+
+  // Chosen by the user, then another arrives: still the user's choice, and it is what is sent.
+  f.change("#reply-question", ""); const newest = later(); f.poll();
+  await vi.waitFor(() => expect(f.query("#reply-question").querySelectorAll("option")).toHaveLength(4));
+  expect(f.query("#reply-question").value).toBe("");
+  f.change("#reply-body", "先不答具体问题"); f.click("#send-reply");
+  await vi.waitFor(() => expect(f.x.service.detail(f.first.issueId).deliveries).toHaveLength(1));
+  expect(f.calls.find(c => c.path.endsWith("/replies"))!.body).not.toHaveProperty("questionId");
+  // Once sent, the default is worked out again: the newest question still waiting on the user.
+  await vi.waitFor(() => expect(f.query("#reply-question").value).toBe(newest));
+});
+
+test("a closed issue is never shown as waiting on its lane", async () => {
+  const f = await boot({ prepare(x) {
+    const target = x.service.list().items.find(i => i.originKind === "question")!;
+    x.service.reply({ operationKey: "unanswered", issueId: target.id, body: "还在等 lane" });
+    x.service.close({ operationKey: "close", issueId: target.id, body: "用户结束" });
+  } });
+  f.click('[data-filter="closed"]');
+  await vi.waitFor(() => expect(f.query(`[data-issue-id="${f.first.issueId}"]`)).not.toBeNull());
+  expect(f.x.service.list({ filter: "closed" }).items[0]?.waitingLaneCount).toBeGreaterThan(0);
+  const item = f.query(`[data-issue-id="${f.first.issueId}"]`).textContent;
+  expect(item).toContain("已结束");
+  expect(item).not.toContain("等待 lane");
+});
+
 // A one-line shell command in a code block is the common case on this board, and it used to run
 // off the right edge with nothing to copy it by (user, 2026-10-19).
 test("code blocks wrap long lines and carry a copy button that copies the code without its trailing newline", async () => {
@@ -405,4 +566,171 @@ test("code blocks wrap long lines and carry a copy button that copies the code w
   expect(writeText).toHaveBeenCalledExactlyOnceWith(command);
   // The button is chrome, not content: it must not leak into the code that gets copied or shown.
   expect(pre.querySelector("code").textContent).not.toContain("复制");
+});
+
+// Numbers below are the acceptance criteria of docs/superpowers/specs/2026-10-19-issue-ui-touchups.md.
+
+/**
+ * The question issue taken through every kind of system record, all written by service.ts:
+ * #1 lane question, #2 user reply, #3 lane answer, #4 its "answered" record, #5 another lane
+ * question, #6 its "not needed" record, then #7 the closing record when `close` is set.
+ */
+function recordsOnQuestion(x: ReturnType<typeof setupIssues>, close: boolean) {
+  const issue = x.service.list({ filter: "all" }).items.find(item => item.originKind === "question")!;
+  const asked = x.service.detail(issue.id).questions[0]!;
+  x.service.reply({ operationKey: "user-reply", issueId: issue.id, questionId: asked.id, body: "选 A" });
+  const answer = x.service.append(x.caller, { operationKey: "lane-answer", issueId: issue.id, kind: "answer", questionId: asked.id, body: "好的，按 A 做" });
+  const later = x.service.append(x.caller, { operationKey: "later-question", issueId: issue.id, kind: "question", body: "还要 B 吗？" });
+  x.service.updateQuestion(x.caller, { operationKey: "drop", issueId: issue.id, questionId: later.questionId!, status: "not_needed", reason: "用户已经说了\n不要 B" });
+  if (close) x.service.close({ operationKey: "close", issueId: issue.id, body: "用户在议题页面明确确认结束讨论。" });
+  return { ids: [asked.id, answer.entryId, later.questionId!] };
+}
+
+test("1. system records read as one quiet line, with #numbers where the record names a question or an entry", async () => {
+  let ids: string[] = [];
+  const f = await boot({ uuids: true, prepare(x) { ids = recordsOnQuestion(x, true).ids; } });
+  f.click('[data-filter="all"]');
+  await vi.waitFor(() => expect(f.query(`#thread-list [data-issue-id="${f.first.issueId}"]`)).not.toBeNull());
+  await f.selected(f.first.issueId);
+  const records = [...f.document.querySelectorAll("#history article.event")].map(article => [article.getAttribute("data-entry-seq"), article.textContent]);
+  expect(records).toEqual([["4", "问题 #1 已回答（答复 #3）"], ["6", "问题 #5 无需回答：用户已经说了 不要 B"], ["7", "用户在议题页面明确确认结束讨论。"]]);
+  expect(f.document.querySelectorAll("#history article.event .entry-head, #history article.event .entry-body")).toHaveLength(0);
+  const createdAt = f.x.service.detail(f.first.issueId).entries.find(entry => entry.seq === 4)!.createdAt;
+  expect(f.query('#history article[data-entry-seq="4"] [title]').getAttribute("title")).toBe(new Date(createdAt).toLocaleString("zh-CN", { hour12: false }));
+  for (const id of ids) expect(f.query("#issue-detail").textContent).not.toContain(id);
+  // Other entries are unchanged: a head, a body.
+  expect(f.query('#history article[data-entry-seq="3"] .entry-head').textContent).toContain("#3");
+});
+
+test("2. the question list names the answer by number, and the title shows the issue ID's first eight characters", async () => {
+  const f = await boot({ uuids: true, prepare(x) { recordsOnQuestion(x, false); } });
+  await f.selected(f.first.issueId);
+  expect(f.query("#questions").textContent).toContain("答复 #3");
+  const shown = f.query("#detail-meta .issue-id");
+  expect(shown.getAttribute("title")).toBe(f.first.issueId);
+  expect(shown.textContent).toBe(f.first.issueId.slice(0, 8));
+  expect(f.query("#detail-meta").textContent).not.toContain(f.first.issueId);
+});
+
+test("3. the issue on screen stays where it was in the list, faded, once it stops matching the filter", async () => {
+  const f = await boot();
+  const listed = () => [...f.document.querySelectorAll("#thread-list [data-issue-id]")].map(item => [item.getAttribute("data-issue-id"), item.classList.contains("kept")]);
+  await f.selected(f.first.issueId);
+  const before = listed();
+  expect(before.map(([id]) => id)).toContain(f.first.issueId);
+  f.change("#reply-body", "选 A"); f.click("#send-reply");
+  await vi.waitFor(() => expect(f.x.service.list({ filter: "attention" }).items.map(item => item.id)).not.toContain(f.first.issueId));
+  f.poll();
+  await vi.waitFor(() => expect(listed()).toEqual(before.map(([id]) => [id, id === f.first.issueId])));
+  expect(f.query(`#thread-list [data-issue-id="${f.first.issueId}"]`).textContent).toContain("已不在当前筛选");
+  expect(f.query(`#thread-list [data-issue-id="${f.first.issueId}"]`).getAttribute("aria-current")).toBe("true");
+  // What it showed before it left the filter is out of date: the question was just answered.
+  expect(f.query(`#thread-list [data-issue-id="${f.first.issueId}"]`).textContent).not.toContain("待我回答");
+  f.poll(); await vi.waitFor(() => expect(f.query("#load-threads").disabled).toBe(false));
+  expect(listed()).toEqual(before.map(([id]) => [id, id === f.first.issueId]));
+
+  // Choosing another issue lets it go.
+  await f.selected(f.second.issueId);
+  expect(listed().map(([id]) => id)).not.toContain(f.first.issueId);
+
+  // So does changing the filter, even with it still on screen.
+  f.click('[data-filter="open"]');
+  await vi.waitFor(() => expect(f.query(`#thread-list [data-issue-id="${f.first.issueId}"]`)).not.toBeNull());
+  await f.selected(f.first.issueId);
+  const sent = f.calls.length;
+  f.click('[data-filter="attention"]');
+  await vi.waitFor(() => expect(f.calls.slice(sent).some(call => call.path.includes("filter=attention"))).toBe(true));
+  await vi.waitFor(() => expect(f.query("#load-threads").disabled).toBe(false));
+  expect(f.query("#issue-detail").getAttribute("data-issue-id")).toBe(f.first.issueId);
+  expect(listed().map(([id]) => id)).not.toContain(f.first.issueId);
+});
+
+test("4. the list and the issue show whether the Router believes it can reach the lane, and say that is all it is", async () => {
+  const reach = (state: "live" | "unconfirmed" | "no_channel", believedBusy: boolean | null) => ({ state, connectedAt: 1, lastLifecycleAt: 1, lastNotifiedAt: null, believedBusy });
+  let lanes!: ReturnType<typeof setupIssues>["lanes"];
+  const f = await boot({ prepare(x) {
+    lanes = x.lanes;
+    lanes.set("lane-one", { ...lanes.get("lane-one")!, reach: reach("live", false) });
+    lanes.set("lane-two", { ...lanes.get("lane-two")!, reach: reach("live", true) });
+  } });
+  const presence = (id: string) => f.query(`#thread-list [data-issue-id="${id}"] .presence`);
+  expect(presence(f.first.issueId).textContent).toBe("在线");
+  expect(presence(f.second.issueId).textContent).toBe("可能在忙");
+  expect(presence(f.first.issueId).getAttribute("title")).toBe("Router 的判断，不代表 lane 正在处理你的回复");
+  await f.selected(f.first.issueId);
+  expect(f.query("#detail-meta .presence").textContent).toBe("在线");
+  expect(f.query("#detail-meta .presence").getAttribute("title")).toBe("Router 的判断，不代表 lane 正在处理你的回复");
+
+  lanes.set("lane-one", { ...lanes.get("lane-one")!, reach: reach("unconfirmed", null) });
+  lanes.set("lane-two", { ...lanes.get("lane-two")!, reach: reach("no_channel", null) });
+  f.poll();
+  await vi.waitFor(() => expect(presence(f.second.issueId).textContent).toBe("离线"));
+  expect(presence(f.first.issueId).textContent).toBe("未确认");
+  await vi.waitFor(() => expect(f.query("#detail-meta .presence").textContent).toBe("未确认"));
+});
+
+// The page reaches a Router before the Router is restarted with the field; it shows no state then.
+test("4. an owner without presence shows no state and nothing else changes", async () => {
+  const f = await boot({ intercept: async (call, send) => {
+    const response = await send();
+    if (call.init?.method === "POST") return response;
+    const data = await response.json();
+    const strip = (value: any): any => Array.isArray(value) ? value.map(strip) : value && typeof value === "object"
+      ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== "presence").map(([key, item]) => [key, strip(item)])) : value;
+    return new Response(JSON.stringify(strip(data)), { status: response.status, headers: response.headers });
+  } });
+  await f.selected(f.first.issueId);
+  expect(f.document.querySelectorAll(".presence")).toHaveLength(0);
+  expect(f.query(`#thread-list [data-issue-id="${f.first.issueId}"]`).textContent).toContain("project/work");
+  expect(f.query("#detail-meta").textContent).toContain("project/work");
+});
+
+test("5. a draft is kept in the browser for its issue, back after a reload, and gone once sent", async () => {
+  const f = await boot();
+  const key = `lane-router.issues.draft.${f.first.issueId}`;
+  await f.selected(f.first.issueId);
+  f.change("#reply-body", "写到一半的回复");
+  expect(f.storage.getItem(key)).toBe("写到一半的回复");
+
+  const again = await f.reload();
+  await again.selected(f.second.issueId);
+  expect(again.query("#reply-body").value).toBe("");
+  await again.selected(f.first.issueId);
+  expect(again.query("#reply-body").value).toBe("写到一半的回复");
+  again.click("#send-reply");
+  await vi.waitFor(() => expect(f.x.service.detail(f.first.issueId).deliveries).toHaveLength(1));
+  await vi.waitFor(() => expect(again.query("#operation-status").textContent).toContain("已保存"));
+  expect(f.storage.getItem(key)).toBeNull();
+  expect(again.query("#reply-body").value).toBe("");
+  expect(f.x.service.detail(f.first.issueId).entries.at(-1)?.body).toBe("写到一半的回复");
+});
+
+test("5. with the browser refusing storage, drafts stay in memory and replies still go", async () => {
+  const f = await boot({ storage: "refused" });
+  await f.selected(f.first.issueId);
+  f.change("#reply-body", "只在内存里");
+  await f.selected(f.second.issueId); await f.selected(f.first.issueId);
+  expect(f.query("#reply-body").value).toBe("只在内存里");
+  f.click("#send-reply");
+  await vi.waitFor(() => expect(f.x.service.detail(f.first.issueId).deliveries).toHaveLength(1));
+  await vi.waitFor(() => expect(f.query("#reply-body").value).toBe(""));
+});
+
+test("6. leaving the page asks first only while an operation's outcome is open, not for a draft", async () => {
+  const f = await boot({ intercept: async (call, send) => {
+    const response = await send(); return call.path.endsWith("/replies") ? new Response("{}", { status: 200 }) : response;
+  } });
+  const leaving = () => { const event = new f.window.Event("beforeunload", { cancelable: true }); f.window.dispatchEvent(event); return event.defaultPrevented; };
+  await f.selected(f.first.issueId);
+  f.change("#reply-body", "只是草稿");
+  expect(leaving()).toBe(false);
+  f.click("#send-reply");
+  await vi.waitFor(() => expect(f.query("#operation-status").textContent).toContain("结果未确定"));
+  expect(leaving()).toBe(true);
+});
+
+test("7. the page is called 问答", async () => {
+  const f = await boot();
+  expect(f.document.title).toBe("问答 · Lane Router");
+  expect(f.query("main h1").textContent).toBe("问答");
 });

@@ -20,6 +20,8 @@
 - [议题页：两栏在一屏内各自滚动（需求与设计）](superpowers/specs/2026-10-19-issue-inbox-scroll-layout.md)
 - [议题问题状态失真修复（需求与设计）](superpowers/specs/2026-10-19-issue-question-state-fix.md)
 - [产品工具 schema 根节点改为平表（需求与设计）](superpowers/specs/2026-10-19-tool-schema-flat-root.md)
+- [问答页已读：有焦点且条目末尾进入视野才算读过（需求与设计）](superpowers/specs/2026-10-19-issue-read-on-sight.md)
+- [问答页小修五项（需求与设计）](superpowers/specs/2026-10-19-issue-ui-touchups.md)
 
 ## 界面样稿
 

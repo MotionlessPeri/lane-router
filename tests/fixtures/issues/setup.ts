@@ -6,7 +6,8 @@ import { IssuesService, openIssueStore } from "../../../src/modules/issues/index
 import type { LaneAccess, LaneAccessFacts, LaneCallerIdentity } from "../../../src/router/lane-access.js";
 import type { CallerContext } from "../../../src/router/types.js";
 
-export function setupIssues() {
+/** IDs are short and numbered unless `newId` is given, e.g. real UUIDs where a page shortens them. */
+export function setupIssues(options: { newId?: () => string } = {}) {
   const root = mkdtempSync(join(tmpdir(), "lane-issues-"));
   const path = join(root, "issues.sqlite");
   let store = openIssueStore(path);
@@ -38,7 +39,7 @@ export function setupIssues() {
     },
     readLane(id) { return lanes.get(id) ?? null; },
   };
-  const makeService = () => new IssuesService({ store, lanes: access, now: () => ++tick, newId: () => `id-${++sequence}` });
+  const makeService = () => new IssuesService({ store, lanes: access, now: () => ++tick, newId: options.newId ?? (() => `id-${++sequence}`) });
   let service = makeService();
   return {
     root, path, caller, other, access, lanes, identities, addLane,
