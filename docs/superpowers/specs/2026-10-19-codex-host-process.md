@@ -1,6 +1,6 @@
 # Codex 宿主独立进程：需求与设计
 
-状态：2026-10-19 由 `lane-router/codex-host` 起草，`lane-router/design` 当天过目通过（回信 `8c65dc73`），并补了一条构建标识的要求，已并入 3.6。任务书在仓库外（`handoffs/2026-10-19-codex-host/brief.md`），本稿把其中的目标、范围和验收口径收进来，实施只以本稿为准。
+状态：2026-10-19 由 `lane-router/codex-host` 起草，`lane-router/design` 当天过目通过（回信 `8c65dc73`），并补了一条构建标识的要求，已并入 3.6。同日实施完成；自动测试和不依赖模型的真机部分已过，真模型那部分等全局 Codex 授权恢复后补跑（`docs/manual-tests.md` 的 TC-CODEX-HOST-2）。实施中对本稿的补充都在正文里注明了。任务书在仓库外（`handoffs/2026-10-19-codex-host/brief.md`），本稿把其中的目标、范围和验收口径收进来，实施只以本稿为准。
 
 ## 术语表
 
@@ -112,11 +112,11 @@
 | `lane-router-codex` | 先 `ensureRouter`（与今天一样，保证 lane 工具可用），再 `ensureCodexHost`；默认端点取宿主 discovery 的 `codexEndpoint`，provider 端点向宿主 `url` 发 `POST /codex/provider-endpoint`。其余参数、`resume`、profile、transient 语义不变。 |
 | 看板恢复、`lane-router-lane open`、批量打开 | 不改调用方。它们读 `resumeInfo` 的 `restorePresence`，终端里最终跑的还是 `lane-router-codex resume`。 |
 | `restorePresence` | 链路未连通或宿主 app-server 未就绪时 `unavailable`；否则按宿主上报的可见客户端数给 `online` / `offline`。与今天「app-server 断开即 `unavailable`」同一语义，只是判据从进程内客户端换成链路加宿主状态。 |
-| `reach` | 链路未连通时 `no_channel`；连通后沿用已观测的生命周期：核心重启后在该 thread 下一次 `turn/completed` 或转为空闲之前报 `unconfirmed`。这与 `docs/manual-tests.md`「Router 被换掉之后，`reach` 会在下一次 lifecycle 之前低报」记录的 Claude 侧语义一致。 |
+| `reach` | 链路未连通时 `no_channel`；连通后沿用已观测的生命周期：核心重启后在该 thread 下一次 `turn/completed` 或转为空闲之前报 `unconfirmed`。这与 `docs/manual-tests.md`「Router 被换掉之后，`reach` 会在下一次 lifecycle 之前低报」记录的 Claude 侧语义一致。为此实施时改了 `CodexBackend.reportReconnect`：宿主重连、app-server 恢复、账号切换放行只给处理机会（唤醒通知泵和等待中的接替），不再记成观测到一次生命周期。此前它会把所有已知 thread 记成 `live`，接到宿主的 `hello` 上就会让每次核心重启后所有 Codex lane（包括没开 TUI 的）都报 `live`。只有宿主重启而核心没重启时，核心保留此前观测到的时间戳，照旧报 `live`，与拆分前 app-server 重启时一致。 |
 | 接替等待（`waitUntilReplaceable`） | 不改。链路断开时等下一次处理机会，宿主重连的 `hello` 就会给出这次机会；外层仍受调用方的中止信号约束。 |
 | 账号切换 | `AccountConsumer` 与 `AccountSwitchGate` 随原始连接搬进宿主，consumer `id` 仍为 `"router"`。连接文件取宿主环境的 `LANE_ROUTER_ACCOUNTS_CONNECTION`，否则取 `dataRoot` 配置的 `accounts.connectionFile`，与今天核心的取法相同。gate 放行时的处理机会经 `opportunity` 送到核心。`docs/account-switching.md` 里「Router 启动环境设置」改为「宿主启动环境」：宿主由核心或 launcher 拉起，继承拉起方的环境。 |
 | `/codex/host` 与 `thread/resume` 所有权 | bridge 对 `thread/resume` 的所有权检查改为：宿主本次生命周期认领过的直接放行，其余经链路问核心；链路不通时拒绝并说明 Router 暂不可用。为此 bridge 对同一 TUI 连接的消息按到达顺序串行处理，避免异步检查让后面的消息抢先。 |
-| `scripts/restart-router.ps1` | 默认行为不变：停核心、杀**核心**的 `codex.exe app-server` 子进程、ensure 核心。新构建的核心没有这类子进程，所以不会碰宿主的 app-server；这段清理留给第一次从旧构建升级时用。新增 `-CodexHost` 开关：额外停宿主（按 `codex-host.json` 的 pid，并核对命令行是本仓库的 `dist\process\codex-host.js`）和宿主的 app-server 子进程，再 ensure 宿主并核对 `/health`。 |
+| `scripts/restart-router.ps1` | 默认行为不变：停核心、杀**核心**的 `codex.exe app-server` 子进程、ensure 核心。新构建的核心没有这类子进程，所以不会碰宿主的 app-server；这段清理留给第一次从旧构建升级时用。新增 `-CodexHost` 开关：额外停宿主（按 `codex-host.json` 的 pid，并核对命令行是本仓库的 `dist\process\codex-host.js`）和宿主的 app-server 子进程，再 ensure 宿主并核对 `/health`。另加 `-DataRoot`（默认仍是 `~/.lane-router`），让脚本本身能在隔离目录上真跑验收，不碰共享 Router。 |
 
 ### 3.6 版本不一致
 
@@ -140,6 +140,8 @@
 | `src/process/codex-host.ts`（新） | 宿主入口：锁、配置、app-server、bridge 与 provider bridge、HTTP 面、discovery 写入与删除、信号处理。导出 `runCodexHost(options)` 供测试在进程内装配。 |
 | `src/process/ensure-codex-host.ts`（新） | 3.2 的 ensure。 |
 | `src/process/ensure-router.ts`、`detach-router.ts`、`runtime-lock.ts` | 导出可复用的等待与代理补全；detach 启动器加追加模式；`RuntimeLock` 加只查不取的 `isHeld`。核心自己的启动路径行为不变。 |
+| `src/process/build-id.ts`（新） | 3.6 的构建标识；核心与宿主共用。 |
+| `src/backends/codex-backend.ts` | `reportReconnect` 不再记成观测到生命周期（见 3.5 的 `reach` 一行）；其余不改。 |
 | `src/process/local-server.ts` | 去掉 bridge 与 provider 端点；加 `/codex/host` 升级；discovery 去掉 `codexEndpoint`。来源守卫函数移到 `http-json.ts` 供宿主 HTTP 面共用。 |
 | `src/process/main.ts` | 按 3.5 装配。测试经 `runRouterProcess` 选项替换 ensure，不再 mock `createCodexRuntime`。 |
 | `src/process/codex-launcher.ts` | 按 3.5。 |
@@ -165,7 +167,8 @@
 | `protocolVersion` 与关闭码 4001 | 部署后宿主仍是旧代码时 | 推断，由明确的独立生命周期直接导出 | 新旧帧格式错配时行为未定义 | 无 | 保留，只做版本号与明确报错 | |
 | `hello.build` 与看板「宿主构建与核心不同」提示 | 部署后看看板的人 | 明确：design 审稿回信 `8c65dc73` 第 b 条（role 约定设计取舍归 design） | 协议号相同的宿主修复没人记得换代 | 无 | 保留；只读已有产物算哈希，不加构建戳 | |
 | 链路 bearer token | 无现有消费者 | design 回信列为可选 | 无 | loopback 与 `codex-host.lock` | 删除（理由见 3.3） | |
-| `restart-router.ps1 -CodexHost` | 部署新构建后需要宿主换代时，低频 | 明确：验收 3「宿主重启时的行为明确」；推断：Windows 上硬杀宿主会留下 app-server 孤儿，需要连子进程一起停 | 宿主换代只能手查 pid，并且会留下孤儿 app-server | 手工 `Stop-Process` | 合并进现有脚本 | |
+| `restart-router.ps1 -CodexHost` | 部署新构建后需要宿主换代时，低频 | 明确：验收 3「宿主重启时的行为明确」；推断：Windows 上硬杀宿主可能留下 app-server 孤儿，需要连子进程一起停（实测 app-server 会随宿主退出，见第 7 节，清理保留作兜底） | 宿主换代只能手查 pid | 手工 `Stop-Process` | 合并进现有脚本 | |
+| `restart-router.ps1 -DataRoot` | 在隔离目录上验证重启脚本；部署照旧用默认值 | 明确：任务书硬约束「真机测试一律 `LANE_ROUTER_DATA_ROOT` 指向隔离目录」，而脚本原先写死 `~/.lane-router`，`-CodexHost` 路径无法在不碰共享 Router 的前提下真跑 | 新加的 `-CodexHost` 路径只能未经真跑就交给部署 | 照脚本步骤手工执行（等于不验脚本本身） | 合并进现有脚本，默认值不变 | |
 | 核心启动不再依赖 `codex` | 每次核心启动 | 推断，由互相等待成环直接导出 | 核心与宿主互相等待，谁也起不来 | 无 | 保留；在交接里列为行为变化 | |
 | 看板 Codex 模型列表改为链路就绪后取 | 看板 | 推断，同上 | 核心启动时拿不到模型列表 | 无 | 保留 | |
 | 宿主 `lastLifecycleAt` 随 `hello` 回填 `reach` | `lane_directory` | 推断：让 Codex 比 Claude 侧更早报 `live` | 核心重启后短时报 `unconfirmed`，与 Claude 侧记录一致 | 下一次 turn 自然补上 | 删除 | |
@@ -204,7 +207,7 @@
 2. 记下核心与宿主的 pid、两个 discovery 文件的内容。
 3. 停核心（按隔离 discovery 的 pid，不碰共享 Router）。在 TUI 里发一句普通对话，确认有模型回复；让模型调 `lane_directory`，确认立即报错。
 4. 用 `ensureRouter` 重启隔离核心；等宿主重连后让模型再调一次 `lane_directory`，确认成功、generation 不变。从另一条隔离 lane 发一封信，确认 TUI 被唤醒。
-5. 用 `restart-router.ps1 -CodexHost` 的等价步骤（隔离 `dataRoot`，脚本若只认 `~/.lane-router` 则按同样步骤手动执行）重启宿主，确认 TUI 断开属预期、`resume` 后恢复。
+5. 用 `restart-router.ps1 -DataRoot <隔离目录> -CodexHost` 重启宿主，确认 TUI 断开属预期、`resume` 后恢复。
 6. 结束时停掉隔离核心、宿主及其 app-server，核对共享 Router 的 pid 与 `~/.lane-router` 未被改动。
 
 **变异检验**（每项改回后对应测试必须变红）：
@@ -224,8 +227,8 @@
 
 ## 7. 已知边界与不做
 
-- 宿主崩溃（不是经脚本停止）会留下孤儿 app-server，与今天核心崩溃时相同；有意重启用 `-CodexHost` 会一并清理。
-- 宿主的 app-server 进入 `failed` 后宿主不自行退出，与今天核心里的状态一致，需要重启宿主。
+- 宿主崩溃（不是经脚本停止）原先估计会留下孤儿 app-server。2026-10-19 真机观测（codex 0.154.0，单机）：宿主被硬杀后，它的 app-server 在 200 ms 内自行退出，两次都是这样。所以这个风险比原先估的低，但这是观测，不是 Codex 承诺的行为；`-CodexHost` 仍连子进程一起清理，作兜底。
+- 宿主的 app-server 进入 `failed` 后宿主不自行退出，与今天核心里的状态一致，需要重启宿主。登记为 Vikunja #316（以后做）。
 - 宿主不做成 Windows 服务或开机任务；共享 Router 的部署与重启归 `lane-router/design` 与用户。
 - 不改 Claude、ZCode、DSH、native-codex 后端的语义；不做动态工具热刷新；不动 lane 工具、账号切换功能本身、图资源与议题模块。
 - 隔离验收里的宿主仍使用用户真实的 `CODEX_HOME`（与 `TC-LANE-BATCH-CODEX` 相同），测试 thread 会留在本机 Codex 会话记录里。

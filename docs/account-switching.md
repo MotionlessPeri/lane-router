@@ -38,13 +38,13 @@ node .\dist\accounts\supervisor.js --root 'E:\path\to\account-state' --port 4783
 
 未登记 slot 可能来自取消、失败或进程异常退出。当前策略是保留并隔离：初始化不把它们导入 profiles，后续授权另建 slot，不调用可能撤销有效授权的 `account/logout`。目录中没有 `secrets` 不能证明系统凭据库没有授权，不能据此自动递归删除。清理仅由维护人员在后台停止、核实所有者已退出、确认目录未被 profiles 引用且不含需保留的本机授权后进行；当前功能不包含自动凭据库清理。诊断只读目录/引用元数据，不读取或输出凭据内容。
 
-首次部署时，外部运行人员在约定的空闲窗口接入两端。Router 启动环境设置：
+首次部署时，外部运行人员在约定的空闲窗口接入两端。Router 一侧的 consumer 在 Codex 宿主进程里（2026-10-19 起 app-server 归宿主所有，见 [Codex 宿主独立进程](superpowers/specs/2026-10-19-codex-host-process.md)），所以要设在宿主的启动环境里。宿主由 Router 核心或 `lane-router-codex` 拉起，继承拉起方的环境；最稳妥的是设成用户级环境变量，再用 `restart-router.ps1 -CodexHost` 换代宿主：
 
 ```powershell
 $env:LANE_ROUTER_ACCOUNTS_CONNECTION = Join-Path $env:USERPROFILE '.lane-router-accounts\connection.json'
 ```
 
-Company 使用它的接入候选，将同一路径传给 `startCompanyRouter({ accountConnectionFile })`。Company 和 Host 的准确提交与启动参数以部署交接为准，不能把这项配置加到尚未实现该入口的旧版本。已有进程不会因修改环境变量自行接入。首次安装可能需要空闲重启；日常换号不要求重启。
+也可以写进 Router 数据目录的 `config.json` 的 `accounts.connectionFile`，核心和宿主读同一份配置。Company 使用它的接入候选，将同一路径传给 `startCompanyRouter({ accountConnectionFile })`。Company 和 Host 的准确提交与启动参数以部署交接为准，不能把这项配置加到尚未实现该入口的旧版本。已有进程不会因修改环境变量自行接入。首次安装可能需要空闲重启宿主；日常换号不要求重启。
 
 ## 日常使用
 
@@ -108,7 +108,7 @@ Company 使用它的接入候选，将同一路径传给 `startCompanyRouter({ a
 
 ## 接入契约
 
-`src/accounts/` 分离后台业务、运行端接入和网页。五个可复用运行端模块是 `contracts.ts`、`identity.ts`、`peer-rpc.ts`、`switch-gate.ts`、`consumer.ts`。Company owned Host 与 Router 各使用一个长期 `AccountConsumer`；临时诊断连接不能充当刷新拥有者。
+`src/accounts/` 分离后台业务、运行端接入和网页。五个可复用运行端模块是 `contracts.ts`、`identity.ts`、`peer-rpc.ts`、`switch-gate.ts`、`consumer.ts`。Company owned Host 与 Router 各使用一个长期 `AccountConsumer`；Router 的那一个（`id` 仍为 `"router"`）随 app-server 的原始连接一起在 Codex 宿主进程里，核心经宿主链路发起的模型请求同样先过这道 gate。临时诊断连接不能充当刷新拥有者。
 
 - `AccountConsumer.start()` 非阻塞并立即关闭接纳；后台核实后释放。Host 在第一次通知派发前启动 consumer，Company 首次创建 Lead 前等待同一门就绪。
 - 所有模型入口使用同一 `AccountSwitchGate`，覆盖 TUI、后台通知、Company 直接输入与队列。受控入口包括 turn、review、compact、thread 建立/恢复，以及 queue/goal 修改。

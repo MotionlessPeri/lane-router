@@ -184,14 +184,14 @@ lane-router-lane issue record-tui-close --json-file ./issue-tui-close.json
 
 前提：已构建 `dist/`，`codex --version` 与实验性 App Server schema 检查通过。
 
-1. 运行 `lane-router-codex`，确认它按需启动 Router process、打开 stock Codex remote TUI，并由本地 adapter 在 TUI 的 `thread/start` 中注入当前装配的 dynamic tools：通信-only 五项，默认独立产品九项；不得先创建空 thread 再 resume。旧 thread 不假设动态工具热刷新，议题操作使用同服务的 JSON 文件 CLI。
+1. 运行 `lane-router-codex`，确认它按需启动 Router 核心进程和 Codex 宿主进程，打开 stock Codex remote TUI，TUI 连的是宿主的 bridge。宿主在 TUI 的 `thread/start` 中注入当前装配的 dynamic tools：通信-only 五项，默认独立产品九项；不得先创建空 thread 再 resume。旧 thread 不假设动态工具热刷新，议题操作使用同服务的 JSON 文件 CLI。
 2. 在对话中查询目录、取得用户确认并 attach 一条 lane。
 3. 从另一条 lane 发送 normal 消息。目标 idle 时应由 `turn/start` 唤醒；busy 时应保持 pending，直到 turn 完成事件提供下一次处理机会。
 4. 在目标 busy 时发送 correction，确认 App Server 使用 `turn/steer`；通知包含 mailbox 路径、message ID 及索引/摘要元数据，不包含完整正文。
 5. 退出 TUI 后发送一条消息，确认文件保持 pending。
 6. 运行 `lane-router-codex resume <thread-id>`，确认恢复完整 thread 历史，并再次提醒 pending mailbox。
 
-预期：launcher 不提供注册、状态、诊断或管理子命令。Router discovery 只含 PID、loopback 地址、Codex endpoint 与 instance ID。
+预期：launcher 不提供注册、状态、诊断或管理子命令。Router discovery（`discovery.json`）只含 PID、端口、loopback 地址与 instance ID；Codex endpoint 在宿主的 `codex-host.json` 里，与宿主 PID、宿主 HTTP 地址、instance ID、协议版本、构建标识放在一起。宿主怎么拆出来、Router 重启时 Codex 对话为什么不断，见下文「Codex 宿主：Router 重启时已开的 Codex 对话不断」。
 
 ### Codex launcher 工作目录
 
@@ -332,7 +332,7 @@ curl -s -X POST http://127.0.0.1:<port>/claude/lifecycle \
 
 **2026-08-25 再次确认（第二次）。** 受控重启：两个 Router（5836 与孤儿 32808）一并停掉、起新的 71528（url 由 `:52784` 变为 `:50579`）；同一条 08-25 20:30 起的会话随后调 `lane_directory` **直接成功**，无需重启或轮换。
 
-**顺带一条环境限制：** Router 启动时无条件要求一个能用的 `codex`（`main.ts` 的 `await codex.start()` 在服务器启动之前）。在拿不到 `codex` 的 shell 里起不了 Router；2026-08-12 与 08-25 两次都以 `Unable to fingerprint Codex executable/version` 退出。**2026-08-25 找到了它**：`C:\Users\xiedong\.codex\.sandbox-bin\codex.exe`（`codex-cli 0.144.2`），不在 PATH 上。⇒ 要从这类 shell 起 Router，设 `CODEX_EXE` 指向它即可（`main.ts` 读 `CODEX_EXE ?? "codex"`），已实测可起。
+**顺带一条环境限制（2026-10-19 起已不成立，见「Codex 宿主」一节：核心启动不再依赖 `codex`，拿不到 `codex` 时只是宿主起不来，Codex 能力报 `unavailable`）：** Router 启动时无条件要求一个能用的 `codex`（`main.ts` 的 `await codex.start()` 在服务器启动之前）。在拿不到 `codex` 的 shell 里起不了 Router；2026-08-12 与 08-25 两次都以 `Unable to fingerprint Codex executable/version` 退出。**2026-08-25 找到了它**：`C:\Users\xiedong\.codex\.sandbox-bin\codex.exe`（`codex-cli 0.144.2`），不在 PATH 上。⇒ 要从这类 shell 起 Router，设 `CODEX_EXE` 指向它即可（`main.ts` 读 `CODEX_EXE ?? "codex"`），已实测可起。
 
 **2026-09-15 更正：`CODEX_EXE` 该设，但值要对，且必须是绝对路径。** 分两步说。
 
@@ -433,6 +433,53 @@ scripts\open-vm-lane.ps1 -Lane ... -DryRun                       # 只打印命�
 **影响：** 该窗口里 `lane_directory` 会把在线 lane 报成 `no_channel`。⇒ **Router 重启之后，不要用 `reach` 判断哪些 lane 还活着**，先让目标会话跑一个 turn，或直接看进程。投递不受影响（消息照常入 mailbox）。
 
 **这也重新解释了一条旧观测：** 2026-08-12 那次重启后「10 条 lane 只有 2 条通道重连上」，很可能不是通道没连，而是那 8 条当时没人输入、没触发 lifecycle，所以 `reach` 低报。**未复核**——那批会话已关闭。
+
+### Codex 宿主：Router 重启时已开的 Codex 对话不断
+
+**目标：** 用户原话「lane-router 关闭的时候我还能对话」。2026-10-19 起 app-server、TUI bridge、provider bridge 和账号 consumer 搬进独立的 Codex 宿主进程（`dist/process/codex-host.js`），宿主经 `/codex/host` 这条 WebSocket 连 Router 核心。设计见 [Codex 宿主独立进程](superpowers/specs/2026-10-19-codex-host-process.md)。
+
+**和 Claude 侧对齐的地方：** 核心重启后，宿主按 `discovery.json` 自己重连（相当于上文 Claude 侧 channel 自动回来）；`reach` 在该 thread 下一次 `turn/completed` 或转为空闲之前报 `unconfirmed`（相当于上文的「低报」，原因同样是新核心还没观测到任何 turn）。宿主一重连，核心就给已知 thread 一次处理机会，积压的信在这时补提醒。
+
+**自动测试覆盖：** `tests/process/codex-host-integration.test.ts` 在同一测试进程里装配真实核心和真实宿主（app-server 用 `tests/fixtures/codex/fake-app-server.mjs`），覆盖：核心停机期间对话照常、lane 工具 1 秒内报「Lane Router is not running」、核心回来后同一 thread 工具调用成功且 binding generation 不变；核心停机前已 pending 的信在宿主重连后发出 `turn/start`；调用途中核心退出时报「result is unknown」；宿主退出时核心报 `unavailable` / `no_channel` 并重新 ensure 宿主；核心在没有宿主时照常启动。单元测试另覆盖协议版本拒绝（关闭码 4001）、账号 gate、所有权询问、构建标识提示等。第六节列的九项变异全部能让对应测试变红。
+
+**前提：** 在本工作树 build 出的 `dist/` 上操作；全程使用仓库外的隔离目录作 `LANE_ROUTER_DATA_ROOT`（本 session 环境里该变量默认指向共享的 `~/.lane-router`，每条命令都要显式覆盖）；`CODEX_EXE` 指向真实 `codex.exe`；`CODEX_HOME` 不改，用全局 `~/.codex`，授权必须可用（见下文「尚未执行」）。验收窗口的标题写「codex-host 隔离验收」，cwd 用临时目录或本工作树，不用其他仓。
+
+#### TC-CODEX-HOST-1：进程拓扑与重启（不依赖模型，已执行）
+
+1. `powershell -File scripts/restart-router.ps1 -DataRoot <iso>`：起隔离核心；核心写出 discovery 后自己 ensure 宿主。
+2. 核对 `<iso>\codex-host.json` 与宿主 `/health`；宿主的 `codex.exe app-server` 子进程的 ParentProcessId 等于宿主 pid；核心看板快照 `codexHost.connected = true`，两边构建标识一致，Codex 模型列表在链路就绪后出现。
+3. 起一个连宿主 bridge 的 TUI，记下它到 bridge 端口的 TCP 连接。
+4. 按 `<iso>\discovery.json` 的 pid 停核心（先核对命令行是本工作树的 `dist\process\main.js`）。核对 TUI、宿主、app-server 都活着，TUI 的那条 TCP 连接仍是 ESTABLISHED；经 bridge 发 `thread/read` 照常应答；`thread/resume` 一个宿主没认领过的 thread 立即被拒，原因是 Router 不在。
+5. 再跑一次第 1 步的脚本：核对宿主自动重连、宿主 pid 不变、TUI 连接不变。
+6. `restart-router.ps1 -DataRoot <iso> -CodexHost`（先 `-WhatIf`）：核对旧宿主和它的 app-server 都停了、TUI 断开（预期）、新宿主连上新核心。
+7. 收尾：停隔离核心、宿主及其 app-server，关掉验收窗口；核对共享 Router 的 pid 和它的 app-server 没变。
+
+**2026-10-19 记录（`exp/codex-host` 上 `d351fb3` 之后的构建，构建标识 `edfea064bffe5120`，codex 0.154.0）：**
+
+- 第 1、2 步：脚本 9.7 秒返回；宿主在拉起后约 7 秒就绪（pid 60356，app-server 71252 的父进程是它）；看板 `codexHost` 两边都是 `edfea064bffe5120`；Codex 模型 11 个。
+- 第 3 步：真实 TUI（pid 68912）连上宿主 bridge，TCP `53141→53034` ESTABLISHED。它停在了全局授权的登录页，没有起 thread，原因见下文。
+- 第 4 步：核心 75440 停掉后，TUI、宿主、app-server 都活着，`53141→53034` 仍是 ESTABLISHED；`thread/read` 照常应答；未认领 thread 的 `thread/resume` 在 1 ms 内返回「Lane Router is not running (stopped or restarting), so it cannot confirm that thread … belongs to it. Retry once it is back.」。
+- 第 5 步：新核心 22752 起来后约 1.3 秒宿主重连；宿主仍是 60356；TUI 连接仍是 `53141→53034`；模型列表在链路就绪后重新取到 11 个（紧接着读那一刻是 0，属正常的先后）。
+- 第 6 步：`-WhatIf` 报「Would restart Codex host PID 60356 and its 1 Codex app-server child process(es)」（这一行的计数一开始显示为空，已修：单个子进程时 PowerShell 返回对象而不是数组）。实跑后 60356、71252 都不在了，TUI 随之退出，新宿主 51932（app-server 4204）连上新核心 29748。
+- 第 7 步：隔离进程全部停掉；共享 Router 78704、它的 app-server 82292 未变，另一个不属于 Router 的 app-server 23828 也未变。
+- 顺带观测：宿主被杀后，它的 app-server 在 200 ms 内自行退出（单独复测一次：宿主 17652 被停后，app-server 11712 在 +200 ms 时已不在）。单机、单版本的观测，不当成保证。
+
+#### TC-CODEX-HOST-2：真模型三步（尚未执行，待全局授权恢复）
+
+**为什么没跑：** 2026-10-19 经隔离宿主给真实 app-server 发最小 turn，返回「Your access token could not be refreshed. Please log out and sign in again.」（`codexErrorInfo: unauthorized`）。`CODEX_HOME` 没有被隔离，这是全局 `~/.codex` 授权的状态（`auth.json` 最后写入 2026-09-15）。之后没有再发模型请求。是否重新登录由用户决定，登记在 Vikunja #315。
+
+**前置：** 全局 Codex 授权可用（用户在自己的终端里 `codex login`，不在验收窗口里登录）；TC-CODEX-HOST-1 第 1、2 步完成。
+
+1. 在验收窗口起真实 TUI，让它 attach 一条隔离 lane（如 `iso/tui`）。
+2. 停隔离核心。在 TUI 里发一句普通对话：期望模型照常回复。再让模型调 `lane_directory`：期望立即得到「Lane Router is not running」错误，不挂起。
+3. 用脚本重启隔离核心，等宿主重连（看板 `codexHost.connected`）。让模型再调 `lane_directory`：期望成功，`iso/tui` 的 generation 不变。
+4. 从另一条隔离 lane 给 `iso/tui` 发一封信：期望 TUI 被通知唤醒，读信并 ack。
+
+### Router 被换掉之后：部署时的 Codex 宿主
+
+- **第一次部署本构建**：旧核心自己持有 app-server，`restart-router.ps1` 按原逻辑停掉它的 app-server 子进程，开着的 Codex TUI 会最后再断一次；之后的核心重启不再断。
+- **之后的部署**：只改了核心的代码时，跑默认的 `restart-router.ps1` 即可，Codex 对话不断。宿主的代码也变了时，宿主不会自动换代（它跨核心重启存活）；看板顶部会显示「Codex 宿主的构建与核心不同」，用 `restart-router.ps1 -CodexHost` 换代，这一步会断开开着的 Codex 对话。
+- 核心不再等 Codex 起来，`restart-router.ps1` 的 15 秒等待只覆盖核心本身；`-CodexHost` 的宿主等待是 60 秒。
 
 ### lane 声明的模型确实生效
 
