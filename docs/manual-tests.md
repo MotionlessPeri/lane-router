@@ -674,6 +674,33 @@ lane-router-lane issue record-tui-close --json-file ./issue-tui-close.json
 
 预期：五项通信工具为 `lane_directory`、`lane_attach_current`、`lane_send`、`lane_ack`、`lane_restore_project`。`createLaneMcpServer` 工厂默认该五项目录；当前 stdio 入口显式再组合上述四项议题工具和四项图工具，共十三项，需按议题与图现场用例实际刷新验证。`issues:false` 不会把 stdio MCP 已发布目录同步切成五项。MCP 进程使用 Claude 自动提供的 `CLAUDE_CODE_SESSION_ID`；hook 的 `session_id` 与它对应。通知不携带完整正文，完整正文在 mailbox 文件中。
 
+### TC-RENOTIFY：通知帧没起回合，就按 15 / 60 / 180 / 600 秒再送
+
+**依据：** 设计稿 `docs/superpowers/specs/2026-10-20-wake-renotify.md`（Vikunja LR-25）。会话还在启动时（装 transcript、开发通道确认弹窗）送到的帧，Claude Code 不会回放。恢复时就带着积压信的 lane，第一次唤醒一定丢。2026-10-20 在 `SinglePivotTool/main` 上实测过。
+
+**行为：** 只作用于 Claude 频道，落在 `ClaudeChannelHub`。
+
+- **什么时候再送：** 一帧送出后，如果没有 lifecycle 跟上，就按「距上一帧 15 s、60 s、180 s、600 s」再提醒 4 次。
+- **再送什么：** 不重放旧帧，而是像 Stop 时那样让 pump 按当时的积压重算 ID 再发；没有积压就不发。
+- **什么时候停：** 出现 lifecycle、频道断开、4 档用完，这一轮就结束。
+- **回合进行中：** 帧到达时正在跑的回合（最近一次是 `UserPromptSubmit`、其后还没有 `Stop`）不重发。Claude Code 会把这帧排到回合结束，回合结束的 Stop 会让 pump 再发一帧，从那一帧起重新开始一轮。
+- **新信：** 信里有这一轮没提醒过的消息 ID，就从头开始一轮。
+
+每次再送都在 Router 的 stderr 日志（`router-start.log`）里写一行 `{"event":"channel.renotify","laneAddress":…,"attempt":n,"sinceFirstMs":…}`。lane 的 hook 只报 `Stop` 和 `UserPromptSubmit`，不报 `SessionStart`，所以没有「会话一启动就补发」的快路径。
+
+**自动测试：** `tests/process/claude-renotify.test.ts` 共 10 条，用 vitest 的假时钟。12 项变异全部杀掉：
+- 稿子第七节的 6 项：去掉 lifecycle 停止、计时器自己重放旧帧、断开不清计时器、退避表少一档或不封顶、重放首帧的 ID、去掉回合中排除或改用 `busy`；
+- 另加 4 项：同一次重通知分几帧发时重复计数、新信不让这一轮重来、关闭 hub 不清计时器、重通知改走 `signal()`（会放行等着接管的调用）。
+
+**步骤：**（部署后做）
+1. 关掉一条会话记录大的 Claude lane，给它发一封信，再用 `lane-router-lane open` 打开它。窗口打开后，过一会儿再点开发通道确认。不打字，也不补信。
+2. `lane_directory` 里它的 `lastLifecycleAt` 应在退避表的时间内变成非空，积压的信被处理，回信到达。Router 日志里能看到 `channel.renotify` 记录。
+3. 给一条在线、空闲的 Claude lane 发一封信：它立刻处理，日志里没有它的 `channel.renotify`。
+4. 给一条正在跑长回合（超过 15 秒）的 Claude lane 发一封信：回合期间日志里没有它的 `channel.renotify`，回合结束后它处理这封信。
+
+**预期：** 四步都成立。第 3、4 步如果出现重通知记录，就是误触发。
+**最后验证：** 尚未执行（等部署）。
+
 ## Codex remote TUI
 
 前提：已构建 `dist/`，`codex --version` 与实验性 App Server schema 检查通过。

@@ -37,8 +37,38 @@ interface ChannelConnection {
   readonly joinKey: string | undefined;
   busy: boolean;
   lastLifecycleAt: number | null;
+  /** A UserPromptSubmit not yet followed by a Stop is a turn in progress; `busy` cannot say so, notify sets it. */
+  lastLifecycleEvent: "Stop" | "UserPromptSubmit" | null;
   lastNotifiedAt: number | null;
+  renotify: Renotify | undefined;
 }
+
+/**
+ * The bounded re-offer of a frame no turn took up (spec 2026-10-20-wake-renotify.md). A session
+ * that is still starting, loading its transcript or waiting on the development-channel dialog,
+ * drops a frame and never asks for it again, while its mail sits pending.
+ */
+interface Renotify {
+  /** Every message ID offered since the last lifecycle: a frame naming one outside it is news. */
+  readonly offered: Set<string>;
+  readonly firstAt: number;
+  attempt: number;
+  /** Set when the timer fires: the next frame out is its re-offer, whatever else the pump sends with it. */
+  due: boolean;
+  timer: ReturnType<typeof setTimeout> | undefined;
+}
+
+/** One re-offer: which try it was, and how long after the frame that started the cycle. */
+export interface RenotifyEvent {
+  readonly event: "channel.renotify";
+  readonly laneAddress: string;
+  readonly conversationId: string;
+  readonly attempt: number;
+  readonly sinceFirstMs: number;
+  readonly at: number;
+}
+
+export type RenotifyEventSink = (event: RenotifyEvent) => void;
 
 /**
  * The moments the two halves of a join meet, or fail to. `at` is when this process saw the event;
@@ -111,6 +141,7 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     private readonly resolveBinding: (conversationId: string) => BindingRecord | undefined = () => undefined,
     private readonly now: () => number = Date.now,
     private readonly observeJoin: JoinEventSink = defaultJoinEventSink,
+    private readonly observeRenotify: RenotifyEventSink = defaultRenotifyEventSink,
   ) {}
 
   connect(conversationId: string, socket: WebSocket, joinKey?: string): void {
@@ -120,12 +151,15 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     // be handed another conversation's notifications before its own hook ever reported in.
     const key = conversationId;
     const previous = this.connections.get(key);
+    if (previous) this.stopRenotify(previous);
     previous?.socket.close(1000, "replaced");
-    this.connections.set(key, { socket, connectedAt: this.now(), joinKey, busy: false, lastLifecycleAt: null, lastNotifiedAt: null });
+    this.connections.set(key, { socket, connectedAt: this.now(), joinKey, busy: false, lastLifecycleAt: null, lastLifecycleEvent: null, lastNotifiedAt: null, renotify: undefined });
     socket.on("message", (raw) => this.receive(this.currentKey(socket) ?? key, raw.toString()));
     socket.on("close", () => {
       const current = this.currentKey(socket);
       if (current === undefined) return;
+      const closing = this.connections.get(current);
+      if (closing) this.stopRenotify(closing);
       this.connections.delete(current);
       this.forgetJoinKey(joinKey);
       this.signal(current);
@@ -168,6 +202,7 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     if (key !== report.conversationId) this.rekey(key, report.conversationId, connection);
     connection.busy = report.event === "UserPromptSubmit";
     connection.lastLifecycleAt = report.at;
+    connection.lastLifecycleEvent = report.event;
     return report.conversationId;
   }
 
@@ -229,7 +264,60 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     } catch { return "send_failed"; }
     connection.lastNotifiedAt = this.now();
     connection.busy = true;
+    this.afterFrame(binding, connection, notification);
     return "sent";
+  }
+
+  /**
+   * A frame starts a cycle of re-offers unless a turn is in progress: Claude Code queues a frame
+   * that arrives mid-turn, and that turn's Stop offers the backlog again, which starts the cycle
+   * then. The frame that follows a fired timer is its re-offer and steps the cycle on; a frame
+   * naming a message not yet offered is news and starts the cycle over; anything else is the same
+   * offer arriving in more than one frame, as the pump sends corrections, and changes nothing.
+   */
+  private afterFrame(binding: BindingRecord, connection: ChannelConnection, notification: Notification): void {
+    if (connection.lastLifecycleEvent === "UserPromptSubmit") { this.stopRenotify(connection); return; }
+    const at = this.now();
+    const cycle = connection.renotify;
+    if (cycle?.due) {
+      cycle.due = false;
+      cycle.attempt += 1;
+      for (const id of notification.messageIds) cycle.offered.add(id);
+      this.emitRenotify({ event: "channel.renotify", laneAddress: binding.laneAddress, conversationId: binding.conversationId, attempt: cycle.attempt, sinceFirstMs: at - cycle.firstAt, at });
+      this.scheduleRenotify(connection, cycle);
+      return;
+    }
+    if (cycle && notification.messageIds.every((id) => cycle.offered.has(id))) return;
+    this.stopRenotify(connection);
+    const next: Renotify = { offered: new Set([...cycle?.offered ?? [], ...notification.messageIds]), firstAt: at, attempt: 0, due: false, timer: undefined };
+    connection.renotify = next;
+    this.scheduleRenotify(connection, next);
+  }
+
+  private scheduleRenotify(connection: ChannelConnection, cycle: Renotify): void {
+    const delay = RENOTIFY_AFTER_MS[cycle.attempt];
+    if (delay === undefined) return;
+    cycle.timer = setTimeout(() => this.offerAgain(connection, cycle), delay);
+    cycle.timer.unref?.();
+  }
+
+  /**
+   * Not `signal`: that also releases anyone waiting to take the lane over, which only a Stop may
+   * do. The pump rebuilds the frame from what is pending now, and sends nothing if nothing is.
+   */
+  private offerAgain(connection: ChannelConnection, cycle: Renotify): void {
+    cycle.timer = undefined;
+    if (connection.renotify !== cycle || connection.socket.readyState !== connection.socket.OPEN) return;
+    const key = this.currentKey(connection.socket);
+    if (key === undefined) return;
+    cycle.due = true;
+    const binding = this.resolveBinding(key) ?? this.bindings.get(key);
+    if (binding) for (const handler of this.attentionHandlers) handler(binding);
+  }
+
+  private stopRenotify(connection: ChannelConnection): void {
+    if (connection.renotify?.timer !== undefined) clearTimeout(connection.renotify.timer);
+    connection.renotify = undefined;
   }
 
   reach(conversationId: string): ReachSnapshot {
@@ -293,6 +381,9 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
       : { event: "join.lifecycle_received", joinKey, conversationId, lifecycle: event, at, outcome: "adopted", deltaMs: at - adopted.connectedAt });
     connection.busy = event === "UserPromptSubmit";
     connection.lastLifecycleAt = at;
+    connection.lastLifecycleEvent = event;
+    // A turn took the frame: the cycle ends here, and a Stop's own offer below starts the next.
+    this.stopRenotify(connection);
     if (event === "Stop") this.signal(conversationId);
     return true;
   }
@@ -314,7 +405,9 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
 
   /** Move a connection to the conversation id it turned out to belong to, waiters and all. */
   private rekey(from: string, to: string, connection: ChannelConnection): void {
-    this.connections.get(to)?.socket.close(1000, "replaced");
+    const displaced = this.connections.get(to);
+    if (displaced && displaced !== connection) this.stopRenotify(displaced);
+    displaced?.socket.close(1000, "replaced");
     this.connections.delete(from);
     this.connections.set(to, connection);
     const waiters = this.waiters.get(from);
@@ -323,7 +416,7 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
   }
 
   close(): void {
-    for (const connection of this.connections.values()) connection.socket.close(1001, "router closing");
+    for (const connection of this.connections.values()) { this.stopRenotify(connection); connection.socket.close(1001, "router closing"); }
     this.connections.clear();
     for (const conversationId of this.waiters.keys()) this.signal(conversationId);
   }
@@ -352,6 +445,10 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
   // An observer must not be able to take routing down with it, so its failures stop here.
   private emitJoin(event: JoinEvent): void {
     try { this.observeJoin(event); } catch { /* an observer's failure is not the Router's */ }
+  }
+
+  private emitRenotify(event: RenotifyEvent): void {
+    try { this.observeRenotify(event); } catch { /* an observer's failure is not the Router's */ }
   }
 }
 
@@ -766,6 +863,18 @@ const UNPLACED_REPORT_WINDOW_MS = 30_000;
 function defaultJoinEventSink(event: JoinEvent): void {
   process.stderr.write(`${JSON.stringify(event)}\n`);
 }
+
+/** Written to the same stderr log as the join events, so a lane that stayed silent can be traced. */
+function defaultRenotifyEventSink(event: RenotifyEvent): void {
+  process.stderr.write(`${JSON.stringify(event)}\n`);
+}
+
+/**
+ * Each wait counts from the frame before it: 15 s covers most sessions, 60 s and 180 s a long
+ * transcript, 600 s a user coming back to click the dialog. Four and no more; the next message
+ * that arrives wakes the lane as it always has. Fixed here, not configured.
+ */
+const RENOTIFY_AFTER_MS = [15_000, 60_000, 180_000, 600_000] as const;
 
 function callerLifetime(request: IncomingMessage): AbortSignal {
   const abandoned = new AbortController();
