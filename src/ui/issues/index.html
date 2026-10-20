@@ -88,6 +88,7 @@
   .tray-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
   .tray-item button { font-size: 12px; padding: 1px 7px; }
   form.dropping { outline: 2px dashed var(--blue); outline-offset: 4px; border-radius: 8px; }
+  .send-key { padding: 4px 6px; font-size: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
   .entry-body pre .copy-code { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 2px 8px; }
   .entry-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 12px 0; }
   .entry-body :is(th, td) { border: 1px solid var(--line); padding: 7px 12px; text-align: left; }
@@ -726,9 +727,11 @@
       }
       view.tray.element.id = "reply-tray";
       const { picker, button } = filePicker("reply");
-      bottom.append(questionLabel, select, hint, button, node("span", "meta", "保存后交给原 lane，无需回 TUI 重复。"), send);
+      send.title = sendKeys[sendKey];
+      bottom.append(questionLabel, select, hint, button, node("span", "meta", "保存后交给原 lane，无需回 TUI 重复。"), sendKeyChoice("reply"), send);
       form.append(bodyLabel, textarea, view.tray.element, picker, bottom);
       acceptFiles(form, textarea, picker, () => view.tray);
+      sendOnKey(textarea, form, "send-reply");
       form.addEventListener("submit", event => { event.preventDefault(); startReply(id); }); host.append(form);
     }
     const select = byId("reply-question");
@@ -783,6 +786,39 @@
   }
   const storedDraft = id => stored(DRAFT_KEY + id);
   const storeDraft = (id, text) => store(DRAFT_KEY + id, text);
+
+  /**
+   * How the reply box and the new issue's body send from the keyboard: Ctrl+Enter by default, since
+   * replies run to several lines, or Enter by choice. One choice for both, kept in this browser; what
+   * cannot be read is Ctrl+Enter.
+   */
+  const SEND_KEY = "lane-router.issues.send-key", sendKeys = { "ctrl-enter": "Ctrl+Enter 发送", enter: "Enter 发送" };
+  let sendKey = stored(SEND_KEY) === "enter" ? "enter" : "ctrl-enter";
+  function sendKeyChoice(id) {
+    const select = node("select", "send-key"); select.id = id + "-send-key"; select.setAttribute("aria-label", "发送方式");
+    for (const [value, label] of Object.entries(sendKeys)) { const option = node("option", null, label); option.value = value; select.append(option); }
+    select.value = sendKey;
+    select.addEventListener("change", () => { sendKey = select.value === "enter" ? "enter" : "ctrl-enter"; store(SEND_KEY, sendKey); showSendKey(); });
+    return select;
+  }
+  function showSendKey() {
+    for (const select of document.querySelectorAll(".send-key")) select.value = sendKey;
+    for (const id of ["send-reply", "send-new"]) { const button = byId(id); if (button) button.title = sendKeys[sendKey]; }
+  }
+  /** An Enter that confirms an input method's text is the input method's, never a send. */
+  const imeComposing = event => event.isComposing || event.keyCode === 229;
+  function sendsOnKey(event) {
+    if (event.key !== "Enter" || imeComposing(event)) return false;
+    return sendKey === "enter" ? !event.shiftKey : event.ctrlKey || event.metaKey;
+  }
+  /** The shortcut presses the send button, and only when the button itself could be pressed. */
+  function pressSend(form, buttonId) {
+    const button = byId(buttonId);
+    if (button && !button.disabled) form.requestSubmit(button);
+  }
+  function sendOnKey(textarea, form, buttonId) {
+    textarea.addEventListener("keydown", event => { if (sendsOnKey(event)) { event.preventDefault(); pressSend(form, buttonId); } });
+  }
 
   const FILES_KEY = "lane-router.issues.files.", FILE_LIMIT = 25 * 1024 * 1024;
   const attachmentUrl = id => "/issues/api/attachments/" + encodeURIComponent(id);
@@ -1043,6 +1079,14 @@
     const form = byId("new-form"), bottom = form.querySelector(".compose-bottom"), { picker, button } = filePicker("new");
     bottom.prepend(button); form.insertBefore(newTray.element, bottom); form.append(picker);
     acceptFiles(form, byId("new-body"), picker, () => newTray);
+    bottom.insertBefore(sendKeyChoice("new"), byId("send-new")); byId("send-new").title = sendKeys[sendKey];
+    sendOnKey(byId("new-body"), form, "send-new");
+    // Enter in the title goes on to the body rather than sending what is only a title; Ctrl+Enter sends.
+    byId("new-title").addEventListener("keydown", event => {
+      if (event.key !== "Enter" || imeComposing(event)) return;
+      event.preventDefault();
+      if (event.ctrlKey || event.metaKey) pressSend(form, "send-new"); else byId("new-body").focus();
+    });
   }
   function openNew() {
     if (composing) { byId("new-body").focus(); return; }

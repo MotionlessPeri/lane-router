@@ -464,6 +464,21 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
 - 第 1、2 步：回复框下面出现缩略图并很快传完，发送后历史里这条回复下面有缩略图。
 - lane 收到的信里列出这张图的保存路径。lane 读出图片内容，并在问答里答复。
 
+### 用键盘发送：Ctrl+Enter 或 Enter
+
+需求与设计见 `docs/superpowers/specs/2026-10-20-issue-send-shortcut.md`。
+
+- 回复框和新问答正文都能用键盘发送，默认 Ctrl+Enter（Mac 上 ⌘+Enter 也行），Enter 照常换行。
+- 发送按钮左边的下拉框可以改成「Enter 发送」：Enter 发送，Shift+Enter 换行，Ctrl+Enter 也发送。两个输入框共用这一个设置，存在这台机器的浏览器里（`lane-router.issues.send-key`）；读不到时按 Ctrl+Enter。发送按钮的悬停提示写着当前的快捷键。
+- 用输入法打字时，确认候选词的那一下 Enter 永远不发送。
+- 快捷键等于按发送按钮：按钮不能点时（附件还在上传或没传上、正在发送），快捷键也不发送。
+- 新问答的标题框里按 Enter，光标移到正文；按 Ctrl+Enter 发送。
+
+自动测试：
+- `tests/modules/issues/send-shortcut.test.ts`（happy-dom）覆盖设计稿第五节第 1–6 条。
+- `tests/modules/issues/send-shortcut-browser.test.ts`（浏览器组）覆盖第 7 条和附件上传中的第 4 条。
+- 第六节的五个变异各自让预定的用例变红；另外，去掉回复框上的快捷键，浏览器组两条都变红。
+
 ### 回复对象：空着时自动选上新来的问题
 
 需求与设计见 `docs/superpowers/specs/2026-10-20-issue-reply-target-adopt.md`。
