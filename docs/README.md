@@ -36,6 +36,7 @@
 - [问答页：用键盘发送，可选 Ctrl+Enter 或 Enter（需求与设计）](superpowers/specs/2026-10-20-issue-send-shortcut.md)
 - [切号后继续：手动换号后一键让该后端所有活跃 lane 继续（需求与设计）](superpowers/specs/2026-10-21-continue-after-account-switch.md)
 - [任务 lane：为一条需求临时开的 lane，做完调 `lane_finish`，Router 关窗并归档（需求与设计）](superpowers/specs/2026-10-21-task-lane.md)
+- [问答页：按项目分组（需求与设计）](superpowers/specs/2026-10-21-issue-group-by-project.md)
 - [Codex 宿主独立进程：需求与设计](superpowers/specs/2026-10-19-codex-host-process.md)
 
 ## 界面样稿
