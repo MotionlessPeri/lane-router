@@ -127,12 +127,13 @@ export interface IssueSummary extends IssueThread {
   readonly attentionReasons: readonly AttentionReason[];
 }
 export interface IssueList { readonly items: readonly IssueSummary[]; readonly nextCursor: IssueCursor | null }
-/** What a reader is told about a file an entry carries; where it is stored is the lane's letter's business. */
+/** What a reader is told about a file an entry carries; the page opens other files by their saved path. */
 export interface IssueAttachmentInfo {
   readonly id: string;
   readonly fileName: string;
   readonly size: number;
   readonly mediaType: AttachmentMediaType;
+  readonly storedPath: string;
 }
 /** An entry as read, with the files it carries when it carries any. */
 export type IssueEntryView = IssueEntry & { readonly attachments?: readonly IssueAttachmentInfo[] };

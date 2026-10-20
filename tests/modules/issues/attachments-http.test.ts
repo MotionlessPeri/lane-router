@@ -96,6 +96,16 @@ test("5: an attachment is read by ID whether or not an entry took it; images as 
   }
 });
 
+test("5: HEAD tells the page whether a draft's file is still there without sending it", async () => {
+  const { url, upload } = await router();
+  const id = (await (await upload("big.bin", new Uint8Array(4096))).json() as any).result.attachmentId as string;
+  const found = await fetch(`${url}/issues/api/attachments/${id}`, { method: "HEAD" });
+  expect(found.status).toBe(200);
+  expect(found.headers.get("content-type")).toBe("application/octet-stream");
+  expect((await found.arrayBuffer()).byteLength).toBe(0);
+  expect((await fetch(`${url}/issues/api/attachments/gone`, { method: "HEAD" })).status).toBe(404);
+});
+
 test("5: an ID with no row is not found, even when a file is still on disk under it", async () => {
   const { x, url, upload } = await router();
   for (const id of ["no-such-attachment", "..%2F..%2Fissues.sqlite"]) {

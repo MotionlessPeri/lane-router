@@ -21,9 +21,10 @@ test("4: a reply takes its files; the entry lists them, and the lane's letter na
   const reply = x.service.reply({ operationKey: "reply", issueId: issue.issueId, questionId: issue.questionId, body: "看这两个文件", attachmentIds: [shot.attachmentId, log.attachmentId] });
   for (const id of [shot.attachmentId, log.attachmentId]) expect(x.store.attachment(id)).toMatchObject({ issueId: issue.issueId, entryId: reply.entryId });
   const detail = x.service.detail(issue.issueId);
+  // The saved path is there for the page to open a file through the local-path entry.
   expect(detail.entries.find(entry => entry.id === reply.entryId)?.attachments).toEqual([
-    { id: shot.attachmentId, fileName: "截图.png", size: 7, mediaType: "application/octet-stream" },
-    { id: log.attachmentId, fileName: "build.log", size: 1500, mediaType: "application/octet-stream" },
+    { id: shot.attachmentId, fileName: "截图.png", size: 7, mediaType: "application/octet-stream", storedPath: x.store.attachment(shot.attachmentId)!.storedPath },
+    { id: log.attachmentId, fileName: "build.log", size: 1500, mediaType: "application/octet-stream", storedPath: x.store.attachment(log.attachmentId)!.storedPath },
   ]);
   // Entries without files carry no list at all.
   expect(detail.entries.find(entry => entry.id === issue.entryId)).not.toHaveProperty("attachments");
@@ -40,7 +41,7 @@ test("4: a new issue takes its files the same way", async () => {
   const created = x.service.create({ operationKey: "create", laneId: "lane-one", title: "看计划", body: "请看附件", attachmentIds: [file.attachmentId] });
   expect(x.store.attachment(file.attachmentId)).toMatchObject({ issueId: created.issueId, entryId: created.entryId });
   const detail = x.service.detail(created.issueId);
-  expect(detail.entries[0]?.attachments).toEqual([{ id: file.attachmentId, fileName: "plan.md", size: 8, mediaType: "application/octet-stream" }]);
+  expect(detail.entries[0]?.attachments).toEqual([{ id: file.attachmentId, fileName: "plan.md", size: 8, mediaType: "application/octet-stream", storedPath: x.store.attachment(file.attachmentId)!.storedPath }]);
   expect(detail.deliveries[0]?.body).toContain(`- plan.md（8 B）：${x.store.attachment(file.attachmentId)!.storedPath}`);
 });
 

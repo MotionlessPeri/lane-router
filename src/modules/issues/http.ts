@@ -21,12 +21,12 @@ export class IssuesHttp {
   async handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     const uploading = request.method === "POST" && request.url === "/issues/api/attachments";
-    const attachment = request.method === "GET" ? /^\/issues\/api\/attachments\/([^/]+)$/u.exec(url.pathname) : null;
+    const attachment = request.method === "GET" || request.method === "HEAD" ? /^\/issues\/api\/attachments\/([^/]+)$/u.exec(url.pathname) : null;
     if (uploading || attachment) {
       const attachments = this.options.attachments;
       if (!attachments) { request.resume(); json(response, 404, { error: "not found" }); }
       else if (uploading) await this.upload(attachments, request, response);
-      else readAttachment(attachments, attachment![1]!, response);
+      else readAttachment(attachments, attachment![1]!, request.method === "HEAD", response);
       return true;
     }
     const markdownAsset = url.pathname === "/issues/assets/markdown-it.js";
@@ -118,9 +118,10 @@ export class IssuesHttp {
  * Files are read by ID whether or not an entry has taken them: the ID is random and known only to
  * the page and the lane it was sent to. The path comes from the saved row, never from the URL, so
  * an ID without a row is not found even if its directory is still on disk. Only the four image
- * types are served as themselves; everything else is a download, and nothing is sniffed.
+ * types are served as themselves; everything else is a download, and nothing is sniffed. HEAD answers
+ * the same headers only, which is how the page checks a draft's file is still there.
  */
-function readAttachment(attachments: IssueAttachments, rawId: string, response: ServerResponse): void {
+function readAttachment(attachments: IssueAttachments, rawId: string, headOnly: boolean, response: ServerResponse): void {
   const notFound = () => {
     response.writeHead(404, { "content-type": "application/json", "x-content-type-options": "nosniff" });
     response.end(JSON.stringify({ error: "attachment not found" }));
@@ -134,7 +135,7 @@ function readAttachment(attachments: IssueAttachments, rawId: string, response: 
   content.once("open", () => {
     response.writeHead(200, { "content-type": file.mediaType, "x-content-type-options": "nosniff",
       ...(download ? { "content-disposition": `attachment; filename*=UTF-8''${encodeRfc5987(file.fileName)}` } : {}) });
-    content.pipe(response);
+    if (headOnly) { content.destroy(); response.end(); } else content.pipe(response);
   });
   content.once("error", () => { if (!response.headersSent) notFound(); else response.destroy(); });
 }

@@ -159,8 +159,8 @@ export class IssuesService {
       if (afterSeq >= thread.nextSeq) invalid("History cursor exceeds this issue's saved sequence");
       const page = this.store.entries(issueId, afterSeq, limit + 1);
       const files = new Map<string, IssueAttachmentInfo[]>();
-      for (const { entryId, id, fileName, size, mediaType } of this.store.attachmentsOfIssue(issueId)) {
-        files.set(entryId!, [...files.get(entryId!) ?? [], { id, fileName, size, mediaType }]);
+      for (const { entryId, id, fileName, size, mediaType, storedPath } of this.store.attachmentsOfIssue(issueId)) {
+        files.set(entryId!, [...files.get(entryId!) ?? [], { id, fileName, size, mediaType, storedPath }]);
       }
       const entries = page.slice(0, limit).map((entry) => files.has(entry.id) ? { ...entry, attachments: files.get(entry.id)! } : entry);
       return { thread, owner: this.owner(thread.ownerLaneId), entries, questions: this.store.questions(issueId),

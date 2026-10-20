@@ -76,6 +76,18 @@
   .entry-body .local-path { display: inline; min-height: 0; margin: 0; padding: 0 3px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--blue); font: inherit; line-height: inherit; text-align: left; overflow-wrap: anywhere; }
   .entry-body .local-path:hover { background: var(--hover); }
   .entry-body .local-path code { color: inherit; }
+  /* Files under an entry: images as thumbnails that open full size, others by name. */
+  .entry-files { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 8px; }
+  .entry-files img { display: block; max-height: 160px; max-width: 100%; border: 1px solid var(--line); border-radius: 6px; }
+  .entry-files button { font-size: 13px; padding: 3px 9px; }
+  /* Files waiting to go with a reply or a new issue; nothing shows until there is one. */
+  .tray { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+  .tray:empty { display: none; }
+  .tray-item { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 4px 3px 6px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }
+  .tray-item img { max-height: 40px; max-width: 72px; border-radius: 4px; }
+  .tray-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+  .tray-item button { font-size: 12px; padding: 1px 7px; }
+  form.dropping { outline: 2px dashed var(--blue); outline-offset: 4px; border-radius: 8px; }
   .entry-body pre .copy-code { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 2px 8px; }
   .entry-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 12px 0; }
   .entry-body :is(th, td) { border: 1px solid var(--line); padding: 7px 12px; text-align: left; }
@@ -636,8 +648,28 @@
     article.dataset.entrySeq = String(entry.seq);
     const source = entry.source === "agent_reported_tui_user" ? "用户（agent 记录的 TUI 原话）" : entry.author === "user" ? "我" : "lane";
     const kind = { question: "提问", answer: "答复", reply: "回复" }[entry.kind] || entry.kind;
-    article.append(node("div", "entry-head", source + " · " + kind + " · #" + entry.seq + " · " + time(entry.createdAt)), entryBody(entry.body, entry.author === "user"), node("div", "entry-facts"), end);
+    article.append(node("div", "entry-head", source + " · " + kind + " · #" + entry.seq + " · " + time(entry.createdAt)), entryBody(entry.body, entry.author === "user"),
+      ...(entry.attachments?.length ? [entryFiles(entry.attachments)] : []), node("div", "entry-facts"), end);
     return article;
+  }
+  /**
+   * An entry's files: an image as a thumbnail that opens full size in a new tab, any other file by
+   * name, opened on this machine through the local-path entry, whose safe list decides how.
+   */
+  function entryFiles(files) {
+    const row = node("div", "entry-files");
+    for (const file of files) {
+      if (isImage(file.mediaType)) {
+        const link = node("a"); link.href = attachmentUrl(file.id); link.target = "_blank"; link.rel = "noopener noreferrer"; link.title = file.fileName;
+        const image = node("img"); image.src = attachmentUrl(file.id); image.alt = file.fileName;
+        link.append(image); row.append(link);
+      } else {
+        const open = node("button", null, file.fileName + "（" + sizeText(file.size) + "）"); open.type = "button"; open.title = "用本机程序打开";
+        open.addEventListener("click", () => { void openLocalPath(file.storedPath); });
+        row.append(open);
+      }
+    }
+    return row;
   }
   /** "#<seq>" for each loaded entry, and for each question by its prompt, keyed by ID. */
   function references(view, detail) {
@@ -684,8 +716,19 @@
       select.addEventListener("change", () => { if (!view.operation) { view.questionId = select.value; view.pickTarget = false; view.targetChosen = true; showTargetHint(id); } });
       const hint = node("span", "meta warning"); hint.id = "reply-target-hint"; hint.setAttribute("role", "status"); hint.hidden = true;
       const send = node("button", "primary", "发送回复"); send.id = "send-reply"; send.type = "submit";
-      bottom.append(questionLabel, select, hint, node("span", "meta", "保存后交给原 lane，无需回 TUI 重复。"), send);
-      form.append(bodyLabel, textarea, bottom);
+      // The issue's own tray, kept while another issue is open; its draft files come back the first time.
+      if (!view.tray) {
+        view.tray = attachmentTray(FILES_KEY + id, {
+          changed: () => syncSend(id),
+          notify: text => { if (view.operation) return; view.notice = text; view.warning = true; if (selectedId === id) renderDetail(id); },
+        });
+        void view.tray.restore();
+      }
+      view.tray.element.id = "reply-tray";
+      const { picker, button } = filePicker("reply");
+      bottom.append(questionLabel, select, hint, button, node("span", "meta", "保存后交给原 lane，无需回 TUI 重复。"), send);
+      form.append(bodyLabel, textarea, view.tray.element, picker, bottom);
+      acceptFiles(form, textarea, picker, () => view.tray);
       form.addEventListener("submit", event => { event.preventDefault(); startReply(id); }); host.append(form);
     }
     const select = byId("reply-question");
@@ -698,11 +741,19 @@
       select.dataset.options = JSON.stringify(options);
     }
     if (select.value !== view.questionId) select.value = view.questionId;
-    byId("reply-body").disabled = Boolean(view.operation); select.disabled = Boolean(view.operation); byId("send-reply").disabled = Boolean(view.operation);
+    byId("reply-body").disabled = Boolean(view.operation); select.disabled = Boolean(view.operation); byId("reply-add-file").disabled = Boolean(view.operation);
+    view.tray.lock(Boolean(view.operation));
+    syncSend(id);
     const reopen = byId("reopen-hint");
     reopen.hidden = !closed;
     reopen.textContent = closed ? "这条问答已经结束（由" + (view.detail.thread.closedBy === "lane" ? " lane " : "你") + "结束）。回复会重新打开它。" : "";
     showTargetHint(id);
+    sizeCompose(id);
+  }
+  /** Sending waits for the files: none may still be uploading or have failed. */
+  function syncSend(id) {
+    const send = byId("send-reply"), view = viewFor(id);
+    if (send && byId("compose").dataset.for === id) send.disabled = Boolean(view.operation) || Boolean(view.tray?.pending());
     sizeCompose(id);
   }
   /**
@@ -732,6 +783,132 @@
   }
   const storedDraft = id => stored(DRAFT_KEY + id);
   const storeDraft = (id, text) => store(DRAFT_KEY + id, text);
+
+  const FILES_KEY = "lane-router.issues.files.", FILE_LIMIT = 25 * 1024 * 1024;
+  const attachmentUrl = id => "/issues/api/attachments/" + encodeURIComponent(id);
+  const isImage = type => /^image\/(png|jpeg|gif|webp)$/.test(type);
+  const sizeText = size => size < 1024 ? size + " B"
+    : (size < 1048576 ? (size / 1024).toFixed(1) : (size / 1048576).toFixed(1)).replace(/\.0$/, "") + (size < 1048576 ? " KB" : " MB");
+  /**
+   * Files going with a reply or a new issue. Each uploads the moment it is added; the message
+   * carries the IDs of those that arrived, and cannot be sent while one is uploading or failed.
+   * The IDs, with what the Router answered about each, are kept with the draft in this browser: a
+   * reload shows them again and asks the Router whether each is still there, and one cleaned up
+   * meanwhile leaves the draft with one notice.
+   */
+  function attachmentTray(storageKey, { changed, notify }) {
+    const items = [], list = node("ul", "tray");
+    list.setAttribute("aria-label", "要发送的文件");
+    let locked = false;
+    const save = () => {
+      const done = items.filter(item => item.state === "done");
+      store(storageKey, done.length ? JSON.stringify(done.map(({ id, fileName, size, mediaType }) => ({ id, fileName, size, mediaType }))) : "");
+    };
+    const forget = item => { if (item.objectUrl) document.defaultView.URL.revokeObjectURL(item.objectUrl); };
+    function render() {
+      list.replaceChildren(...items.map(item => {
+        const row = node("li", "tray-item"); row.dataset.state = item.state;
+        if (item.id) row.dataset.attachmentId = item.id;
+        const thumbnail = item.objectUrl || (item.id && isImage(item.mediaType) ? attachmentUrl(item.id) : "");
+        if (thumbnail) { const image = node("img"); image.src = thumbnail; image.alt = item.fileName; row.append(image); }
+        const name = node("span", "tray-name", item.fileName); name.title = item.fileName;
+        const status = item.state === "uploading" ? "上传中 " + item.progress + "%" : item.state === "failed" ? "没传上：" + item.error : "";
+        row.append(name, node("span", "meta", sizeText(item.size)), node("span", "tray-status " + (item.state === "failed" ? "warning" : "meta"), status));
+        if (item.state === "failed" && item.file && !item.tooLarge) {
+          const retry = node("button", "tray-retry", "重试"); retry.type = "button"; retry.disabled = locked;
+          retry.addEventListener("click", () => { if (!locked) upload(item); }); row.append(retry);
+        }
+        const remove = node("button", "tray-remove", "移除"); remove.type = "button"; remove.disabled = locked || item.state === "uploading";
+        remove.addEventListener("click", () => { if (locked || item.state === "uploading") return; forget(item); items.splice(items.indexOf(item), 1); save(); render(); });
+        row.append(remove);
+        return row;
+      }));
+      changed();
+    }
+    function upload(item) {
+      Object.assign(item, { state: "uploading", progress: 0, error: "" }); render();
+      const xhr = new (document.defaultView.XMLHttpRequest)();
+      xhr.open("POST", "/issues/api/attachments");
+      xhr.setRequestHeader("content-type", "application/octet-stream");
+      xhr.setRequestHeader("x-lane-router-action", "issues-attach");
+      xhr.setRequestHeader("x-lane-router-token", actionToken ?? "");
+      xhr.setRequestHeader("x-file-name", encodeURIComponent(item.file.name || "file"));
+      xhr.upload.addEventListener("progress", event => { if (event.lengthComputable && item.state === "uploading") { item.progress = Math.floor(event.loaded / event.total * 100); render(); } });
+      xhr.addEventListener("load", () => {
+        let data = {}; try { data = JSON.parse(xhr.responseText); } catch { /* not the Router's answer */ }
+        if (xhr.status === 200 && data.result) {
+          Object.assign(item, { state: "done", id: data.result.attachmentId, fileName: data.result.fileName, size: data.result.size, mediaType: data.result.mediaType });
+          save();
+        } else Object.assign(item, { state: "failed", error: (data.error || "上传失败") + "（" + xhr.status + "）" });
+        render();
+      });
+      xhr.addEventListener("error", () => { Object.assign(item, { state: "failed", error: "连不上 Router" }); render(); });
+      xhr.send(item.file);
+    }
+    return {
+      element: list,
+      /** A file over the limit is refused here, before any of it is sent. */
+      add(files) {
+        if (locked || !files.length) return;
+        for (const file of files) {
+          const item = { file, fileName: file.name || "file", size: file.size, mediaType: file.type, id: null, state: "new", progress: 0, error: "",
+            objectUrl: isImage(file.type) ? document.defaultView.URL.createObjectURL(file) : "", tooLarge: file.size > FILE_LIMIT };
+          items.push(item);
+          if (item.tooLarge) Object.assign(item, { state: "failed", error: "超过 25 MB，不能上传" }); else upload(item);
+        }
+        render();
+      },
+      async restore() {
+        let saved = [];
+        try { saved = JSON.parse(stored(storageKey) || "[]"); } catch { /* nothing kept */ }
+        if (!Array.isArray(saved)) saved = [];
+        for (const file of saved) items.push({ id: String(file.id), fileName: String(file.fileName), size: Number(file.size), mediaType: String(file.mediaType),
+          state: "done", progress: 100, error: "", file: null, objectUrl: "" });
+        if (!items.length) return;
+        render();
+        const gone = [];
+        await Promise.all(items.filter(item => item.file === null).map(async item => {
+          try { if ((await fetch(attachmentUrl(item.id), { method: "HEAD", cache: "no-store" })).status === 404) gone.push(item); }
+          catch { /* unknown is kept: sending will say if it is gone */ }
+        }));
+        if (!gone.length) return;
+        for (const item of gone) items.splice(items.indexOf(item), 1);
+        save(); render();
+        notify(gone.length + " 个附件已被清理，已从草稿里去掉。");
+      },
+      ids: () => items.filter(item => item.state === "done").map(item => item.id),
+      names: () => items.map(item => item.fileName),
+      /** A file still uploading or one that failed holds the message back. */
+      pending: () => items.some(item => item.state !== "done"),
+      count: () => items.length,
+      lock(value) { if (locked !== value) { locked = value; render(); } },
+      clear() { for (const item of items) forget(item); items.length = 0; save(); render(); },
+    };
+  }
+  /** Pasted files, dropped files and picked files all go to the tray; pasted text stays text. */
+  function acceptFiles(form, textarea, picker, tray) {
+    textarea.addEventListener("paste", event => {
+      const files = [...(event.clipboardData?.files ?? [])];
+      if (!files.length) return;
+      event.preventDefault(); tray().add(files);
+    });
+    const carriesFiles = event => [...(event.dataTransfer?.types ?? [])].includes("Files");
+    for (const type of ["dragenter", "dragover"]) form.addEventListener(type, event => { if (carriesFiles(event)) { event.preventDefault(); form.classList.add("dropping"); } });
+    form.addEventListener("dragleave", event => { if (!form.contains(event.relatedTarget)) form.classList.remove("dropping"); });
+    form.addEventListener("drop", event => {
+      form.classList.remove("dropping");
+      if (!carriesFiles(event)) return;
+      event.preventDefault(); tray().add([...event.dataTransfer.files]);
+    });
+    picker.addEventListener("change", () => { tray().add([...picker.files]); picker.value = ""; });
+  }
+  /** The hidden picker and the button that opens it. */
+  function filePicker(id) {
+    const picker = node("input"); picker.type = "file"; picker.multiple = true; picker.id = id + "-files"; picker.hidden = true;
+    const button = node("button", null, "添加文件"); button.type = "button"; button.id = id + "-add-file";
+    button.addEventListener("click", () => picker.click());
+    return { picker, button };
+  }
   /**
    * The reply area opens to about six lines while it is in use — focused, holding a draft, or with
    * an operation in flight or unresolved — and folds back to two otherwise. A history that was at
@@ -740,7 +917,8 @@
   function sizeCompose(id, focused) {
     const host = byId("compose"), textarea = byId("reply-body");
     if (!textarea || host.dataset.for !== id) return;
-    const inUse = (focused ?? document.activeElement === textarea) || textarea.value !== "" || Boolean(viewFor(id).operation);
+    const view = viewFor(id);
+    const inUse = (focused ?? document.activeElement === textarea) || textarea.value !== "" || Boolean(view.operation) || Boolean(view.tray?.count());
     const expanded = String(inUse);
     if (host.dataset.expanded === expanded) return;
     const region = byId("history-region"), following = atBottom(region);
@@ -795,9 +973,12 @@
   function startReply(id) {
     const view = viewFor(id);
     // An ended issue takes a reply too; saving it is what reopens the issue.
-    if (view.operation || selectedId !== id) return;
-    if (!view.draft.trim()) { view.notice = "请先填写回复。"; view.warning = true; renderDetail(id); return; }
-    view.operation = { action: "replies", operationKey: crypto.randomUUID(), payload: { body: view.draft, ...(view.questionId ? { questionId: view.questionId } : {}) }, state: "new" };
+    if (view.operation || selectedId !== id || view.tray?.pending()) return;
+    // The files go by the IDs they have now; a retry of this operation sends the same ones.
+    const attachmentIds = view.tray?.ids() ?? [];
+    if (!view.draft.trim() && !attachmentIds.length) { view.notice = "请先填写回复，或者添加文件。"; view.warning = true; renderDetail(id); return; }
+    view.operation = { action: "replies", operationKey: crypto.randomUUID(), state: "new",
+      payload: { body: view.draft, ...(view.questionId ? { questionId: view.questionId } : {}), ...(attachmentIds.length ? { attachmentIds } : {}) } };
     void runOperation(id);
   }
   async function runOperation(id) {
@@ -808,7 +989,7 @@
     try {
       const { result, wake } = await post(id, operation.action, { ...operation.payload, operationKey: operation.operationKey });
       if (!result || result.issueId !== id || typeof result.entryId !== "string") throw new Error("未取得可核对的保存结果");
-      if (operation.action === "replies") { view.draft = ""; view.questionId = ""; view.targetChosen = false; storeDraft(id, ""); }
+      if (operation.action === "replies") { view.draft = ""; view.questionId = ""; view.targetChosen = false; storeDraft(id, ""); view.tray?.clear(); }
       view.operation = null; view.confirmClose = false;
       view.notice = operation.action === "replies" ? wakeNotice(wake) : "议题已结束，历史仍可查看。";
       view.warning = operation.action === "replies" && wake?.status === "failed";
@@ -845,6 +1026,17 @@
   const restoreLabels = { online: "在线", offline: "没开着，发出后会打开它的窗口", unavailable: "Router 打不开它，消息会等它开着时再处理" };
   const fresh = { loaded: false, title: "", body: "", laneId: "", operation: null, notice: "", warning: false };
   let composing = false, lanes = null, lanesError = "", renderedLanes = "";
+  // The new issue's files, kept in this browser like its text.
+  const newTray = attachmentTray("lane-router.issues.new-files", {
+    changed: () => renderNew(),
+    notify: text => { if (fresh.operation) return; fresh.notice = text; fresh.warning = true; renderNew(); },
+  });
+  newTray.element.id = "new-tray";
+  {
+    const form = byId("new-form"), bottom = form.querySelector(".compose-bottom"), { picker, button } = filePicker("new");
+    bottom.prepend(button); form.insertBefore(newTray.element, bottom); form.append(picker);
+    acceptFiles(form, byId("new-body"), picker, () => newTray);
+  }
   function openNew() {
     if (composing) { byId("new-body").focus(); return; }
     if (selectedId && byId("issue-detail").dataset.issueId === selectedId) viewFor(selectedId).scrollTop = byId("history-region").scrollTop;
@@ -855,6 +1047,7 @@
       fresh.loaded = true;
       try { const draft = JSON.parse(stored(NEW_DRAFT) || "{}"); fresh.title = String(draft.title ?? ""); fresh.body = String(draft.body ?? ""); } catch { /* no draft */ }
       fresh.laneId = stored(NEW_LANE);
+      void newTray.restore();
     }
     byId("new-title").value = fresh.title; byId("new-body").value = fresh.body;
     composing = true; renderNew(); void loadLanes();
@@ -887,8 +1080,9 @@
     const listed = (lanes ?? []).some(lane => lane.laneId === fresh.laneId);
     select.value = listed ? fresh.laneId : "";
     const busy = Boolean(fresh.operation);
-    for (const id of ["new-lane", "new-title", "new-body"]) byId(id).disabled = busy;
-    byId("send-new").disabled = busy || !listed || !fresh.body.trim();
+    for (const id of ["new-lane", "new-title", "new-body", "new-add-file"]) byId(id).disabled = busy;
+    newTray.lock(busy);
+    byId("send-new").disabled = busy || !listed || (!fresh.body.trim() && !newTray.ids().length) || newTray.pending();
     byId("new-status").textContent = fresh.notice || lanesError;
     byId("new-status").className = fresh.warning || (!fresh.notice && lanesError) ? "warning" : "meta";
     byId("new-recovery").hidden = !fresh.operation || fresh.operation.state !== "uncertain";
@@ -900,11 +1094,18 @@
     const line = body.split("\n").map(text => text.trim()).find(Boolean) ?? "";
     return [...(line.replace(/^#{1,6}\s+/, "").trim() || line)].slice(0, 60).join("");
   }
+  /** A title for a new issue that is only files: the first one's name, and how many there are. */
+  function filesTitle(names) {
+    return [...(names.length === 1 ? names[0] : names[0] + " 等 " + names.length + " 个文件")].slice(0, 60).join("");
+  }
   function startNew() {
-    if (fresh.operation || !composing) return;
+    if (fresh.operation || !composing || newTray.pending()) return;
     const lane = (lanes ?? []).find(item => item.laneId === fresh.laneId);
-    if (!lane || !fresh.body.trim()) return;
-    fresh.operation = { operationKey: crypto.randomUUID(), payload: { laneId: lane.laneId, title: fresh.title.trim() || defaultTitle(fresh.body), body: fresh.body }, state: "new" };
+    const attachmentIds = newTray.ids();
+    if (!lane || (!fresh.body.trim() && !attachmentIds.length)) return;
+    const title = fresh.title.trim() || defaultTitle(fresh.body) || filesTitle(newTray.names());
+    fresh.operation = { operationKey: crypto.randomUUID(), state: "new",
+      payload: { laneId: lane.laneId, title, body: fresh.body, ...(attachmentIds.length ? { attachmentIds } : {}) } };
     void runNew();
   }
   /** As runOperation, for an issue that does not exist yet: one key per draft, kept until settled. */
@@ -921,7 +1122,7 @@
       if (!result || typeof result.issueId !== "string" || typeof result.entryId !== "string") throw new Error("未取得可核对的保存结果");
       Object.assign(fresh, { operation: null, title: "", body: "", notice: "", warning: false, laneId: operation.payload.laneId });
       byId("new-title").value = ""; byId("new-body").value = "";
-      store(NEW_DRAFT, ""); store(NEW_LANE, fresh.laneId);
+      store(NEW_DRAFT, ""); store(NEW_LANE, fresh.laneId); newTray.clear();
       const view = viewFor(result.issueId);
       view.notice = wakeNotice(wake); view.warning = wake?.status === "failed";
       // It waits on the lane, so it is under 进行中, not 待我处理. A reader who has gone elsewhere
