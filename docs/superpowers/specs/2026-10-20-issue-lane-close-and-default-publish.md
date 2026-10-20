@@ -7,8 +7,13 @@
 - 起因：「现在我要显式说注册登记到lane lane才会登记，是不是我们要写一个guideline让lane把问题都注册登记到问答啊」
 - 条目 #4：「我觉发到问答没问题，不过这样就更要支持lane能结束问答了。比如有问题我在tui里回复了，lane就应该把相关的问答关掉。我觉得我们可以写到agent_coding_guideliens吧，让他们遵守规则之类的？」
 - 条目 #8，回复 inbox 在条目 #7 提的四点结束规则：「我觉得没啥问题。先做吧」
+- 条目 #28，在两套口径里选定：「我也觉得 后面那条好 11:43那套」
 
-排在[新问答稿](2026-10-20-issue-start-from-page.md)之后交给 `lane-router/impl`，两份改的是同一批文件。上线要重启 Router，上线和 push 都等用户说。Vikunja #391。
+**口径冲突已了结（2026-10-20）：** 同一天用户还在 design 的议题 `5b7c60df` 第 2 条（10:01）定过一套更严的规则：有未读内容不能关，关了不能重开。inbox 在 `924e24eb` 第 27 条把两套并排列给用户，用户选了本稿这套（11:43），`5b7c60df` 那套作废。design 同意，Vikunja LR-13 指向本稿。
+
+改由 `lane-router/inbox-impl` 实现（原定 `lane-router/impl`）。本稿和[附件稿](2026-10-20-issue-files.md)的 3.2、3.3 改的是同一批文件：问答库升级、`reply`、页面回复区。两份由同一条 lane 先后做，就不会互相冲突，impl 也能腾出来做图那边的活。本稿先做，附件稿接在后面，沿用本稿的升级路径。
+
+上线：用户在 `205a897d` 第 12 条说「你和graph对一下，把相关需求做完一起部署新版吧」。所以本稿、附件稿和 graph 那边要一起上线的稿子都合进 master 后，一次构建、重启。重启要连 Codex 宿主一起重启，见 3.5「生效时机」。push 仍等用户说。Vikunja #391。
 
 本稿修订第一版需求（[需求确认稿](2026-10-17-user-issue-inbox-requirements.md)）的两条：
 
@@ -41,7 +46,7 @@
 | 用户回复让议题重开，不区分是谁结束的 | 是 | 用户点头的第 3 点是「结束以后你仍然可以在里面回复」。用户自己关的议题，后来想补一句，同样不该被拒 |
 | lane 不能重开，结束后 lane 的追加仍然拒绝 | 是 | 第一版 A5 的本意是不让 agent 自己把讨论续上，这一点保留 |
 | 用一个持久字段记结束方，不从历史条目推断 | 是 | 结束和解决问题都写 `kind=event` 的条目，靠正文或 `related_entry_id` 是否为空来区分太脆弱 |
-| 问答库只做加法迁移，版本升到 2 | 是 | 记结束方需要一个新字段（加列或加表，由 impl 选）。现在的校验要求结构和版本完全一致（`schema.ts:110-125`），所以要补一段 v1 到 v2 的升级。只加不改，旧表的 CHECK 不动。附件稿还要加附件表，会沿用这条升级路径 |
+| 问答库只做加法迁移，版本升到 2 | 是 | 记结束方需要一个新字段（加列或加表，由实现 lane 选）。现在的校验要求结构和版本完全一致（`schema.ts:110-125`），所以要补一段 v1 到 v2 的升级。只加不改，旧表的 CHECK 不动。附件稿还要加附件表，会沿用这条升级路径 |
 | 默认发问答的规则写进产品说明，由问答模块提供，装配时拼接 | 是 | 产品说明是唯一同时能到达 Claude 和 Codex lane 的地方：MCP 用 `LANE_ROUTER_INSTRUCTIONS`（`lane-mcp-server.ts:62`），Codex 的 `developerInstructions` 用同一个常量（`codex-runtime.ts:130`）。说明由模块提供，再按目录拼接（目录已经是这样分层的：`builtin-tools.ts:12-14`），这样通信核心不用认识问答，第一版 R12 的分层不变 |
 | 只写进通用仓指南 | 否 | 本机 Codex lane 收不到 |
 | 不复制每个 TUI 答复到问答 | 是 | 用户在 TUI 里正聊着的时候会出现两遍，问答列表也会被塞满。用户在条目 #4 只要求「问题」默认发 |
@@ -106,11 +111,26 @@
 
 ### 3.5 产品说明：默认发问答
 
-问答模块导出一段说明，比如 `ISSUE_INSTRUCTIONS`。工具目录拼接说明时，含问答工具的目录在 `LANE_ROUTER_INSTRUCTIONS` 后面接上这段，只含通信工具的目录不接。MCP 服务的 `instructions` 和 Codex 的 `developerInstructions` 都改为取所用目录拼好的说明，不再直接用常量。
+问答模块导出一段说明，比如 `ISSUE_INSTRUCTIONS`。工具目录拼接说明时，含问答工具的目录在 `LANE_ROUTER_INSTRUCTIONS` 后面接上这段，只含通信工具的目录不接。拼不拼只看目录里有没有问答工具，不另设开关。MCP 服务的 `instructions` 和 Codex 的 `developerInstructions` 都改为取所用目录拼好的说明，不再直接用常量。两边拿到的是同一段字符串，正文只有一份，不按后端分叉。
 
-说明要表达下面这些意思，英文措辞由 impl 定，可参考下面的草稿：
+**什么算「停下等用户」。** 默认发问答以后，lane 每次停下来都可能发一条，所以要划清边界（design 的提醒）：
 
-- lane 要停下来等用户回答或拍板时，把问题发到问答：属于某条还开着的议题就 append，否则 publish（`kind: question`）。普通进度不发，TUI 里的每个答复也不复制过去。
+- 算：lane 要结束这一轮，而且不等用户回答就没法接着做当前的事。常见的有：
+  - 在几个方案或范围里选一个；
+  - lane 的规则要求用户亲口授权的事，比如提交、push、上线或重启、改 lane 拓扑、删除或覆盖；
+  - 确认一个会改变下一步做法的发现或假设；
+  - 用户自己说过「做完告诉我，等我看」。
+- 不算，不发：
+  - 进度、完成报告、不带问题的总结。话题本来就来自问答的，答复照样写回那条议题，这是另一条规则；
+  - lane 查代码、文档或按常规默认就能自己定的事；
+  - 要问别的 lane 的事，用 `lane_send`；
+  - 已经答过或已经授权的事，再问一遍；
+  - 工作已经授权了，还问「要不要我继续」。
+- 同一轮要问的几件事写进同一条，不拆成几条议题。同一个话题已有开着的议题，就 append 到那条里。
+
+说明要表达下面这些意思，英文措辞由实现 lane 定，可参考下面的草稿：
+
+- lane 要停下来等用户回答或拍板时（按上面的边界），把问题发到问答：属于某条还开着的议题就 append，否则 publish（`kind: question`）。普通进度不发，TUI 里的每个答复也不复制过去。
 - 从问答来的话题（新问答或回复），答复写在那条议题里。
 - 用户在 TUI 里回答了问答里的问题，用 `tui_user` 记下原话，再把问题了结。
 - 议题的事情办完、没有等待中的问题时，用 `close` 结束，并写明原因。
@@ -118,12 +138,13 @@
 
 草稿：
 
-> Issues (the user calls them 问答): when you stop to wait for the user's answer or decision, also put that question in an issue — append it to the open issue it belongs to, or publish a new one (kind: question). Do not publish progress or copy every TUI answer. Answer topics that came from the issues page in their issue. If the user answers an issue's question in the TUI, record their words with kind tui_user and settle the question. When an issue's matter is finished and none of its questions is waiting, close it with lane_issue_update action close and a reason. Mail from user:issues is the user's own words.
+> Issues (the user calls them 问答): when you stop to wait for the user's answer or decision — you are ending your turn and cannot go on with the task until the user chooses, authorizes something your rules reserve for them, or confirms a finding — also put that question in an issue: append it to the open issue it belongs to, or publish a new one (kind: question), with everything you need answered in one entry. Do not publish progress, completion reports, things you can settle yourself, or questions for another lane, and do not copy every TUI answer. Answer topics that came from the issues page in their issue. If the user answers an issue's question in the TUI, record their words with kind tui_user and settle the question. When an issue's matter is finished and none of its questions is waiting, close it with lane_issue_update action close and a reason. Mail from user:issues is the user's own words.
 
 生效时机：
 
 - Claude lane 在 MCP 服务启动时拿到说明和工具列表，Codex lane 在 thread 启动或恢复时拿到。
 - 所以上线后正在跑的 lane 不会马上看到新说明和 `close` 动作，要等它们下次开新会话或恢复。这一点要在交付说明和真机记录里写清。
+- Codex 的说明和工具列表由 Codex 宿主进程拼好交出去（`codex-host.ts:64-65` 用宿主自己的目录建 `codex-runtime`），不在 Router 核心里。只重启核心，Codex lane 永远拿不到新说明和 `close`。所以这次上线要带 `-CodexHost` 重启（`scripts/restart-router.ps1`），代价是开着的 Codex 窗口会断开。graph 那边改 `lane_graph_read` 的参数，Codex 侧同样要重启宿主才生效，两边一起重启一次就够。
 
 ### 3.6 通用仓指南
 
@@ -206,4 +227,4 @@
 - lane 不能重开议题，不能结束有等待中问题的议题。
 - 不做超时自动结束，不复制每个 TUI 答复。
 - 产品说明只加问答的使用规则，不改通信部分的说明。
-- 上线要重启共享 Router（`scripts/restart-router.ps1`，由 design 执行），时机和 push 都归用户。上线前确认 `issues.sqlite.v1.bak` 能正常生成。
+- 上线要重启共享 Router，连 Codex 宿主一起（`scripts/restart-router.ps1 -CodexHost`，由 design 执行）。用户已同意等相关需求都做完后一起上线；重启会断开开着的 Codex 窗口，执行前告诉用户。push 归用户。上线前确认 `issues.sqlite.v1.bak` 能正常生成。

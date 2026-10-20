@@ -8,7 +8,9 @@
 
 inbox 在条目 #5 补了两处保护，见第二节：能运行的文件不直接打开；上传的文件由 Router 自己保存。
 
-排在[新问答稿](2026-10-20-issue-start-from-page.md)和[lane 结束问答稿](2026-10-20-issue-lane-close-and-default-publish.md)之后交给 `lane-router/impl`。上线要重启 Router，上线和 push 都等用户说。Vikunja #392。
+由 `lane-router/inbox-impl` 实现。3.1「点开本机路径」已合进 master（`58b4851`、`f7489f1`）。3.2、3.3 接在[lane 结束问答稿](2026-10-20-issue-lane-close-and-default-publish.md)后面，由同一条 lane 做：两份都要升级问答库、改 `reply` 和页面回复区，先后做就不会互相冲突。
+
+上线：用户在 `205a897d` 第 12 条说「你和graph对一下，把相关需求做完一起部署新版吧」，本稿和 lane 结束问答稿、graph 那边的稿子一起上线。push 等用户说。Vikunja #392。
 
 ## 一、问题与结论
 
@@ -268,4 +270,4 @@ lane 工具不改。lane 读附件用它自己的文件读取能力，信里给�
 - 不复制 lane 写的路径指向的文件，不认相对路径和网络路径。
 - 不给 lane 新增上传工具。
 - 已挂上条目的附件不自动删除，磁盘占用归用户手动处理；交付说明里写出附件目录的位置。
-- 上线要重启共享 Router（`scripts/restart-router.ps1`，由 design 执行），时机和 push 都归用户。
+- 上线要重启共享 Router（`scripts/restart-router.ps1`，由 design 执行），和 lane 结束问答稿一起带 `-CodexHost`。用户已同意相关需求做完后一起上线，push 归用户。
