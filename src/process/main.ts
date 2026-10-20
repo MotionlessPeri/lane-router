@@ -275,7 +275,8 @@ export async function runRouterProcess(options: {
  * The 问答 page's wake, by the lane's stable ID so an address reused since cannot open the wrong
  * lane. It must be handed the restorer the board and the core already use: the 30-second
  * reservation that keeps a lane from opening twice lives on that one instance. The restorer's
- * message can name a directory on this machine, and the page has no use for it.
+ * message can name a directory on this machine, and the page has no use for it. A lane being
+ * opened is answered with its binding's backend, so the page can say what opening it takes.
  */
 export function issueWakePort(state: Pick<RouterStateStore, "activeBindingForLaneId">, restore: Pick<ConversationRestorer, "restore">): IssueWakePort {
   return {
@@ -283,7 +284,8 @@ export function issueWakePort(state: Pick<RouterStateStore, "activeBindingForLan
       const binding = state.activeBindingForLaneId(laneId);
       if (binding === undefined) return { status: "failed", reason: "no_binding" };
       const restored = await restore.restore(binding);
-      return restored.status === "failed" ? { status: "failed", reason: restored.reason } : { status: restored.status };
+      if (restored.status === "failed") return { status: "failed", reason: restored.reason };
+      return restored.status === "skipped_online" ? { status: restored.status } : { status: restored.status, backend: binding.backend };
     },
   };
 }

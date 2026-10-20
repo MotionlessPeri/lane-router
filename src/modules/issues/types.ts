@@ -1,3 +1,5 @@
+import type { BackendName } from "../../router/types.js";
+
 export type IssueOrigin = "answer" | "question";
 export type IssueStatus = "open" | "closed";
 export type QuestionStatus = "waiting_user" | "waiting_lane" | "answered" | "not_needed";
@@ -172,9 +174,13 @@ export interface CreateIssueInput {
   /** Uploads this entry takes; at most ten. */
   readonly attachmentIds?: readonly string[];
 }
-/** The restorer's answer without its message, plus the one failure only the lookup by lane ID has. */
+/**
+ * The restorer's answer without its message, plus the one failure only the lookup by lane ID has.
+ * A lane being opened says which backend it runs on: a Claude window waits on a confirmation.
+ */
 export type IssueWakeResult =
-  | { readonly status: "launch_requested" | "skipped_online" | "skipped_launching" }
+  | { readonly status: "launch_requested" | "skipped_launching"; readonly backend: BackendName }
+  | { readonly status: "skipped_online" }
   | { readonly status: "failed"; readonly reason: "no_binding" | "session_not_found" | "invalid_startup_cwd" | "backend_unavailable" | "terminal_launch_failed" };
 export interface ReplyIssueInput {
   readonly operationKey: string;

@@ -1010,9 +1010,16 @@
   /** What became of a message just saved and its lane, from the wake the save answered with. */
   const wakeReasons = { no_binding: "没有对话记录", session_not_found: "找不到原来的对话", invalid_startup_cwd: "原来的工作目录不在了",
     backend_unavailable: "这种 lane 不能由 Router 打开，或者 Codex 宿主没连上", terminal_launch_failed: "终端没能启动" };
+  // A Claude window opens on the development-channel confirmation every time, and nothing proceeds
+  // until it is clicked; a Codex window has none.
+  const CLAUDE_CONFIRM = "『I am using this for local development』";
+  // A notification arriving as the window connects starts no turn, so a lane can sit still after the
+  // click. Drop this half once the re-notify patch is live (spec 2026-10-20-issue-wake-claude-confirm.md).
+  const CLAUDE_NUDGE = "；点完它要是没动，在这条问答里再回一句就能叫醒它";
   function wakeNotice(wake) {
-    if (wake?.status === "launch_requested") return "已发送。这个 lane 没开着，已经让 Router 打开它的窗口。";
-    if (wake?.status === "skipped_launching") return "已发送。这个 lane 正在打开。";
+    const claude = wake?.backend === "claude";
+    if (wake?.status === "launch_requested") return "已发送。这个 lane 没开着，已经让 Router 打开它的窗口。" + (claude ? "窗口打开后，请在窗口里点" + CLAUDE_CONFIRM + CLAUDE_NUDGE + "。" : "");
+    if (wake?.status === "skipped_launching") return claude ? "已发送。这个 lane 正在打开；窗口要是停在确认提示上，请点" + CLAUDE_CONFIRM + "。" : "已发送。这个 lane 正在打开。";
     if (wake?.status === "failed") return "已发送，但没能打开这个 lane（" + (wakeReasons[wake.reason] || wake.reason) + "）。消息会等它打开后再处理，可以去运行看板手动恢复。";
     return "已发送。";
   }
@@ -1072,7 +1079,9 @@
       const groups = new Map();
       for (const lane of lanes ?? []) {
         if (!groups.has(lane.project)) { const group = node("optgroup"); group.label = lane.project; groups.set(lane.project, group); }
-        const option = node("option", null, lane.address + " · " + (restoreLabels[lane.restorePresence] || lane.restorePresence));
+        const state = lane.restorePresence === "offline" && lane.backend === "claude"
+          ? restoreLabels.offline + "；窗口打开后要你在窗口里点一下确认" : restoreLabels[lane.restorePresence] || lane.restorePresence;
+        const option = node("option", null, lane.address + " · " + state);
         option.value = lane.laneId; groups.get(lane.project).append(option);
       }
       select.replaceChildren(none, ...groups.values());

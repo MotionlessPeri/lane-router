@@ -98,7 +98,8 @@ test("a new issue from the page wakes its lane through the one restorer the boar
     body: JSON.stringify({ actionToken: lanes.actionToken, operationKey: "new", laneId: lanes.result.items[0].laneId, title: "T", body: "B" }),
   });
   expect(response.status).toBe(200);
-  expect((await response.json() as any).wake).toEqual({ status: "launch_requested" });
+  // A lane being opened is answered with its backend, so the page knows whether a confirmation waits.
+  expect((await response.json() as any).wake).toEqual({ status: "launch_requested", backend: "codex" });
   expect(fake.restorers).toHaveLength(1);
   expect(fake.restorers[0].restore.mock.calls).toEqual([[expect.objectContaining({ laneAddress: "fixture/work", backend: "codex", conversationId: "fake-thread" })]]);
 });

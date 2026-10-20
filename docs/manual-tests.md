@@ -317,6 +317,14 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
   - 「已发送。这个 lane 正在打开。」
   - 「已发送，但没能打开这个 lane（原因）。消息会等它打开后再处理，可以去运行看板手动恢复。」
 - 打不开不影响保存：信已经在 lane 的信箱里，lane 下次开着时会处理。
+- **Claude lane 要在窗口里点一下确认**（`docs/superpowers/specs/2026-10-20-issue-wake-claude-confirm.md`）：
+  - 原因：Claude Code 每次带 `--dangerously-load-development-channels` 启动，都会弹出「WARNING: Loading development channels」，要点「I am using this for local development」才往下走。
+  - 唤醒结果的 `launch_requested` 和 `skipped_launching` 带上 lane 的 `backend`，页面只对 Claude lane 换一套说法：
+    - lane 列表：没开着的 Claude lane 写「没开着，发出后会打开它的窗口；窗口打开后要你在窗口里点一下确认」。
+    - 打开了窗口：「……已经让 Router 打开它的窗口。窗口打开后，请在窗口里点『I am using this for local development』；点完它要是没动，在这条问答里再回一句就能叫醒它。」后半句「点完它要是没动……」等 design 的重通知补丁上线后删掉，代码里有注释。
+    - 正在打开：「已发送。这个 lane 正在打开；窗口要是停在确认提示上，请点『I am using this for local development』。」
+  - Codex lane 的说法不变。
+  - 自动测试：`tests/process/issue-wake.test.ts` 和 `tests/modules/issues/ui.test.ts`。第五节的两个变异（不区分后端，在提示和列表两处各试了一次；唤醒结果不带 `backend`）各自让预定的用例变红。
 - **同时修的现有缺陷（Claude）：**
   - **原来的问题：** Claude lane 恢复后，channel 一连上 Router 就收到通知，这时 Claude 还没初始化好 lane 的 MCP 服务。客户端把这一帧丢了，lane 就守着积压的信不动，直到有人打字。
   - **现在：** 客户端先留住最新一帧，会话接上时补交一次。

@@ -873,6 +873,20 @@ test("新问答 replaces the issue with its own view, lanes grouped by project w
   expect(f.query("#detail-empty").textContent).toBe("选择一个议题，查看完整讨论。");
 });
 
+test("a Claude lane that is not open says its window will ask to be confirmed; a Codex lane says what it always did", async () => {
+  const f = await boot({ prepare(x) {
+    x.addLane("lane-claude", "project/claude");
+    const facts = x.lanes.get("lane-claude")!;
+    x.lanes.set("lane-claude", { ...facts, binding: { ...facts.binding!, backend: "claude" } });
+    x.restorePresence.set("lane-claude", "offline"); x.restorePresence.set("lane-two", "offline");
+  } });
+  await openNew(f);
+  const labels = Object.fromEntries([...f.document.querySelectorAll("#new-lane option[value]:not([value=''])")].map(option => [option.getAttribute("value"), option.textContent]));
+  expect(labels["lane-claude"]).toBe("project/claude · 没开着，发出后会打开它的窗口；窗口打开后要你在窗口里点一下确认");
+  expect(labels["lane-two"]).toBe("project/other · 没开着，发出后会打开它的窗口");
+  expect(labels["lane-one"]).toBe("project/work · 在线");
+});
+
 test("an empty title is the body's first line without its heading marks, cut to 60 characters", async () => {
   const f = await boot();
   await openNew(f);
@@ -893,11 +907,17 @@ test("an empty title is the body's first line without its heading marks, cut to 
   expect((await send(3)).title).toBe("自己起的标题");
 });
 
+// Spec 2026-10-20-issue-wake-claude-confirm.md, acceptance 2: a Claude window waits on the
+// development-channel confirmation, so opening one says to click it; a Codex window does not.
+const CLAUDE_OPENING = "已发送。这个 lane 没开着，已经让 Router 打开它的窗口。窗口打开后，请在窗口里点『I am using this for local development』；点完它要是没动，在这条问答里再回一句就能叫醒它。";
+const CLAUDE_STILL_OPENING = "已发送。这个 lane 正在打开；窗口要是停在确认提示上，请点『I am using this for local development』。";
 test.each<[IssueWakeResult | undefined, string, string]>([
   [undefined, "已发送。", "meta"],
   [{ status: "skipped_online" }, "已发送。", "meta"],
-  [{ status: "launch_requested" }, "已发送。这个 lane 没开着，已经让 Router 打开它的窗口。", "meta"],
-  [{ status: "skipped_launching" }, "已发送。这个 lane 正在打开。", "meta"],
+  [{ status: "launch_requested", backend: "codex" }, "已发送。这个 lane 没开着，已经让 Router 打开它的窗口。", "meta"],
+  [{ status: "skipped_launching", backend: "codex" }, "已发送。这个 lane 正在打开。", "meta"],
+  [{ status: "launch_requested", backend: "claude" }, CLAUDE_OPENING, "meta"],
+  [{ status: "skipped_launching", backend: "claude" }, CLAUDE_STILL_OPENING, "meta"],
   [{ status: "failed", reason: "session_not_found" }, "已发送，但没能打开这个 lane（找不到原来的对话）。消息会等它打开后再处理，可以去运行看板手动恢复。", "warning"],
 ])("a sent new issue is shown under 进行中, selected, with the wake result %j", async (result, text, className) => {
   const f = await boot(result ? { wake: { wake: async () => result } } : {});
@@ -917,8 +937,15 @@ test.each<[IssueWakeResult | undefined, string, string]>([
   expect(call.body).toEqual({ operationKey: expect.any(String), laneId: "lane-two", title: "新话题", body: "帮我看看", actionToken: expect.any(String) });
 });
 
+test("a reply opening a Claude lane says to confirm in its window, as a new issue does", async () => {
+  const f = await boot({ wake: { wake: async () => ({ status: "launch_requested", backend: "claude" }) } });
+  await f.selected(f.first.issueId);
+  f.change("#reply-body", "第一条"); f.click("#send-reply");
+  await vi.waitFor(() => expect(f.query("#operation-status").textContent).toBe(CLAUDE_OPENING));
+});
+
 test("a reply shows the same wake result, with each reason it could not open the lane in words", async () => {
-  const wake = vi.fn<IssueWakePort["wake"]>(async () => ({ status: "launch_requested" }));
+  const wake = vi.fn<IssueWakePort["wake"]>(async () => ({ status: "launch_requested", backend: "codex" }));
   const f = await boot({ wake: { wake } });
   await f.selected(f.first.issueId);
   f.change("#reply-body", "第一条"); f.click("#send-reply");
