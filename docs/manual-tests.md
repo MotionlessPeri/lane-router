@@ -1306,7 +1306,7 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 1. 在目标项目目录运行 `lane-router-lane new smoke/probe --role "Scratch lane for verifying lane-router-lane."`。
 2. 观察新窗口出现（默认 Windows Terminal）；命令应等 terminal child 报告 CLI 启动后才退出 0。
-3. 新对话首次使用 development channel 可能弹确认，需人工接受。
+3. 新窗口会弹 development channel 确认（「WARNING: Loading development channels」），需人工点「I am using this for local development」。2026-10-20 在 Claude Code 2.1.304 的代码里查实：只要通道可用，每次启动都弹，接受不会被记住。
 4. attach 完成后 `lane_directory` 应显示 `smoke/probe` gen1；该 turn 的 `Stop` 之后 `/lanes/resume-info` 的 `cwd` 应等于第 1 步的目录。
 
 **预期：** 窗口可见且 CLI 真启动；新对话按 bootstrap 接入并报告就绪、不自行推进工作；cwd 已被记录。
@@ -1351,6 +1351,39 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 **预期：** 离线 lane 打开、在线 lane 跳过、逐 lane 失败互不影响；脚本退出码只取决于 failed 是否为空。测试前后生产 Router PID 与 lane/binding/message 数量不变。
 
 **最后验证：** 2026-08-27 用真实离线 Codex thread 和隔离 Router 验证离线分支：`resume-info` 为 `reach=unconfirmed`、`restorePresence=offline`，批量脚本报告 `1 opened, 0 skipped, 0 failed`；开出的真实 Codex 进程使用隔离 endpoint，ownership 建立后同一接口变为 `restorePresence=online`。所有 child 都保留同一 `LANE_ROUTER_DATA_ROOT`。在线跳过、backend unavailable 与逐 lane 失败隔离仍由自动测试覆盖；本次真机 fixture 没有额外构造这三种分支。
+
+### TC-LANE-AUTONOMY：开新、唤醒、轮换不再先问用户；只有接替和改角色说明要确认
+
+**依据：** 设计稿 `docs/superpowers/specs/2026-10-20-lane-autonomy-gates.md`。用户在问答 `9ee7440d`、`5fed7f03` 定的口径：
+- 开新 lane、唤醒离线 lane、轮换（同角色换一代续自己）不用确认；
+- 接替一条另有 live 会话的别的 lane、改已有 lane 的角色说明，仍要确认；
+- 新建的 lane 读透角色和现状后报就绪，不自己造活；
+- 恢复的 lane 接着处理已授权的活。
+
+**改了什么：** 只改了文字。
+- `src/tools/tool-contract.ts`：`ATTACH_CONFIRMATION` 会同时出现在 `lane_attach_current` 的描述和每个会话开头的说明里；另外改了 `lane_restore_project` 的描述。
+- `src/process/lane-launcher.ts`：新建 lane 的 bootstrap prompt，以及 zcode 窗口的开场 prompt。
+- `scripts/open-vm-lane.ps1`：VM 上新建 lane 用的那份 prompt 副本。
+
+**生效条件：** 部署时要带 `-CodexHost`，Codex 宿主才会拿到新说明；Claude 侧要在部署后新开或恢复的会话里才看得到。
+
+**自动测试：**
+- `tests/tools/lane-autonomy-contract.test.ts` 和 `tests/process/lane-launcher.test.ts` 断言新旧文字。
+- `attachCurrent` 的既有测试照旧全过：接管前等持有者空闲、按代次 CAS、`rejectTakeover` 报 `LANE_ALREADY_BOUND`。这说明接管、等空闲、升代的逻辑没被碰过。
+- 变异 9 项全被杀掉：旧的四合一句、去掉接替要确认、去掉「拿不准就当接替」、唤醒仍只在用户要求时、新建仍写 approved、新建仍无条件干等、zcode 仍干等、接管不等空闲、Host 托管不拒接管。
+- VM 脚本那份 prompt 没有自动测试。2026-10-20 核对过两件事：
+  - 在 Windows PowerShell 5.1 下，它生成的 prompt 和 TS 版逐字节一致（617 字节，含破折号和「问答」）；
+  - 文件解析无错，并且仍是纯 ASCII。
+
+**步骤：**（都在部署后新开或恢复的会话里做）
+1. 让一条 lane 用 `lane-router-lane new` 开一条 scratch lane（如 `smoke/autonomy`）。开之前它不应先问用户要不要开。新 lane 应读完 AGENTS.md 和现状后报就绪，不自己开干。
+2. 让一条 lane 为当前任务唤醒一个离线 peer（`lane_restore_project` 或 `lane-router-lane open`）。它不应停下来问用户要不要唤醒，也不应顺手把整个项目都打开。
+3. 让一条长跑 lane 换代轮换（新会话 attach 回同地址、同角色）。不应要用户确认，新一代接着干原来的活。
+4. 让一条 lane 改另一条已有 lane 的角色说明，或接替一条还 live 的别的 lane。它应先向用户说明，等确认后再动。
+5. 关掉一条有 pending 信或问答、手上还有已授权任务的 lane，再恢复它。它应先处理 pending，再接着原任务，而不是停着等用户说「开工」。Claude lane 恢复时要点一下开发通道确认，见 TC-LANE-NEW 第 3 步。
+
+**预期：** 五步都成立。第 4 步要是没停下来问，就说明收窄后的文字没守住接替和改角色这两道闸，要回到设计稿重议。
+**最后验证：** 尚未执行（等部署）。
 
 ## 产品工具的参数 schema：union 工具发平表根
 

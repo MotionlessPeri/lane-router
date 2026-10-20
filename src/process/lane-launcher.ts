@@ -283,14 +283,16 @@ function zcodeIntroPrompt(address: string, role: string): string {
 
 Your role: ${role}
 
-Read the repository AGENTS.md if present, then confirm in one short line that you are ready and wait for direction.`;
+Read the repository AGENTS.md if present, make sure you understand your role and the project's current state, then confirm in one short line that you are ready. You have no assigned task yet, so wait for direction or for work addressed to you rather than inventing work.`;
 }
 
 function creationPrompt(address: string, role: string, model: string | undefined): string {
   // The model is named in the attach instruction rather than left to this window alone: what the
   // lane declares is what every later incarnation runs on, and this window is only the first one.
   const declaration = model === undefined ? "" : ` and model \`${model}\``;
-  return `This is an approved creation of the new lane ${address}.\n\nRead the repository AGENTS.md and applicable referenced instructions completely. Call lane_directory for the project and verify the address is free, then call lane_attach_current with address \`${address}\`${declaration} and exactly this role_description:\n\n${role}\n\nAfterwards report that the lane is ready and wait for direction; do not start feature work on your own.`;
+  // Creating a lane needs no approval. A new lane has no task, so it learns its role and reports
+  // ready; "wait for direction" stays in the words so a creator can still ask a lane to stop there.
+  return `This is the creation of the new lane ${address}.\n\nRead the repository AGENTS.md and applicable referenced instructions completely. Call lane_directory for the project and verify the address is free, then call lane_attach_current with address \`${address}\`${declaration} and exactly this role_description:\n\n${role}\n\nAfterwards, make sure you understand what this role covers and the project's current state, then report that the lane is ready. You have no assigned task yet, so do not invent feature work on your own — wait for direction, or for work addressed to you through your mailbox or 问答.`;
 }
 
 async function openTerminal(

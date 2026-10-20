@@ -135,7 +135,9 @@ if ($New) {
     if ($info.state -ne "missing") { throw "Lane $Lane is $($info.state); -New needs an address nobody holds" }
     if (-not $Role -or -not $Cwd) { throw "-New needs -Role and -Cwd (a directory on the VM)" }
     $fullRole = "$Role`n$roleSuffix"
-    $prompt = "This is an approved creation of the new lane $Lane.`n`nRead the repository AGENTS.md and applicable referenced instructions completely. Call lane_directory for the project and verify the address is free, then call lane_attach_current with address ``$Lane``" + $(if ($Model) { " and model ``$Model``" } else { "" }) + " and exactly this role_description:`n`n$fullRole`n`nAfterwards report that the lane is ready and wait for direction; do not start feature work on your own."
+    # Word for word the creationPrompt in src/process/lane-launcher.ts; the em dash and the Chinese name
+    # of the issues page are built from code points so this file stays ASCII.
+    $prompt = "This is the creation of the new lane $Lane.`n`nRead the repository AGENTS.md and applicable referenced instructions completely. Call lane_directory for the project and verify the address is free, then call lane_attach_current with address ``$Lane``" + $(if ($Model) { " and model ``$Model``" } else { "" }) + " and exactly this role_description:`n`n$fullRole`n`nAfterwards, make sure you understand what this role covers and the project's current state, then report that the lane is ready. You have no assigned task yet, so do not invent feature work on your own $([char]0x2014) wait for direction, or for work addressed to you through your mailbox or $([char]0x95EE)$([char]0x7B54)."
     $windowName = $project
     $runner = "cd '$Cwd' || exit 1`nexec $claude --name '$Lane' -- `"`$(cat `"$vmPrompt`")`""
 } elseif ($Rotate) {

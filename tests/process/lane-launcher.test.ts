@@ -98,6 +98,13 @@ test("new opens a terminal whose first prompt creates the lane", async () => {
   expect(request.prompt).toContain("alpha/worker");
   expect(request.prompt).toContain("Owns the worker seam.");
   expect(request.prompt).toContain("lane_attach_current");
+  // Creating a lane needs no one's approval, and a new lane learns its role and the project before
+  // saying it is ready; it has no task yet, so it waits for one rather than inventing work.
+  expect(request.prompt).toMatch(/^This is the creation of the new lane alpha\/worker\./u);
+  expect(request.prompt).not.toContain("approved creation");
+  expect(request.prompt).not.toContain("do not start feature work on your own");
+  expect(request.prompt).toContain("Afterwards, make sure you understand what this role covers and the project's current state, then report that the lane is ready.");
+  expect(request.prompt).toContain("You have no assigned task yet, so do not invent feature work on your own — wait for direction, or for work addressed to you through your mailbox or 问答.");
   expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD");
   expect(environment.LANE_ROUTER_CHILD_TITLE).toBe("alpha/worker");
   expect(environment.LANE_ROUTER_CHILD_WINDOW).toBe("alpha");
@@ -299,7 +306,7 @@ test("new starts Codex through the shared terminal plumbing with its profile and
     mode: "prompt", backend: "codex", cwd: "D:\\caller", profile: "glm", model: "glm-5.3",
   });
   if (request.mode !== "prompt") throw new Error("expected a prompt request");
-  expect(request.prompt).toContain("approved creation of the new lane alpha/glm");
+  expect(request.prompt).toContain("This is the creation of the new lane alpha/glm.");
   expect(request.prompt).toContain("exactly this role_description:\n\nOwns the GLM provider seam.");
   expect(request.prompt).toContain("lane_attach_current with address `alpha/glm` and model `glm-5.3`");
   expect(request.prompt).not.toContain("modelProvider");
@@ -508,6 +515,9 @@ test("new --backend zcode --terminal spawns headless with an intro and opens a T
   await launchLane(["new", "alpha/glm-tui", "--role", "Windowed GLM lane.", "--backend", "zcode", "--terminal", "wt"], deps);
   // Windowed lanes get an intro turn (the TUI cannot take a first prompt); headless ones do not.
   expect(spawnZcodeLane.mock.calls[0][0].intro).toContain("alpha/glm-tui");
+  // The same opening as any new lane: learn the role and the project, report ready, invent nothing.
+  expect(spawnZcodeLane.mock.calls[0][0].intro).toContain("Read the repository AGENTS.md if present, make sure you understand your role and the project's current state, then confirm in one short line that you are ready.");
+  expect(spawnZcodeLane.mock.calls[0][0].intro).toContain("You have no assigned task yet, so wait for direction or for work addressed to you rather than inventing work.");
   // The window must not open on a still-running intro: the TUI would show an unanswered prompt.
   expect(spawnZcodeLane.mock.calls[0][0].waitForIntro).toBe(true);
   const request = deps.spawnTerminal.mock.calls[0][0];
