@@ -322,7 +322,7 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
   - 普通文字：找不含空格的片段，碰到全角的句号、逗号等就停，末尾的标点留在句子里。紧跟在字母、数字或 `/`、`\`、`:` 后面的不算，所以网址里的 `x:/y` 不会变成链接。
   - 代码块和 Markdown 链接里的路径不处理。
 - **入口：** `POST /local-files/open`，过 `readPageAction` 的四项检查，动作头 `open-local-path`。入口不属于问答，别的页面也能用。
-  - 网络路径、设备路径、相对路径和含 NUL 的路径直接拒绝，返回 `refused` 和原因，不查磁盘。
+  - 网络路径、设备路径、相对路径、含 NUL 的路径，以及盘符之后又出现冒号的路径（NTFS 数据流），都直接拒绝，返回 `refused` 和原因，不查磁盘。
   - 不存在返回 `missing`。存在但既不是文件也不是文件夹的，返回 `refused`。
   - 文件夹，以及类型在安全名单（`src/process/local-open.ts` 的 `OPEN_WITH_DEFAULT_PROGRAM`）里的文件，用默认程序打开，返回 `opened`。其他文件在资源管理器里选中，返回 `revealed`。
 - **怎么启动：** 固定脚本交给 `powershell.exe`，路径放在环境变量里，不进任何命令行。打开用 ShellExecute，路径本身就是要打开的文件。选中用 `explorer.exe /select,"<路径>"`：路径加了引号，资源管理器就不会在逗号处把它拆开。

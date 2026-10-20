@@ -48,6 +48,8 @@ function refusal(path: string): string | undefined {
   if (/^[\\/]{2}[?.][\\/]/u.test(path)) return "不支持设备路径";
   if (/^[\\/]{2}/u.test(path)) return "不支持网络路径";
   if (!/^[A-Za-z]:[\\/]/u.test(path)) return "只支持盘符开头的绝对路径";
+  // A file name cannot hold a colon; one after the drive names an NTFS stream, whose type is not the file's.
+  if (path.includes(":", 2)) return "不支持 NTFS 数据流路径";
   return undefined;
 }
 

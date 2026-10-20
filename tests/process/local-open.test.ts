@@ -74,6 +74,8 @@ test("network, device and relative paths are refused with a reason before anythi
     `\\\\?\\${notes}`, `\\\\.\\${notes}`, `//?/${notes}`, "\\\\.\\PhysicalDrive0", `\\\\?\\${root}`,
     "notes.md", ".\\notes.md", "..\\notes.md", "C:notes.md", "\\notes.md", "/notes.md", "",
     `${notes}\0.md`, `${root}\0`,
+    // A colon after the drive names an NTFS stream, here one on an .exe dressed as a .md.
+    `${file("setup.exe")}:readme.md`, `${notes}:$DATA`, `${notes}::$DATA`,
   ];
   for (const path of refused) {
     const result = await openLocalPath(path, launch);
