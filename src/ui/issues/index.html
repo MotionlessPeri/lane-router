@@ -332,7 +332,7 @@
   const entryFacts = new WeakMap();
   function viewFor(id) {
     if (!views.has(id)) views.set(id, { detail: null, entries: [], through: 0, hasMore: false, version: 0, loading: false,
-      draft: "", questionId: "", operation: null, notice: "", warning: false, confirmClose: false, seen: 0, readAck: 0, reads: new Map(), loadError: "", readError: "" });
+      draft: "", questionId: "", targetChosen: false, operation: null, notice: "", warning: false, confirmClose: false, seen: 0, readAck: 0, reads: new Map(), loadError: "", readError: "" });
     return views.get(id);
   }
 
@@ -444,7 +444,7 @@
     selectedId = id; renderList();
     const view = viewFor(id);
     view.positioning = view.detail ? "return" : "open";
-    view.pickTarget = true;
+    view.pickTarget = true; view.targetChosen = false;
     historyFor = null;
     byId("detail-empty").hidden = Boolean(view.detail);
     byId("detail-empty").textContent = "正在读取议题…";
@@ -489,6 +489,7 @@
       if (!metadataOnly) { view.through = Math.max(view.through, result.displayedThroughSeq); view.hasMore = result.hasMore; }
       view.detail = result; view.loadError = "";
       if (view.pickTarget && !view.operation) { view.questionId = defaultTarget(view); view.pickTarget = false; }
+      else if (targetOpen(view) && !view.draft.trim()) view.questionId = defaultTarget(view);
       if (selectedId === id) {
         const region = byId("history-region");
         const following = !more && byId("issue-detail").dataset.issueId === id && atBottom(region);
@@ -514,10 +515,13 @@
 
   /**
    * The question a reply most likely answers: the newest one still waiting on the user. Worked out
-   * when an issue is opened and after a reply to it is sent, never on a poll, so a question arriving
-   * while a reply is being written cannot quietly take it over. A prompt not loaded yet is newer
-   * than every loaded one, since history loads oldest first.
+   * when an issue is opened and after a reply to it is sent. A poll only fills a target that was
+   * worked out empty, and only while nothing is written and the user has not chosen a target, so a
+   * question arriving while a reply is being written never quietly takes it over: the reply area
+   * points it out instead (showTargetHint). A prompt not loaded yet is newer than every loaded one,
+   * since history loads oldest first.
    */
+  const targetOpen = view => !view.operation && !view.targetChosen && view.questionId === "";
   function defaultTarget(view) {
     const seqOf = question => view.entries.find(entry => entry.id === question.promptEntryId)?.seq ?? Infinity;
     let target = null;
@@ -659,15 +663,16 @@
       const textarea = node("textarea"); textarea.id = "reply-body"; textarea.placeholder = "写下回复，或直接说哪里还不清楚…";
       if (!view.draft) view.draft = storedDraft(id);
       textarea.value = view.draft;
-      textarea.addEventListener("input", () => { if (!view.operation) { view.draft = textarea.value; storeDraft(id, view.draft); } sizeCompose(id); });
+      textarea.addEventListener("input", () => { if (!view.operation) { view.draft = textarea.value; storeDraft(id, view.draft); } sizeCompose(id); showTargetHint(id); });
       textarea.addEventListener("focus", () => sizeCompose(id, true));
       textarea.addEventListener("blur", () => sizeCompose(id, false));
       const bottom = node("div", "compose-bottom");
       const questionLabel = node("label", null, "回复对象"); questionLabel.htmlFor = "reply-question";
       const select = node("select"); select.id = "reply-question";
-      select.addEventListener("change", () => { if (!view.operation) { view.questionId = select.value; view.pickTarget = false; } });
+      select.addEventListener("change", () => { if (!view.operation) { view.questionId = select.value; view.pickTarget = false; view.targetChosen = true; showTargetHint(id); } });
+      const hint = node("span", "meta warning"); hint.id = "reply-target-hint"; hint.setAttribute("role", "status"); hint.hidden = true;
       const send = node("button", "primary", "发送回复"); send.id = "send-reply"; send.type = "submit";
-      bottom.append(questionLabel, select, node("span", "meta", "保存后交给原 lane，无需回 TUI 重复。"), send);
+      bottom.append(questionLabel, select, hint, node("span", "meta", "保存后交给原 lane，无需回 TUI 重复。"), send);
       form.append(bodyLabel, textarea, bottom);
       form.addEventListener("submit", event => { event.preventDefault(); startReply(id); }); host.append(form);
     }
@@ -682,7 +687,21 @@
     }
     if (select.value !== view.questionId) select.value = view.questionId;
     byId("reply-body").disabled = Boolean(view.operation); select.disabled = Boolean(view.operation); byId("send-reply").disabled = Boolean(view.operation);
+    showTargetHint(id);
     sizeCompose(id);
+  }
+  /**
+   * The question a poll would have made the target, named beside 回复对象 while a reply is being
+   * written; it goes once the user picks a target, the reply is sent, or the reply area is emptied.
+   */
+  function showTargetHint(id) {
+    const hint = byId("reply-target-hint"), view = viewFor(id);
+    if (!hint || byId("compose").dataset.for !== id) return;
+    const target = targetOpen(view) && view.draft.trim() ? defaultTarget(view) : "";
+    const prompt = view.detail.questions.find(question => question.id === target)?.promptEntryId;
+    const entry = prompt && view.entries.find(item => item.id === prompt);
+    hint.textContent = target ? "有新问题 " + (entry ? "#" + entry.seq + " " : "") + "等你回答，可以在回复对象里选它" : "";
+    hint.hidden = !target;
   }
   // A draft is kept in this browser, per issue, so a reload does not lose it. A browser that refuses
   // storage (a private window, blocked site data) keeps drafts in memory only, as before.
@@ -773,7 +792,7 @@
     try {
       const { result, wake } = await post(id, operation.action, { ...operation.payload, operationKey: operation.operationKey });
       if (!result || result.issueId !== id || typeof result.entryId !== "string") throw new Error("未取得可核对的保存结果");
-      if (operation.action === "replies") { view.draft = ""; view.questionId = ""; storeDraft(id, ""); }
+      if (operation.action === "replies") { view.draft = ""; view.questionId = ""; view.targetChosen = false; storeDraft(id, ""); }
       view.operation = null; view.confirmClose = false;
       view.notice = operation.action === "replies" ? wakeNotice(wake) : "议题已结束，历史仍可查看。";
       view.warning = operation.action === "replies" && wake?.status === "failed";
