@@ -147,7 +147,7 @@ describe("independent issue persistence", () => {
       try {
         expect(issues.pragma("user_version", { simple: true })).toBe(0);
         expect(issues.prepare("SELECT version FROM issue_schema_version WHERE singleton=1").get()).toEqual({ version: ISSUE_SCHEMA_VERSION });
-        expect(issues.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()).toEqual(["issue_delivery", "issue_entry", "issue_operation", "issue_question", "issue_schema_version", "issue_thread"].map((name) => ({ name })));
+        expect(issues.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()).toEqual(["issue_attachment", "issue_delivery", "issue_entry", "issue_operation", "issue_question", "issue_schema_version", "issue_thread"].map((name) => ({ name })));
       } finally { issues.close(); }
     } finally { core.close(); }
   });

@@ -41,6 +41,23 @@ export function refuseWebPage(request: IncomingMessage, response: ServerResponse
   return false;
 }
 
+/**
+ * The same four checks for a page action whose body is a file rather than JSON: the content type is
+ * application/octet-stream, which a page cannot send across sites without a preflight, and the
+ * token travels in `x-lane-router-token`. Reads nothing; answers true when it has written the refusal.
+ */
+export function refusePageUpload(request: IncomingMessage, response: ServerResponse, options: {
+  readonly origin: () => string; readonly action: string; readonly actionToken: string;
+}): boolean {
+  const contentType = request.headers["content-type"];
+  if (request.headers.origin !== options.origin()) json(response, 403, { error: "origin is not the Router dashboard" });
+  else if (request.headers["x-lane-router-action"] !== options.action) json(response, 403, { error: "action header is invalid" });
+  else if (typeof contentType !== "string" || !contentType.toLowerCase().startsWith("application/octet-stream")) json(response, 400, { error: "content-type must be application/octet-stream" });
+  else if (request.headers["x-lane-router-token"] !== options.actionToken) json(response, 403, { error: "action token is invalid" });
+  else return false;
+  return true;
+}
+
 /** Shared browser action checks, in their established order; malformed/large JSON still throws. */
 export async function readPageAction(request: IncomingMessage, response: ServerResponse, options: {
   readonly origin: () => string; readonly action: string; readonly actionToken: string;

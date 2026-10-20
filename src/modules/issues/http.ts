@@ -1,13 +1,16 @@
-import { readFileSync } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createRequire } from "node:module";
-import { json, readPageAction } from "../../process/http-json.js";
+import { json, readPageAction, refusePageUpload } from "../../process/http-json.js";
+import { ATTACHMENT_SIZE_LIMIT, type IssueAttachments } from "./attachments.js";
 import type { IssuesService } from "./service.js";
 import { IssueError, type IssueHistoryQuery, type IssueListQuery } from "./types.js";
 
 /** Presence is assembly; a missing service inside it is a configured module that failed to open. */
 export interface IssuesHttpAssembly {
   readonly service?: IssuesService;
+  /** The files users send; without it the upload and read entries are not served. */
+  readonly attachments?: IssueAttachments;
   readonly readPage?: () => string;
 }
 
@@ -17,6 +20,15 @@ export class IssuesHttp {
   /** Unknown methods and URLs return without consuming a body, including action URLs with queries. */
   async handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    const uploading = request.method === "POST" && request.url === "/issues/api/attachments";
+    const attachment = request.method === "GET" ? /^\/issues\/api\/attachments\/([^/]+)$/u.exec(url.pathname) : null;
+    if (uploading || attachment) {
+      const attachments = this.options.attachments;
+      if (!attachments) { request.resume(); json(response, 404, { error: "not found" }); }
+      else if (uploading) await this.upload(attachments, request, response);
+      else readAttachment(attachments, attachment![1]!, response);
+      return true;
+    }
     const markdownAsset = url.pathname === "/issues/assets/markdown-it.js";
     const detail = /^\/issues\/api\/threads\/([^/]+)$/u.exec(url.pathname);
     const lanes = url.pathname === "/issues/api/lanes";
@@ -52,7 +64,7 @@ export class IssuesHttp {
         }
       } else if (action && body) {
         const { actionToken: _token, ...input } = body;
-        const fields = action === "create" ? ["operationKey", "laneId", "title", "body"] : action === "replies" ? ["operationKey", "body", "questionId"]
+        const fields = action === "create" ? ["operationKey", "laneId", "title", "body", "attachmentIds"] : action === "replies" ? ["operationKey", "body", "questionId", "attachmentIds"]
           : action === "read" ? ["operationKey", "throughSeq"] : ["operationKey", "body"];
         if (Object.keys(input).some(key => !fields.includes(key))) throw new IssueError("INVALID_INPUT", "Unexpected issue action field");
         if (action === "create" || action === "replies") {
@@ -78,6 +90,57 @@ export class IssuesHttp {
     }
     return true;
   }
+
+  /**
+   * `POST /issues/api/attachments`: the body is the file, its name in `x-file-name`, URI-encoded.
+   * A body declared too large is refused before any of it is read; one that only turns out too
+   * large stops being saved the moment it does. Either way the rest is read and dropped, so the
+   * refusal reaches a page still sending.
+   */
+  private async upload(attachments: IssueAttachments, request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (refusePageUpload(request, response, { origin: this.options.origin, actionToken: this.options.actionToken, action: "issues-attach" })) { request.resume(); return; }
+    const header = request.headers["x-file-name"];
+    let name: string;
+    try { if (typeof header !== "string") throw new URIError(); name = decodeURIComponent(header); }
+    catch { request.resume(); return json(response, 400, { error: "x-file-name must be the URI-encoded file name", code: "INVALID_INPUT" }); }
+    const tooLarge = () => json(response, 413, { error: `A file may be at most ${ATTACHMENT_SIZE_LIMIT} bytes`, code: "ATTACHMENT_TOO_LARGE" });
+    if (Number(request.headers["content-length"]) > ATTACHMENT_SIZE_LIMIT) { request.resume(); return tooLarge(); }
+    try { json(response, 200, { result: await attachments.save(name, request.iterator({ destroyOnReturn: false })) }); }
+    catch (error) {
+      request.resume();
+      if (error instanceof IssueError && error.code === "ATTACHMENT_TOO_LARGE") tooLarge();
+      else json(response, 500, { error: error instanceof Error ? error.message : "upload failed" });
+    }
+  }
+}
+
+/**
+ * Files are read by ID whether or not an entry has taken them: the ID is random and known only to
+ * the page and the lane it was sent to. The path comes from the saved row, never from the URL, so
+ * an ID without a row is not found even if its directory is still on disk. Only the four image
+ * types are served as themselves; everything else is a download, and nothing is sniffed.
+ */
+function readAttachment(attachments: IssueAttachments, rawId: string, response: ServerResponse): void {
+  const notFound = () => {
+    response.writeHead(404, { "content-type": "application/json", "x-content-type-options": "nosniff" });
+    response.end(JSON.stringify({ error: "attachment not found" }));
+  };
+  let id: string;
+  try { id = decodeURIComponent(rawId); } catch { return notFound(); }
+  const file = attachments.find(id);
+  if (file === null) return notFound();
+  const download = file.mediaType === "application/octet-stream";
+  const content = createReadStream(file.storedPath);
+  content.once("open", () => {
+    response.writeHead(200, { "content-type": file.mediaType, "x-content-type-options": "nosniff",
+      ...(download ? { "content-disposition": `attachment; filename*=UTF-8''${encodeRfc5987(file.fileName)}` } : {}) });
+    content.pipe(response);
+  });
+  content.once("error", () => { if (!response.headersSent) notFound(); else response.destroy(); });
+}
+
+function encodeRfc5987(value: string): string {
+  return encodeURIComponent(value).replace(/['()*]/gu, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
 function queryFields(params: URLSearchParams, allowed: readonly string[]): void {

@@ -1,5 +1,5 @@
 import type { LaneAccess } from "../../router/lane-access.js";
-import type { IssueDelivery, IssueEntry, IssueListQuery, IssueOperation, IssueQuestion, IssueThread, IssueWakeResult } from "./types.js";
+import type { IssueAttachment, IssueDelivery, IssueEntry, IssueListQuery, IssueOperation, IssueQuestion, IssueThread, IssueWakeResult } from "./types.js";
 
 export interface IssueListRow extends IssueThread {
   readonly waitingUserCount: number;
@@ -45,6 +45,15 @@ export interface IssueStore {
   updateDeliveryHandoff(id: string, handoff: DeliveryHandoff): void;
   /** Persistence primitive only; caller authorization and receipt idempotency belong to the service. */
   updateDeliveryProcessing(id: string, processing: DeliveryProcessing): void;
+  insertAttachment(attachment: IssueAttachment): void;
+  attachment(id: string): IssueAttachment | null;
+  /** Every attachment an issue's entries took, in upload order. */
+  attachmentsOfIssue(issueId: string): readonly IssueAttachment[];
+  /** Gives an unclaimed attachment to an entry; false when it is gone or another entry has it. */
+  claimAttachment(id: string, issueId: string, entryId: string): boolean;
+  unclaimedAttachments(createdBefore: number): readonly IssueAttachment[];
+  /** Removes the row only while no entry has claimed it; true when a row went. */
+  deleteUnclaimedAttachment(id: string): boolean;
   close(): void;
 }
 

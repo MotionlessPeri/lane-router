@@ -209,7 +209,7 @@ export async function runRouterProcess(options: {
     }
     server = new LocalRouterServer({
       tools, applicationTools, codexHost: codexHub, claude: claudeHub, instanceId: randomUUID(),
-      ...(options.issues === false ? {} : { issues: { service: issues?.service } }),
+      ...(options.issues === false ? {} : { issues: { service: issues?.service, attachments: issues?.attachments } }),
       ...(options.issues === false ? {} : { graphs: { service: graphs?.service } }),
       // The opener is a Windows program; elsewhere the entry is not served at all.
       ...(process.platform === "win32" ? { localOpen: { launch: launchLocal } } : {}),

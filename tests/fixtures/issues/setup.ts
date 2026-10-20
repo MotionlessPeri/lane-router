@@ -2,15 +2,19 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { IssuesService, openIssueStore, type IssueWakePort } from "../../../src/modules/issues/index.js";
+import { IssueAttachments, IssuesService, openIssueStore, type IssueWakePort } from "../../../src/modules/issues/index.js";
 import type { RestorePresence } from "../../../src/router/backend.js";
 import type { LaneAccess, LaneAccessFacts, LaneCallerIdentity } from "../../../src/router/lane-access.js";
 import type { CallerContext } from "../../../src/router/types.js";
 
-/** IDs are short and numbered unless `newId` is given, e.g. real UUIDs where a page shortens them. */
-export function setupIssues(options: { newId?: () => string; wake?: IssueWakePort } = {}) {
+/**
+ * IDs are short and numbered unless `newId` is given, e.g. real UUIDs where a page shortens them.
+ * Time ticks by one per read unless `now` is given. Attachments keep their own random IDs.
+ */
+export function setupIssues(options: { newId?: () => string; wake?: IssueWakePort; now?: () => number } = {}) {
   const root = mkdtempSync(join(tmpdir(), "lane-issues-"));
   const path = join(root, "issues.sqlite");
+  const attachmentsRoot = join(root, "issue-attachments");
   let store = openIssueStore(path);
   let tick = 1000;
   let sequence = 0;
@@ -49,14 +53,17 @@ export function setupIssues(options: { newId?: () => string; wake?: IssueWakePor
       }]);
     },
   };
-  const makeService = () => new IssuesService({ store, lanes: access, now: () => ++tick, newId: options.newId ?? (() => `id-${++sequence}`),
+  const now = options.now ?? (() => ++tick);
+  const makeService = () => new IssuesService({ store, lanes: access, now, newId: options.newId ?? (() => `id-${++sequence}`),
     ...(options.wake ? { wake: options.wake } : {}) });
   let service = makeService();
+  const makeAttachments = () => new IssueAttachments({ store, root: attachmentsRoot, now });
+  let attachments = makeAttachments();
   return {
-    root, path, caller, other, access, lanes, identities, addLane, restorePresence,
-    get service() { return service; }, get store() { return store; },
+    root, path, attachmentsRoot, caller, other, access, lanes, identities, addLane, restorePresence,
+    get service() { return service; }, get store() { return store; }, get attachments() { return attachments; },
     beforeAssert(fn: () => void) { beforeAssert = fn; },
-    reopen() { store.close(); store = openIssueStore(path); service = makeService(); },
+    reopen() { store.close(); store = openIssueStore(path); service = makeService(); attachments = makeAttachments(); },
     dispose() { store.close(); rmSync(root, { recursive: true, force: true }); },
   };
 }

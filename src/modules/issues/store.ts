@@ -5,7 +5,7 @@ import Database from "better-sqlite3";
 
 import type { DeliveryHandoff, DeliveryProcessing, IssueListRow, IssueStore } from "./ports.js";
 import { initializeIssueSchema } from "./schema.js";
-import type { IssueDelivery, IssueEntry, IssueListQuery, IssueOperation, IssueQuestion, IssueThread } from "./types.js";
+import type { IssueAttachment, IssueDelivery, IssueEntry, IssueListQuery, IssueOperation, IssueQuestion, IssueThread } from "./types.js";
 
 const THREAD = `id,owner_lane_id AS ownerLaneId,title,origin_kind AS originKind,status,
   created_at AS createdAt,updated_at AS updatedAt,closed_at AS closedAt,closed_by AS closedBy,read_seq AS readSeq,next_seq AS nextSeq`;
@@ -13,6 +13,8 @@ const ENTRY = `id,issue_id AS issueId,seq,kind,author,source,body,related_entry_
   recorded_by_binding_id AS recordedByBindingId,recorded_by_generation AS recordedByGeneration,created_at AS createdAt`;
 const QUESTION = `id,issue_id AS issueId,prompt_entry_id AS promptEntryId,asked_to AS askedTo,status,
   answer_entry_id AS answerEntryId,reason`;
+const ATTACHMENT = `id,issue_id AS issueId,entry_id AS entryId,file_name AS fileName,media_type AS mediaType,size,sha256,
+  stored_path AS storedPath,created_at AS createdAt`;
 const DELIVERY = `id,issue_id AS issueId,entry_id AS entryId,owner_lane_id AS ownerLaneId,body,
   source_kind AS sourceKind,source_origin AS sourceOrigin,request_key AS requestKey,handoff_state AS handoffState,
   core_message_id AS coreMessageId,attempt_count AS attemptCount,next_attempt_at AS nextAttemptAt,
@@ -147,6 +149,31 @@ export class SqliteIssueStore implements IssueStore {
   updateDeliveryProcessing(id: string, processing: DeliveryProcessing): void {
     this.database.prepare(`UPDATE issue_delivery SET processed_at=@processedAt,processed_by_binding_id=@processedByBindingId,
       processed_by_generation=@processedByGeneration WHERE id=@id`).run({ id, ...processing });
+  }
+
+  insertAttachment(attachment: IssueAttachment): void {
+    this.database.prepare(`INSERT INTO issue_attachment(id,issue_id,entry_id,file_name,media_type,size,sha256,stored_path,created_at)
+      VALUES(@id,@issueId,@entryId,@fileName,@mediaType,@size,@sha256,@storedPath,@createdAt)`).run(attachment);
+  }
+
+  attachment(id: string): IssueAttachment | null {
+    return this.database.prepare(`SELECT ${ATTACHMENT} FROM issue_attachment WHERE id=?`).get(id) as IssueAttachment | undefined ?? null;
+  }
+
+  attachmentsOfIssue(issueId: string): readonly IssueAttachment[] {
+    return this.database.prepare(`SELECT ${ATTACHMENT} FROM issue_attachment WHERE issue_id=? ORDER BY created_at,id`).all(issueId) as IssueAttachment[];
+  }
+
+  claimAttachment(id: string, issueId: string, entryId: string): boolean {
+    return this.database.prepare("UPDATE issue_attachment SET issue_id=?,entry_id=? WHERE id=? AND entry_id IS NULL").run(issueId, entryId, id).changes === 1;
+  }
+
+  unclaimedAttachments(createdBefore: number): readonly IssueAttachment[] {
+    return this.database.prepare(`SELECT ${ATTACHMENT} FROM issue_attachment WHERE entry_id IS NULL AND created_at<? ORDER BY created_at,id`).all(createdBefore) as IssueAttachment[];
+  }
+
+  deleteUnclaimedAttachment(id: string): boolean {
+    return this.database.prepare("DELETE FROM issue_attachment WHERE id=? AND entry_id IS NULL").run(id).changes === 1;
   }
 
   close(): void { if (this.database.open) this.database.close(); }

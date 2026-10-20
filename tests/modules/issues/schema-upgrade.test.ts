@@ -6,17 +6,26 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, expect, test } from "vitest";
 
-import { openIssueStore } from "../../../src/modules/issues/index.js";
+import { ISSUE_SCHEMA_VERSION, openIssueStore } from "../../../src/modules/issues/index.js";
 
-// Spec 2026-10-20-issue-lane-close-and-default-publish.md, acceptance 5: v1 databases become v2 in
-// place after a backup. The v1 fixture is the schema as v1 shipped, frozen in a file, not rebuilt
-// from the code under test. v1 ran that SQL from a template literal, whose line ends are always LF,
-// so the file is read that way whatever line ends a checkout gave it; the SQL SQLite keeps is then
-// the same text a real v1 database holds.
-const V1 = readFileSync(new URL("../../fixtures/issues/v1-schema.sql", import.meta.url), "utf8").replace(/\r\n/gu, "\n");
+// Spec 2026-10-20-issue-lane-close-and-default-publish.md, acceptance 5, and 2026-10-20-issue-files.md,
+// acceptance 6: older databases become the current version in place after a backup. The fixtures
+// are each version as it shipped, frozen in files, not rebuilt from the code under test: v1's
+// schema, and the statements that made v2 out of it. v1 ran its SQL from a template literal, whose
+// line ends are always LF, so the files are read that way whatever line ends a checkout gave them;
+// the SQL SQLite keeps is then the same text a real database of that version holds.
+const fixture = (name: string) => readFileSync(new URL(`../../fixtures/issues/${name}`, import.meta.url), "utf8").replace(/\r\n/gu, "\n");
+const V1 = fixture("v1-schema.sql");
+const V2_FROM_V1 = fixture("v2-from-v1.sql");
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const hash = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
+
+/** A v2 database as the Router left it: the v1 one below, as v2's upgrade made it. */
+function v2Database(alter?: string) {
+  const v1 = v1Database(`${V2_FROM_V1}\n${alter ?? ""}`);
+  return { ...v1, backup: `${v1.path}.v2.bak` };
+}
 
 /** A v1 database as the Router left it: one issue open and waiting on its lane, one the user ended. */
 function v1Database(alter?: string) {
@@ -42,28 +51,35 @@ function v1Database(alter?: string) {
 }
 
 const TABLES = ["issue_delivery", "issue_entry", "issue_operation", "issue_question", "issue_thread"];
-/** Every row of every table, without the column v2 adds, so v1 and v2 rows compare directly. */
-function rows(path: string) {
+/** Every row of the tables v1 had; without the column v2 adds unless asked, so v1 rows compare directly. */
+function rows(path: string, closedBy = false) {
   const database = new Database(path, { readonly: true });
   try {
     return Object.fromEntries(TABLES.map(table => [table, (database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all() as Record<string, unknown>[])
-      .map(({ closed_by: _closedBy, ...row }) => row)]));
+      .map(({ closed_by, ...row }) => closedBy && table === "issue_thread" ? { ...row, closed_by } : row)]));
   } finally { database.close(); }
 }
 function facts(path: string) {
   const database = new Database(path, { readonly: true });
   try {
+    const has = (table: string, column?: string) => Boolean(column
+      ? database.prepare("SELECT 1 FROM pragma_table_info(?) WHERE name=?").get(table, column)
+      : database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table));
     return {
       version: (database.prepare("SELECT version FROM issue_schema_version").get() as { version: number }).version,
-      closedBy: database.prepare("SELECT name FROM pragma_table_info('issue_thread') WHERE name='closed_by'").get()
-        ? database.prepare("SELECT id,status,closed_by AS closedBy FROM issue_thread ORDER BY id").all() : null,
+      closedBy: has("issue_thread", "closed_by") ? database.prepare("SELECT id,status,closed_by AS closedBy FROM issue_thread ORDER BY id").all() : null,
+      attachments: has("issue_attachment") ? database.prepare("SELECT count(*) AS count FROM issue_attachment").get() : null,
       foreignKeys: database.pragma("foreign_key_check"),
       schema: database.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all(),
     };
   } finally { database.close(); }
 }
 
-test("a v1 database is backed up, then upgraded in place to v2 with every row kept and its ended issues ended by the user", () => {
+test("the current version is 3", () => {
+  expect(ISSUE_SCHEMA_VERSION).toBe(3);
+});
+
+test("a v1 database is backed up, then upgraded in place to the current version with every row kept and its ended issues ended by the user", () => {
   const { path, backup } = v1Database();
   const before = rows(path);
   const store = openIssueStore(path);
@@ -73,8 +89,9 @@ test("a v1 database is backed up, then upgraded in place to v2 with every row ke
   } finally { store.close(); }
 
   const upgraded = facts(path);
-  expect(upgraded.version).toBe(2);
+  expect(upgraded.version).toBe(ISSUE_SCHEMA_VERSION);
   expect(upgraded.closedBy).toEqual([{ id: "closed-1", status: "closed", closedBy: "user" }, { id: "open-1", status: "open", closedBy: null }]);
+  expect(upgraded.attachments).toEqual({ count: 0 });
   expect(upgraded.foreignKeys).toEqual([]);
   expect(rows(path)).toEqual(before);
 
@@ -82,37 +99,60 @@ test("a v1 database is backed up, then upgraded in place to v2 with every row ke
   const kept = facts(backup);
   expect(kept.version).toBe(1);
   expect(kept.closedBy).toBeNull();
+  expect(kept.attachments).toBeNull();
   expect(rows(backup)).toEqual(before);
 });
 
-test("a v2 database opened again is not upgraded again, and its backup is neither replaced nor made anew", () => {
-  const { path, backup } = v1Database();
+test("a v2 database is backed up as v2, then upgraded in place to the current version with every row kept", () => {
+  const { path, backup } = v2Database();
+  const before = rows(path, true);
+  expect(facts(path)).toMatchObject({ version: 2, attachments: null });
   openIssueStore(path).close();
-  const kept = hash(backup), upgraded = facts(path);
-  openIssueStore(path).close();
-  expect(hash(backup)).toBe(kept);
-  expect(facts(path)).toEqual(upgraded);
-  rmSync(backup);
-  openIssueStore(path).close();
-  expect(existsSync(backup)).toBe(false);
+  expect(facts(path)).toMatchObject({ version: ISSUE_SCHEMA_VERSION, attachments: { count: 0 }, foreignKeys: [] });
+  expect(rows(path, true)).toEqual(before);
+  expect(facts(backup)).toMatchObject({ version: 2, attachments: null });
+  expect(rows(backup, true)).toEqual(before);
+  expect(existsSync(`${path}.v1.bak`)).toBe(false);
 });
 
-test("a fresh database is v2 and has exactly the structure an upgraded one has", () => {
-  const { path } = v1Database();
-  openIssueStore(path).close();
-  const fresh = join(roots[0]!, "fresh.sqlite");
+test("an upgraded database opened again is not upgraded again, and its backup is neither replaced nor made anew", () => {
+  for (const made of [v1Database, v2Database]) {
+    const { path, backup } = made();
+    openIssueStore(path).close();
+    const kept = hash(backup), upgraded = facts(path);
+    openIssueStore(path).close();
+    expect(hash(backup), made.name).toBe(kept);
+    expect(facts(path), made.name).toEqual(upgraded);
+    rmSync(backup);
+    openIssueStore(path).close();
+    expect(existsSync(backup), made.name).toBe(false);
+  }
+});
+
+test("a fresh database is the current version and has exactly the structure an upgraded one has, from v1 or from v2", () => {
+  const fresh = join(v1Database().root, "fresh.sqlite");
   openIssueStore(fresh).close();
-  expect(facts(fresh).version).toBe(2);
-  expect(facts(fresh).schema).toEqual(facts(path).schema);
+  expect(facts(fresh).version).toBe(ISSUE_SCHEMA_VERSION);
+  for (const made of [v1Database, v2Database]) {
+    const { path } = made();
+    openIssueStore(path).close();
+    expect(facts(fresh).schema, made.name).toEqual(facts(path).schema);
+  }
 });
 
-test("an altered v1 database and an unknown version are refused untouched, with no backup", () => {
-  for (const alter of ["DROP INDEX issue_question_status_idx", "UPDATE issue_schema_version SET version=3", "UPDATE issue_schema_version SET version=99"]) {
-    const { path, backup } = v1Database(alter);
+test("an altered older database and an unknown version are refused untouched, with no backup", () => {
+  for (const [made, alter] of [
+    [v1Database, "DROP INDEX issue_question_status_idx"], [v1Database, "UPDATE issue_schema_version SET version=99"],
+    [v2Database, "DROP INDEX issue_question_status_idx"], [v2Database, "UPDATE issue_schema_version SET version=99"],
+    // v1's structure claiming to be v2 is not v2.
+    [v1Database, "UPDATE issue_schema_version SET version=2"],
+  ] as const) {
+    const { path, backup } = made(alter);
     const original = hash(path);
-    expect(() => openIssueStore(path).close(), alter).toThrow();
+    expect(() => openIssueStore(path).close(), `${made.name} ${alter}`).toThrow();
     expect(hash(path), alter).toBe(original);
     expect(existsSync(backup), alter).toBe(false);
+    expect(existsSync(`${path}.v2.bak`), alter).toBe(false);
   }
 });
 

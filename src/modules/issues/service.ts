@@ -2,10 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 
 import type { ActiveLane, LaneAccessFacts, LaneCallerIdentity } from "../../router/lane-access.js";
 import type { CallerContext } from "../../router/types.js";
+import { ATTACHMENTS_PER_ENTRY } from "./attachments.js";
 import type { IssuesServiceOptions, IssueStore } from "./ports.js";
 import {
   IssueError,
-  type AppendIssueInput, type AttentionReason, type CloseIssueInput, type CreateIssueInput, type IssueDetail,
+  type AppendIssueInput, type AttentionReason, type CloseIssueInput, type CreateIssueInput, type IssueAttachment, type IssueAttachmentInfo, type IssueDetail,
   type IssueEntry, type IssueEntryResult, type IssueHistoryQuery, type IssueList,
   type IssueCloser, type IssueListQuery, type IssueOwner, type IssuePresence, type IssueProcessedResult, type IssueQuestion, type IssueThread,
   type IssueWakeResult, type LaneCloseIssueInput, type PublishIssueInput, type ReadIssueInput, type RecordProcessedInput, type ReplyIssueInput,
@@ -157,7 +158,11 @@ export class IssuesService {
       const thread = this.requireThread(issueId);
       if (afterSeq >= thread.nextSeq) invalid("History cursor exceeds this issue's saved sequence");
       const page = this.store.entries(issueId, afterSeq, limit + 1);
-      const entries = page.slice(0, limit);
+      const files = new Map<string, IssueAttachmentInfo[]>();
+      for (const { entryId, id, fileName, size, mediaType } of this.store.attachmentsOfIssue(issueId)) {
+        files.set(entryId!, [...files.get(entryId!) ?? [], { id, fileName, size, mediaType }]);
+      }
+      const entries = page.slice(0, limit).map((entry) => files.has(entry.id) ? { ...entry, attachments: files.get(entry.id)! } : entry);
       return { thread, owner: this.owner(thread.ownerLaneId), entries, questions: this.store.questions(issueId),
         deliveries: this.store.deliveries(issueId), displayedThroughSeq: entries.at(-1)?.seq ?? afterSeq,
         hasMore: page.length > limit };
@@ -170,12 +175,14 @@ export class IssuesService {
    * is the first entry's author; `originKind` keeps the schema's existing values.
    */
   create(input: CreateIssueInput): IssueEntryResult {
-    fields(input, ["operationKey", "laneId", "title", "body"]);
+    fields(input, ["operationKey", "laneId", "title", "body", "attachmentIds"]);
     const operationKey = text(input.operationKey, "operationKey");
     const laneId = text(input.laneId, "laneId");
     const title = text(input.title, "title").trim();
-    const body = text(input.body, "body");
-    return this.store.transaction(() => this.operation("user:local", "create", operationKey, { laneId, title, body }, () => {
+    const attachmentIds = attachmentIdsOf(input.attachmentIds);
+    const body = userText(input.body, attachmentIds);
+    const payload = { laneId, title, body: input.body, ...(attachmentIds === null ? {} : { attachmentIds }) };
+    return this.store.transaction(() => this.operation("user:local", "create", operationKey, payload, () => {
       const lane = this.options.lanes.readLane(laneId);
       // No conversation means nothing would ever read the delivery, and nothing could be woken.
       if (lane === null || lane.archivedAt !== null || lane.binding === null) {
@@ -186,10 +193,11 @@ export class IssuesService {
         status: "open", createdAt: now, updatedAt: now, closedAt: null, closedBy: null, readSeq: 0, nextSeq: 1 };
       this.store.insertThread(thread);
       const entry = this.addEntry(thread.id, "question", "user", "user_page", body, null, null);
+      const files = this.claim(entry, attachmentIds);
       const question = this.addQuestion(entry, "lane", "waiting_lane");
       const deliveryId = this.deliver(thread, entry, question.id, {
         opening: "用户在问答页新开了一个问答。这是用户本人的话，等同于在 TUI 里对你说的，按你处理用户指令的方式处理，不需要回 TUI 确认。答复写在这条问答里。",
-        entryLabel: "条目", context: [`用户的话：\n${body}`],
+        entryLabel: "条目", context: [`用户的话：\n${body}`, ...fileList(files)],
       });
       return { ...result(entry, question.id), deliveryId };
     }));
@@ -218,12 +226,15 @@ export class IssuesService {
    * The reopening is recorded before the reply and told to the lane at the head of its letter.
    */
   reply(input: ReplyIssueInput): IssueEntryResult {
-    fields(input, ["operationKey", "issueId", "body", "questionId"]);
+    fields(input, ["operationKey", "issueId", "body", "questionId", "attachmentIds"]);
     const operationKey = text(input.operationKey, "operationKey");
     const issueId = text(input.issueId, "issueId");
-    const body = text(input.body, "body");
+    const attachmentIds = attachmentIdsOf(input.attachmentIds);
+    const body = userText(input.body, attachmentIds);
     const questionId = optionalId(input.questionId);
-    return this.userWrite("reply", operationKey, { issueId, body, questionId }, issueId, () => {
+    // Files count toward the operation only when sent, so replies saved before they existed replay as they were.
+    const payload = { issueId, body: input.body, questionId, ...(attachmentIds === null ? {} : { attachmentIds }) };
+    return this.userWrite("reply", operationKey, payload, issueId, () => {
       const thread = this.requireThread(issueId);
       this.requireActiveLane(thread.ownerLaneId);
       const question = questionId === null ? null : this.requireQuestion(issueId, questionId);
@@ -233,6 +244,7 @@ export class IssuesService {
         this.addEntry(issueId, "event", "user", "user_page", "用户回复，议题重新打开", null, null);
       }
       const entry = this.addEntry(issueId, "reply", "user", "user_page", body, question?.promptEntryId ?? null, null);
+      const files = this.claim(entry, attachmentIds);
       const round = this.userTurn(entry, question);
       const prompt = question === null ? null : this.store.entry(issueId, question.promptEntryId);
       const deliveryId = this.deliver(thread, entry, round.id, {
@@ -240,7 +252,7 @@ export class IssuesService {
           ...(reopened ? [`这条问答原先已结束（由${thread.closedBy === "lane" ? " lane " : "用户"}结束），用户的回复让它重新打开了。`] : []),
           "用户已在议题页面回复，无需回 TUI 重复。请在原任务内继续处理。",
         ].join("\n"),
-        entryLabel: "回复", context: [...(prompt ? [`关联问题：\n${prompt.body}`] : []), `用户回复：\n${body}`],
+        entryLabel: "回复", context: [...(prompt ? [`关联问题：\n${prompt.body}`] : []), `用户回复：\n${body}`, ...fileList(files)],
       });
       return { ...result(entry, round.id), deliveryId };
     }, true);
@@ -384,6 +396,14 @@ export class IssuesService {
     return deliveryId;
   }
 
+  /** Gives the entry its uploads; one that is gone or already sent refuses the whole write. */
+  private claim(entry: IssueEntry, attachmentIds: readonly string[] | null): readonly IssueAttachment[] {
+    return (attachmentIds ?? []).map((id) => {
+      if (!this.store.claimAttachment(id, entry.issueId, entry.id)) reference(`Attachment ${id} is missing, was cleaned up, or was already sent`);
+      return this.store.attachment(id)!;
+    });
+  }
+
   private addQuestion(prompt: IssueEntry, askedTo: IssueQuestion["askedTo"], status: IssueQuestion["status"], answerEntryId: string | null = null): IssueQuestion {
     const question: IssueQuestion = { id: this.newId(), issueId: prompt.issueId, promptEntryId: prompt.id, askedTo, status, answerEntryId, reason: null };
     this.store.insertQuestion(question);
@@ -439,6 +459,30 @@ function text(value: unknown, name: string): string {
 }
 
 function optionalId(value: unknown): string | null { return value === undefined ? null : text(value, "questionId"); }
+function attachmentIdsOf(value: unknown): readonly string[] | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.some((id) => typeof id !== "string" || id.trim().length === 0)) invalid("attachmentIds must be a list of attachment IDs");
+  if (value.length > ATTACHMENTS_PER_ENTRY) invalid(`At most ${ATTACHMENTS_PER_ENTRY} files may be sent at once`);
+  if (new Set(value).size !== value.length) invalid("attachmentIds must not repeat");
+  return value as string[];
+}
+/** What the user wrote; files with no text are saved as a line saying how many were sent. */
+function userText(body: unknown, attachmentIds: readonly string[] | null): string {
+  if (typeof body !== "string") invalid("body must be a string");
+  if (body.trim().length > 0) return body;
+  if (attachmentIds !== null && attachmentIds.length > 0) return `（发送了 ${attachmentIds.length} 个文件）`;
+  return invalid("A reply needs text or files");
+}
+/** The letter's paragraph on the files, with where each is saved so the lane can read it directly. */
+function fileList(files: readonly IssueAttachment[]): string[] {
+  if (files.length === 0) return [];
+  return [[`附件（${files.length} 个，已保存在本机，可直接读取）：`, ...files.map((file) => `- ${file.fileName}（${byteSize(file.size)}）：${file.storedPath}`)].join("\n")];
+}
+function byteSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  const [value, unit] = size < 1024 * 1024 ? [size / 1024, "KB"] : [size / (1024 * 1024), "MB"];
+  return `${value.toFixed(1).replace(/\.0$/u, "")} ${unit}`;
+}
 function integer(value: unknown, name: string, minimum: number): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) invalid(`${name} must be an integer >= ${minimum}`);
   return value;
