@@ -10,8 +10,10 @@ import { openIssueStore } from "../../../src/modules/issues/index.js";
 
 // Spec 2026-10-20-issue-lane-close-and-default-publish.md, acceptance 5: v1 databases become v2 in
 // place after a backup. The v1 fixture is the schema as v1 shipped, frozen in a file, not rebuilt
-// from the code under test.
-const V1 = readFileSync(new URL("../../fixtures/issues/v1-schema.sql", import.meta.url), "utf8");
+// from the code under test. v1 ran that SQL from a template literal, whose line ends are always LF,
+// so the file is read that way whatever line ends a checkout gave it; the SQL SQLite keeps is then
+// the same text a real v1 database holds.
+const V1 = readFileSync(new URL("../../fixtures/issues/v1-schema.sql", import.meta.url), "utf8").replace(/\r\n/gu, "\n");
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const hash = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
