@@ -14,7 +14,7 @@
 |---|---|
 | 活跃 lane | 有 active binding、未归档的 lane。 |
 | 后端 | `claude` / `codex`。zcode、dsh 首版不列，接口的枚举可扩。 |
-| 标准信 | 固定正文的用户来信：走 `UserMessageDelivery.deliverUserMessage`（`tell` 底下那层），source `{kind:"user", origin:"user:continue-after-switch"}`；**不套 `tell` 的讨论模板**。 |
+| 标准信 | 固定正文的用户来信：走 `UserMessageDelivery.deliverUserMessage`（`tell` 底下那层），source `{kind:"user", origin:"continue-after-switch"}`（origin 只允许 `a-z0-9-`，lane 看到的发件人是 `user:continue-after-switch`）；**不套 `tell` 的讨论模板**。 |
 | 账号后台 | `src/accounts/http-server.ts`，`http://127.0.0.1:47839/` 的独立进程，提供账号页。 |
 
 ## 三、取证
@@ -52,7 +52,7 @@
 > 切号后继续：用户已手动切换 <后端> 账号，额度已恢复。
 > 若你上一回合因额度 / 容量失败而停下，请从中断处继续原任务；若没有停下，忽略本信并 ack。
 
-source `{ kind: "user", origin: "user:continue-after-switch" }`；不新造消息类型、不加 subject 字段（通知摘要取正文首行）。
+source `{ kind: "user", origin: "continue-after-switch" }`（`senderLabel` 只收 1–32 个 `a-z0-9-`，所以不能带 `user:` 前缀；lane 看到的发件人是 `user:continue-after-switch`）；两行不重复同一句；不新造消息类型、不加 subject 字段（通知摘要取正文首行）。
 
 ### 4.3 入口
 
@@ -91,7 +91,7 @@ source `{ kind: "user", origin: "user:continue-after-switch" }`；不新造消�
 自动测试（node 组，dashboard / 投递既有夹具）：
 
 1. `backend=claude` 只给 claude 后端的活跃 lane 发；codex 后端、已归档、无绑定的不发；返回的 `notified` + `queued` 与实际登记的信一致，`skipped` 列出未发的及原因。
-2. 信正文逐字等于 4.2（两行），source origin 为 `user:continue-after-switch`；**不含** `tell` 模板的任何句子。
+2. 信正文逐字等于 4.2（两行），发件人为 `user:continue-after-switch`；**不含** `tell` 模板的任何句子。
 3. 看板路由缺 / 错 `actionToken` → 拒绝，不发任何信；本机路由带 Origin 的请求 → 拒绝（`refuseWebPage`）；两条路由对同一 body 的结果相同。
 4. 60 秒内对同一后端第二次调用不重复发（`notified` / `queued` 为空，`skipped` 标 `deduplicated`）；时钟推过 60 秒再调用照发；不同后端互不影响。
 5. 在线 lane：pending 目录有文件且收到通知帧，进 `notified`；离线 lane：pending 目录有文件、**无**通知帧，进 `queued`。
