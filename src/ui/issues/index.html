@@ -237,9 +237,10 @@
   // A whole drive-letter absolute path, X:\… or X:/…; network, device and relative paths never match.
   const DRIVE_PATH = /^[A-Za-z]:[\\/][^<>:"|?*\u0000-\u001f]*$/;
   // The same in running text: no spaces, not the tail of a word or a URL, and stopping at a full-width
-  // sentence mark. Punctuation it ends with belongs to the sentence.
+  // sentence mark. Punctuation it ends with belongs to the sentence, and so does a closing backtick:
+  // people wrap paths in them out of habit even where nothing renders them.
   const TEXT_PATH = /(?<![\w\\/:.%~+-])[A-Za-z]:[\\/][^\s<>:"|?*。，、；：！？]*/g;
-  const SENTENCE_END = /[.,;!?)\]}'’”）」』》】]+$/;
+  const SENTENCE_END = /[.,;!?)\]}'’”）」』》】`]+$/;
   /**
    * Paths in inline code (less any ":line" or ":line:column" after them) and in running text become
    * links the Router opens. Code blocks are left as text, to be copied.

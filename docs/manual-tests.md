@@ -368,14 +368,13 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
 需求与设计见 `docs/superpowers/specs/2026-10-20-issue-user-text-plain.md`。
 
 - 作者是用户的条目，正文按纯文本显示，不经过 Markdown：页面回复、新问答的正文、lane 记录的 TUI 原话（`originalQuestion` 和 `tui_user`）。`*`、`#`、反引号、`<b>` 这些都照原样显示，换行、连续空格和行首空格也保留。
-- 纯文本里的本机路径照样能点开。路径要写成不含空格的样子。
-- 已知不足：用户习惯性地用反引号把路径包起来时，结尾那个反引号会被算进路径，点了提示「文件已不在」。
+- 纯文本里的本机路径照样能点开。路径要写成不含空格的样子。用反引号包起来也行：结尾的反引号和句末标点一样留在链接外面。代价是以反引号结尾的文件名点不开。
 - lane 写的条目和系统记录不变。存储、接口和投递给 lane 的正文都不变。Markdown 组件加载失败时，所有条目照旧按原文显示。
 
 自动测试：
 - `tests/modules/issues/ui.test.ts` 的「plain text 1–5」和改写过的「Markdown replies are sent and stored verbatim…」，覆盖设计稿第五节第 1–5、7 条。
-- `tests/modules/issues/path-links-browser.test.ts` 新增一条，覆盖第 6 条。
-- 第六节的四个变异各自让预定的用例变红。
+- `tests/modules/issues/path-links-browser.test.ts` 新增一条，覆盖第 6 条；用户回复里的路径用反引号包着。
+- 第六节的五个变异各自让预定的用例变红。
 
 ### lane 结束问答、回复即重开、默认发问答
 

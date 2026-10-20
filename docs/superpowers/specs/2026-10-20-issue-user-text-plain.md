@@ -41,9 +41,10 @@
 
 - `entryBody(text)` 加一个参数，表示按纯文本显示。`entryArticle` 传 `entry.author === "user"`。
 - 纯文本分支：加 `plain-text` 类，用 `textContent` 写入正文，再调用 `linkLocalPaths(body)`。纯文本里没有 `pre`，所以也没有复制按钮。
-- `linkLocalPaths` 不改：
+- `linkLocalPaths` 只改一处：`SENTENCE_END` 加上反引号。
   - 正文里没有 `code` 元素，处理行内代码的那一步自然不触发；
   - 处理文字的那一步按现有的 `TEXT_PATH` 找路径。
+  - 用户习惯用反引号包路径；开头的反引号不影响匹配，结尾的反引号要去掉。代价是以反引号结尾的文件名点不开，这种文件名几乎没有。
 - 已知限制：`TEXT_PATH` 只认不含空格的路径。用户在纯文本里写含空格的路径，不会变成链接。Markdown 时可以用反引号把这种路径包起来，纯文本没有这个办法。本稿接受这一点，不另加规则。
 - Markdown 组件加载失败时的回退照旧：所有条目都按纯文本显示，并显示提示条。
 
@@ -76,6 +77,7 @@
 5. **用户条目里的路径能点。** 用户回复里写 `E:\a\b.md` 和 `E:/a/c/`：
    - 两处都变成 `.local-path` 按钮；
    - 按钮外的文字和原文一致，句末标点不算进路径。
+   - 用户写 `` 看 `E:\a\b.md`。 ``：得到一个 `.local-path`，文字是 `E:\a\b.md`，两个反引号和句号都留在链接外面。
 6. **点击能打开。** 浏览器组的 `path-links-browser.test.ts` 加一条：点用户回复里的路径按钮，发出 `open-local-path` 请求，路径正确。
 7. **改写现有用例。** `Markdown replies are sent and stored verbatim before the saved history is rendered` 改成断言回复按原文显示，没有 `strong` 和 `pre`。「发送和存储都逐字不变」的那两条断言保留。
 8. `npm run typecheck`、`npm test` 全部通过。
@@ -88,6 +90,7 @@
   - 纯文本分支不调用 `linkLocalPaths` → 5 变红
   - 纯文本分支用 `innerHTML` 写入 → 1 变红
   - 所有条目都按纯文本显示 → 2 变红
+  - `SENTENCE_END` 不含反引号 → 5 变红
 
 ## 七、边界
 

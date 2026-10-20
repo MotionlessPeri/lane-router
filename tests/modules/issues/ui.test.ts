@@ -239,6 +239,19 @@ test("plain text 5: local paths in the user's plain text become links, with the 
   expect([...body.children].every((child: any) => child.classList.contains("local-path"))).toBe(true);
 });
 
+test("plain text 5: a path the user wrapped in backticks out of habit opens without them", async () => {
+  const f = await boot(); await f.selected(f.first.issueId);
+  const typed = "看 `E:\\a\\b.md`。";
+  f.change("#reply-body", typed); f.click("#send-reply");
+  await vi.waitFor(() => expect(f.x.service.detail(f.first.issueId).entries.at(-1)?.body).toBe(typed));
+  const { seq } = f.x.service.detail(f.first.issueId).entries.at(-1)!;
+  await vi.waitFor(() => expect(entryBodyOf(f, seq)?.querySelectorAll(".local-path").length).toBe(1));
+  const body = entryBodyOf(f, seq);
+  expect(body.querySelector(".local-path").textContent).toBe("E:\\a\\b.md");
+  expect(body.textContent).toBe(typed);
+  expect([...body.childNodes].map((child: any) => child.textContent)).toEqual(["看 `", "E:\\a\\b.md", "`。"]);
+});
+
 test("Markdown cannot activate raw HTML, executable links or automatic image loads", async () => {
   const hostile = [
     '<img src=x onerror="bad()"><script>bad()</script>',

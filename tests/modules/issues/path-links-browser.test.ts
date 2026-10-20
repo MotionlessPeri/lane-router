@@ -57,8 +57,8 @@ async function open() {
   ].join("\n");
   const x = setupIssues(); cleanup.push(() => x.dispose());
   const issue = x.service.publish(x.caller, { operationKey: `paths-${randomUUID()}`, kind: "answer", title: "路径", originalQuestion: "文件在哪", body: laneBody });
-  // The user's own text is plain, so a path in it is just written out.
-  x.service.reply({ operationKey: `reply-${randomUUID()}`, issueId: issue.issueId, body: "我这边是 " + join(root, "notes.md") + "，你看看。" });
+  // The user's own text is plain; the backticks around the path are habit and stay text.
+  x.service.reply({ operationKey: `reply-${randomUUID()}`, issueId: issue.issueId, body: "我这边是 `" + join(root, "notes.md") + "`，你看看。" });
   const launches: Array<{ command: string; args: readonly string[]; env: Readonly<Record<string, string>> }> = [];
   const launch: LocalLaunch = async (command, args, env) => { launches.push({ command, args, env }); };
   const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: randomUUID(), issues: { service: x.service }, localOpen: { launch } });
