@@ -120,6 +120,62 @@ h1 {
   overflow:hidden;
   white-space:nowrap;
   text-overflow:ellipsis}
+.outline {
+  flex:none;
+  padding:16px 24px 12px;
+  border-bottom:1px solid #233b48}
+.outline-head {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:8px;
+  margin-bottom:10px;
+  font-size:10px;
+  letter-spacing:2px;
+  color:#629aab}
+.outline-head span {
+  display:flex;
+  gap:6px}
+.outline-head button {
+  font-size:11px;
+  letter-spacing:0;
+  padding:4px 8px}
+/* Its own scroll area, so a long outline never pushes the details off screen. */
+.outline-tree {
+  list-style:none;
+  margin:0;
+  padding:0;
+  max-height:34dvh;
+  overflow:auto}
+.outline-row {
+  display:flex;
+  align-items:center;
+  min-width:0}
+.outline-row button {
+  border:0;
+  background:transparent;
+  padding:3px 4px}
+.outline-toggle,.outline-leaf {
+  flex:none;
+  width:22px;
+  text-align:center;
+  color:#78b4b7}
+.outline-leaf {
+  color:#4f7888}
+.outline-name {
+  flex:1;
+  min-width:0;
+  text-align:left;
+  font-size:13px;
+  color:#c3d7de;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap}
+.outline-row.group .outline-name {
+  color:#9fd8cf}
+.outline-row.selected .outline-name {
+  background:#1d3a46;
+  color:#eaf7f5}
 .details {
   padding:24px;
   flex:1}
@@ -396,6 +452,8 @@ header {
   padding:10px}
 .details,.search {
   padding:18px}
+.outline {
+  padding:14px 18px 10px}
 .graph-heading {
   gap:8px}
 h1 {
@@ -422,6 +480,8 @@ header>button {
   padding:7px}
 .details,.search {
   padding:14px}
+.outline {
+  padding:12px 14px 8px}
 h2 {
   font-size:20px}
 }

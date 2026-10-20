@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { ReactFlow, Background, Controls, Handle, Position, MiniMap, applyNodeChanges, type Node, type NodeProps, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { GraphDocument } from "../../modules/graphs/document.js";
-import { groupDepth, projectGraph, revealPath, type ViewNode } from "./model.js";
+import { allGroups, autoExpanded, outlineRows, projectGraph, revealPath, revealWithin, toggleGroup, type ViewNode } from "./model.js";
 import { arrangeGraph, avoidOverlaps, nodeSize, type Point } from "./layout.js";
 import "./styles.css";
 
@@ -67,6 +67,18 @@ function Canvas(props: { graph: GraphDocument; expanded: Set<string>; focus: str
   </ReactFlow>;
 }
 
+function Outline(props: { graph: GraphDocument; expanded: ReadonlySet<string>; selected: string | null;
+  toggle: (id: string) => void; reveal: (id: string) => void; expandAll: () => void; collapseAll: () => void }) {
+  const rows = useMemo(() => outlineRows(props.graph, props.expanded), [props.graph, props.expanded]);
+  return <section className="outline" aria-label="大纲">
+    <div className="outline-head">大纲<span><button onClick={props.expandAll}>全部展开</button><button onClick={props.collapseAll}>全部收起</button></span></div>
+    <ul className="outline-tree">{rows.map(row => <li key={row.id} data-outline-id={row.id} className={`outline-row ${row.group ? "group" : "concept"}${row.id === props.selected ? " selected" : ""}`} style={{ paddingLeft: row.depth * 14 }}>
+      {row.group ? <button className="outline-toggle" aria-expanded={row.open} aria-label={`${row.open ? "收起" : "展开"} ${row.label}`} onClick={() => props.toggle(row.id)}>{row.open ? "▾" : "▸"}</button>
+        : <span className="outline-leaf" aria-hidden="true">·</span>}
+      <button className="outline-name" title={row.label} onClick={() => props.reveal(row.id)}>{row.label}</button></li>)}</ul>
+  </section>;
+}
+
 function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null); const [error, setError] = useState(""); const [loading, setLoading] = useState(false);
   const [refresh, setRefresh] = useState(0); const [selected, setSelected] = useState<string | null>(null);
@@ -87,10 +99,13 @@ function App() {
   const graph = snapshot?.document;
   const expanded = useMemo(() => {
     // Moving the camera in manual mode must not rebuild or remeasure the graph.
-    return auto && graph ? new Set(graph.groups.filter(group => zoom >= threshold + groupDepth(graph, group.id) * step).map(group => group.id)) : manualExpanded;
+    return auto && graph ? autoExpanded(graph, zoom, threshold, step) : manualExpanded;
   }, [auto, graph, zoom, threshold, step, manualExpanded, focus]);
-  const toggle = useCallback((id: string) => { if (!graph?.groups.some(group => group.id === id)) return; setAuto(false); setExpanded(current => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; }); }, [graph]);
-  const reveal = (id: string) => { if (!graph) return; setAuto(false); setFocus(null); setExpanded(revealPath(graph, id)); setSelected(id); setQuery(""); };
+  // Manual changes start from what the canvas shows, so leaving zoom expansion never jumps back to an older set.
+  const toggle = useCallback((id: string) => { if (!graph?.groups.some(group => group.id === id)) return; setAuto(false); setExpanded(toggleGroup(expanded, id)); }, [graph, expanded]);
+  const reveal = (id: string) => { if (!graph) return; setAuto(false); setFocus(null); setExpanded(revealWithin(graph, expanded, id)); setSelected(id); setQuery(""); };
+  const expandAll = () => { if (!graph) return; setAuto(false); setFocus(null); setExpanded(allGroups(graph)); fit(value => value + 1); };
+  const collapseAll = () => { setAuto(false); setFocus(null); setExpanded(new Set()); };
   const focusGroup = (id: string) => { if (!graph?.groups.some(group => group.id === id)) return; setFocus(id); setAuto(false); setExpanded(new Set([id])); setSelected(null); fit(value => value + 1); };
   const item = graph ? [...graph.nodes, ...graph.groups].find(node => node.id === selected) : undefined;
   const group = graph?.groups.find(group => group.id === selected);
@@ -102,6 +117,7 @@ function App() {
     <div className="workspace"><aside className="inspector">
       <div className="search"><label htmlFor="graph-search">搜索整个知识网络</label><input id="graph-search" placeholder="节点、分组、描述…" value={query} onChange={event => setQuery(event.target.value)}/>
         {query.trim() && <div className="search-results">{matches.map(node => <button key={node.id} onClick={() => reveal(node.id)}>{node.label}<small>{node.summary}</small></button>)}{matches.length === 0 && <p>没有匹配结果</p>}</div>}</div>
+      {graph && <Outline graph={graph} expanded={expanded} selected={selected} toggle={toggle} reveal={reveal} expandAll={expandAll} collapseAll={collapseAll}/>}
       {item ? <section className="details"><div className="section-label">{group ? "分组详情" : "节点详情"}<button aria-label="取消选择" onClick={() => setSelected(null)}>×</button></div><h2>{item.label}</h2><p className="summary">{item.summary}</p><p className="description">{item.description || "暂无详细描述。可以回到 lane 继续补充。"}</p>
         {group && <div className="actions"><button onClick={() => toggle(group.id)}>{expanded.has(group.id) ? "收起分组" : "展开分组"}</button><button onClick={() => focusGroup(group.id)}>聚焦分组</button></div>}
         {"tags" in item && item.tags?.length ? <div className="tags">{item.tags.map(tag => <span key={tag}>{tag}</span>)}</div> : null}
@@ -112,7 +128,7 @@ function App() {
         })}</div>}
         <code className="item-id">{item.id}</code></section> : <section className="details"><div className="section-label">网络概览</div><h2>{graph?.title ?? "正在打开图…"}</h2><p className="description">{graph?.description || "从全景发现关系，展开分组探索细节。"}</p><div className="stats"><div><b>{graph?.nodes.length ?? "—"}</b>节点</div><div><b>{graph?.edges.length ?? "—"}</b>关系</div><div><b>{graph?.groups.length ?? "—"}</b>分组</div></div><p className="hint">点击查看详情 · 双击聚焦分组<br/>侧栏展开/收起分组<br/>拖动只调整本次视图<br/>点画布空白处或 Esc 取消选择</p></section>}
       <footer><span className="status-dot"/>{snapshot?.lock ? `写锁：${snapshot.lock.holderAddress ?? snapshot.lock.laneId}` : "当前没有写锁"}<p>内容由 lane 更新。刷新后查看最新保存结果。</p>{snapshot && <small>更新于 {new Date(snapshot.updatedAt).toLocaleString()}</small>}{snapshot?.lock && <details><summary>锁恢复命令</summary><code>lane-router-lane graph force-unlock --id {graphId} --expected-lock {snapshot.lock.lockId}</code></details>}</footer>
-    </aside><main className="graph-main"><nav className="view-toolbar"><div className="breadcrumbs"><button onClick={() => { setFocus(null); setExpanded(new Set()); setAuto(false); setSelected(null); fit(value => value + 1); }}>全景</button>{breadcrumbs.map(id => <button key={id} onClick={() => focusGroup(id)}> / {graph?.groups.find(g => g.id === id)?.label}</button>)}</div><div><button onClick={() => layout(value => value + 1)}>自动排版</button><button onClick={() => fit(value => value + 1)}>适应画布</button></div></nav>
+    </aside><main className="graph-main"><nav className="view-toolbar"><div className="breadcrumbs"><button title="收起全部分组并回到全景" onClick={() => { setFocus(null); setExpanded(new Set()); setAuto(false); setSelected(null); fit(value => value + 1); }}>全景</button>{breadcrumbs.map(id => <button key={id} onClick={() => focusGroup(id)}> / {graph?.groups.find(g => g.id === id)?.label}</button>)}</div><div><button onClick={() => layout(value => value + 1)}>自动排版</button><button onClick={() => fit(value => value + 1)}>适应画布</button></div></nav>
       <div className="canvas">{error ? <div role="alert" className="error">无法打开这张图<p>{error}</p><button onClick={() => setRefresh(value => value + 1)}>重试</button></div> : graph ? <Canvas graph={graph} expanded={expanded} focus={focus} selected={selected} select={setSelected} focusGroup={focusGroup} zoom={setZoom} layoutRequest={layoutRequest} fitRequest={fitRequest}/> : <div className="empty-canvas">加载图数据…</div>}</div>
       <div className="view-settings"><label><input type="checkbox" checked={auto} onChange={event => setAuto(event.target.checked)}/>缩放自动展开</label><label>首层 <input aria-label="首层展开缩放" type="number" min="0.1" max="3" step="0.05" value={threshold} onChange={event => setThreshold(Math.max(0.1, Math.min(3, Number(event.target.value) || 0.75)))}/></label><label>每层增加 <input aria-label="每层缩放增量" type="number" min="0.1" max="2" step="0.1" value={step} onChange={event => setStep(Math.max(0.1, Math.min(2, Number(event.target.value) || 0.5)))}/></label><span>{Math.round(zoom * 100)}%</span></div>
     </main></div>

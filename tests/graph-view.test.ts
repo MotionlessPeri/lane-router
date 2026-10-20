@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { applyChanges, emptyDocument } from "../src/modules/graphs/document.js";
-import { projectGraph, revealPath } from "../src/ui/graphs/model.js";
+import { allGroups, autoExpanded, outlineRows, projectGraph, revealPath, revealWithin, toggleGroup } from "../src/ui/graphs/model.js";
 import { arrangeGraph, avoidOverlaps, nodeSize } from "../src/ui/graphs/layout.js";
 
 const graph = applyChanges(emptyDocument("Rendering"), [
@@ -23,6 +23,39 @@ test("search reveals arbitrary depth, focus isolates a subgraph, and ordinary gr
   expect(local.nodes.map(n => n.id)).toEqual(["b", "c", "d", "x"]);
   const plain = applyChanges(emptyDocument("Plain"), [{ op: "upsert_node", id: "p", label: "Plain node" }]);
   expect(projectGraph(plain, new Set()).nodes[0]?.id).toBe("p");
+});
+// Document order is deliberately not tree order: a top-level group comes after a nested one, ungrouped nodes come first.
+const tree = applyChanges(emptyDocument("Tree"), [
+  { op: "upsert_group", id: "top1", label: "Top 1" }, { op: "upsert_group", id: "mid", label: "Mid", parentId: "top1" },
+  { op: "upsert_group", id: "top2", label: "Top 2" }, { op: "upsert_group", id: "deep", label: "Deep", parentId: "mid" },
+  { op: "upsert_node", id: "loose", label: "Loose" }, { op: "upsert_node", id: "n1", label: "N1", groupId: "deep" },
+  { op: "upsert_node", id: "n2", label: "N2", groupId: "top1" }, { op: "upsert_node", id: "n4", label: "N4", groupId: "mid" },
+  { op: "upsert_node", id: "n3", label: "N3", groupId: "top2" }, { op: "upsert_node", id: "loose2", label: "Loose 2" },
+  { op: "upsert_edge", id: "n1-n3", source: "n1", target: "n3", type: "crosses" },
+]);
+const rows = (expanded: Iterable<string>) => outlineRows(tree, new Set(expanded)).map(row => `${"  ".repeat(row.depth)}${row.group ? row.open ? "▾" : "▸" : "·"} ${row.id}`);
+test("outline nests groups by parent and nodes under their group, groups before nodes, each in document order", () => {
+  expect(rows(["top1", "mid", "deep", "top2"])).toEqual(["▾ top1", "  ▾ mid", "    ▾ deep", "      · n1", "    · n4", "  · n2", "▾ top2", "  · n3", "· loose", "· loose2"]);
+  expect(outlineRows(tree, new Set()).find(row => row.id === "top1")).toMatchObject({ label: "Top 1", group: true, depth: 0, open: false });
+});
+test("a collapsed group hides everything below it in the outline, even groups that are themselves in the expanded set", () => {
+  expect(rows(["top1", "deep", "top2"])).toEqual(["▾ top1", "  ▸ mid", "  · n2", "▾ top2", "  · n3", "· loose", "· loose2"]);
+  expect(rows([])).toEqual(["▸ top1", "▸ top2", "· loose", "· loose2"]);
+});
+test("revealing adds the target's ancestors and keeps every group already expanded", () => {
+  expect(revealWithin(graph, new Set(["outside"]), "x")).toEqual(new Set(["outside", "d", "c", "b", "a"]));
+  expect(revealWithin(tree, new Set(["top2"]), "deep")).toEqual(new Set(["top2", "mid", "top1"]));
+});
+test("a manual toggle starts from the set zoom expansion actually showed", () => {
+  const shown = autoExpanded(graph, 1, 0.75, 0.5);
+  expect(shown).toEqual(new Set(["a", "outside"]));
+  expect(toggleGroup(shown, "outside")).toEqual(new Set(["a"]));
+  expect(toggleGroup(shown, "b")).toEqual(new Set(["a", "outside", "b"]));
+  expect(shown).toEqual(new Set(["a", "outside"]));
+});
+test("expand all is every group at every depth", () => {
+  expect(allGroups(graph)).toEqual(new Set(["a", "b", "c", "d", "outside"]));
+  expect(projectGraph(tree, allGroups(tree)).nodes.map(node => node.id).sort()).toEqual([...tree.groups, ...tree.nodes].map(item => item.id).sort());
 });
 test("hidden internal relationships are counted rather than silently becoming self edges", () => {
   const doc = applyChanges(graph, [{ op: "upsert_node", id: "z", label: "Z", groupId: "c" }, { op: "upsert_edge", id: "xz", source: "x", target: "z", type: "related" }]);

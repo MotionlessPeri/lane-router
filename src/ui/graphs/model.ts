@@ -11,6 +11,29 @@ export function revealPath(graph: GraphDocument, id: string): Set<string> {
   return result;
 }
 export function groupDepth(graph: GraphDocument, id: string): number { return revealPath(graph, id).size; }
+/** Locating something only opens its ancestors; groups the user already opened stay open. */
+export function revealWithin(graph: GraphDocument, expanded: ReadonlySet<string>, id: string): Set<string> { return new Set([...expanded, ...revealPath(graph, id)]); }
+export function toggleGroup(expanded: ReadonlySet<string>, id: string): Set<string> {
+  const next = new Set(expanded); if (next.has(id)) next.delete(id); else next.add(id); return next;
+}
+export function allGroups(graph: GraphDocument): Set<string> { return new Set(graph.groups.map(group => group.id)); }
+export function autoExpanded(graph: GraphDocument, zoom: number, threshold: number, step: number): Set<string> {
+  return new Set(graph.groups.filter(group => zoom >= threshold + groupDepth(graph, group.id) * step).map(group => group.id));
+}
+
+export interface OutlineRow { id: string; label: string; group: boolean; depth: number; open: boolean }
+/** The outline keeps no fold state of its own: a group is open exactly when the canvas has it expanded. */
+export function outlineRows(graph: GraphDocument, expanded: ReadonlySet<string>): OutlineRow[] {
+  const rows: OutlineRow[] = [];
+  const visit = (parent: string | null, depth: number) => {
+    for (const group of graph.groups) if ((group.parentId ?? null) === parent) {
+      const open = expanded.has(group.id); rows.push({ id: group.id, label: group.label, group: true, depth, open });
+      if (open) visit(group.id, depth + 1);
+    }
+    for (const node of graph.nodes) if ((node.groupId ?? null) === parent) rows.push({ id: node.id, label: node.label, group: false, depth, open: false });
+  };
+  visit(null, 0); return rows;
+}
 
 /** Containment is a navigation projection; real relationships always refer to canonical nodes. */
 export function projectGraph(graph: GraphDocument, expanded: ReadonlySet<string>, focus?: string | null): ViewGraph {
