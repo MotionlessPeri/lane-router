@@ -41,8 +41,9 @@ test("real RPC and JSON-file CLI create, discover and atomically edit the same s
   await runGraphCli(["create", "--json-file", path], { client: x.client, env: { CODEX_THREAD_ID: x.caller.conversationId }, cwd: x.root, write: s => { output = s; } });
   const created = JSON.parse(output);
   expect(created.viewUrl).toBe(`${x.origin}/graphs/${created.graphId}`);
-  await x.client.call("lane_graph_apply", { operationKey: "edit", graphId: created.graphId, lockId: created.lockId,
-    changes: [{ op: "upsert_node", id: "materials", label: "材质" }] }, x.caller);
+  const applied = await x.client.call("lane_graph_apply", { operationKey: "edit", graphId: created.graphId, lockId: created.lockId,
+    changes: [{ op: "upsert_node", id: "materials", label: "材质" }] }, x.caller) as Record<string, unknown>;
+  expect(applied).toMatchObject({ saved: true, counts: { nodes: 1, edges: 0, groups: 0 }, viewUrl: created.viewUrl }); expect(applied).not.toHaveProperty("document");
   const response = await x.get(`/graphs/api/${created.graphId}`);
   expect(response.headers.get("cache-control")).toBe("no-store");
   expect((await response.json()).result.document.nodes[0].label).toBe("材质");

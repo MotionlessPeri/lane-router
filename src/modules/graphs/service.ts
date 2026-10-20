@@ -53,21 +53,30 @@ export class GraphsService {
       const metadata = previous ? previous.result as unknown as Metadata : commit(identity.laneId);
       if (!previous) this.store.recordOperation({ laneId: identity.laneId, key: args.operationKey, operation, digest, result: { ...metadata } });
       const current = this.read(metadata.graphId);
-      return { ...current, ...metadata, replayed: !!previous,
+      return { current, metadata, replayed: !!previous,
         lockValid: metadata.lockId !== undefined && current.lock?.lockId === metadata.lockId && current.lock.laneId === identity.laneId };
     });
   }
+  private withDocument({ current, metadata, replayed, lockValid }: ReturnType<GraphsService["write"]>) {
+    return { ...current, ...metadata, replayed, lockValid };
+  }
+  /** The caller already holds its own request, so apply and release reply with current facts only. */
+  private summary({ current, metadata, replayed, lockValid }: ReturnType<GraphsService["write"]>, lockId: string) {
+    const { document, lock, updatedAt, viewPath } = current;
+    return { ...metadata, lockId, replayed, lockValid, lock, updatedAt,
+      counts: { nodes: document.nodes.length, edges: document.edges.length, groups: document.groups.length }, viewPath };
+  }
   create(context: CallerContext, input: unknown) {
     const args = graphToolArgsSchemas.lane_graph_create.parse(input);
-    return this.write(context, "create", args, laneId => {
+    return this.withDocument(this.write(context, "create", args, laneId => {
       const graphId = this.newId(); const lockId = this.newId(); const now = this.now();
       this.store.save({ id: graphId, document: emptyDocument(args.title, args.description), createdAt: now, updatedAt: now });
       this.store.insertLock({ graphId, lockId, laneId, acquiredAt: now }); return { graphId, lockId };
-    });
+    }));
   }
   lock(context: CallerContext, input: unknown) {
     const args = graphToolArgsSchemas.lane_graph_lock.parse(input);
-    return this.write(context, `lock:${args.action}`, args, laneId => {
+    const result = this.write(context, `lock:${args.action}`, args, laneId => {
       this.resource(args.graphId); const current = this.store.lock(args.graphId);
       if (args.action === "release") {
         this.assertLock(current, laneId, args.lockId); this.store.deleteLock(args.graphId); return { graphId: args.graphId, released: true };
@@ -77,20 +86,21 @@ export class GraphsService {
       const lockId = this.newId(); this.store.insertLock({ graphId: args.graphId, lockId, laneId, acquiredAt: this.now() });
       return { graphId: args.graphId, lockId };
     });
+    return args.action === "release" ? this.summary(result, args.lockId) : this.withDocument(result);
   }
   private assertLock(lock: GraphLock | null, laneId: string, lockId: string): void {
     if (!lock || lock.laneId !== laneId || lock.lockId !== lockId) throw new GraphError("LOCK_INVALID", "LOCK_INVALID: acquire and reread the current graph before writing");
   }
   apply(context: CallerContext, input: unknown) {
     const args = graphToolArgsSchemas.lane_graph_apply.parse(input);
-    return this.write(context, "apply", args, laneId => {
+    return this.summary(this.write(context, "apply", args, laneId => {
       const graph = this.resource(args.graphId); this.assertLock(this.store.lock(args.graphId), laneId, args.lockId);
       let document;
       try { document = applyChanges(graph.document, args.changes); }
       catch (error) { throw new GraphError("INVALID_GRAPH", `INVALID_GRAPH: ${error instanceof Error ? error.message : String(error)}`); }
       const now = this.now(); this.store.save({ ...graph, document, updatedAt: now });
       return { graphId: args.graphId, lockId: args.lockId, saved: true, savedAt: now };
-    });
+    }), args.lockId);
   }
   forceUnlock(graphId: string, expectedLock: string) {
     text.parse(graphId); text.parse(expectedLock);

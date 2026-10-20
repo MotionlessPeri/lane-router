@@ -66,6 +66,29 @@ test("operation keys survive restart and do not return an old document or reacqu
   expect(() => x.service.create(x.caller, { operationKey: "create", title: "Conflict" })).toThrow(/OPERATION_CONFLICT/);
   expect(() => x.service.lock(x.caller, { graphId: a.graphId, action: "acquire", operationKey: "create" })).toThrow(/OPERATION_CONFLICT/);
 });
+const summaryKeys = (...own: string[]) => [...own, "graphId", "lockId", "replayed", "lockValid", "lock", "updatedAt", "counts", "viewPath"].sort();
+test("apply and release reply with a write summary of current facts; create and acquire still carry the document", () => {
+  const x = setupGraph(); const a = create(x); expect(a.document).toMatchObject({ title: "Rendering", nodes: [] });
+  const edit = { graphId: a.graphId, lockId: a.lockId!, operationKey: "edit",
+    changes: [{ op: "upsert_group", id: "g", label: "G" }, { op: "upsert_node", id: "a", label: "A", groupId: "g" }, { op: "upsert_node", id: "b", label: "B" }] };
+  const applied = x.service.apply(x.caller, edit);
+  expect(Object.keys(applied).sort()).toEqual(summaryKeys("saved", "savedAt"));
+  expect(applied).toMatchObject({ graphId: a.graphId, lockId: a.lockId, saved: true, replayed: false, lockValid: true, updatedAt: applied.savedAt,
+    lock: { lockId: a.lockId, holderAddress: "project/one" }, counts: { nodes: 2, edges: 0, groups: 1 }, viewPath: `/graphs/${a.graphId}` });
+  const later = x.service.apply(x.caller, { ...edit, operationKey: "later", changes: [{ op: "upsert_edge", id: "ab", source: "a", target: "b", type: "uses" }] });
+  const replay = x.service.apply(x.caller, edit);
+  expect(Object.keys(replay).sort()).toEqual(summaryKeys("saved", "savedAt"));
+  expect(replay).toMatchObject({ replayed: true, lockValid: true, savedAt: applied.savedAt, updatedAt: later.savedAt, counts: { nodes: 2, edges: 1, groups: 1 } });
+  const release = { graphId: a.graphId, lockId: a.lockId!, action: "release" as const, operationKey: "release" };
+  for (const [released, replayed] of [[x.service.lock(x.caller, release), false], [x.service.lock(x.caller, release), true]] as const) {
+    expect(Object.keys(released).sort()).toEqual(summaryKeys("released"));
+    expect(released).toMatchObject({ graphId: a.graphId, lockId: a.lockId, released: true, replayed, lockValid: false, lock: null, updatedAt: later.savedAt, counts: { nodes: 2, edges: 1, groups: 1 } });
+  }
+  const stale = x.service.apply(x.caller, edit);
+  expect(Object.keys(stale).sort()).toEqual(summaryKeys("saved", "savedAt")); expect(stale).toMatchObject({ replayed: true, lockValid: false, lock: null });
+  const acquired = x.service.lock(x.caller, { action: "acquire", graphId: a.graphId, operationKey: "acquire" });
+  expect(acquired).toMatchObject({ lockValid: true, document: { nodes: [{ id: "a" }, { id: "b" }], edges: [{ id: "ab" }] } });
+});
 test("busy acquire does not occupy a key; release and force-unlock invalidate old lock IDs", () => {
   const x = setupGraph(); const a = create(x); const request = { action: "acquire" as const, graphId: a.graphId, operationKey: "acquire" };
   expect(() => x.service.lock(x.other, request)).toThrow(/GRAPH_LOCKED/);
