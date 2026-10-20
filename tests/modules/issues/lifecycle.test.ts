@@ -38,7 +38,7 @@ describe("issue identity and lifecycle", () => {
     expect(() => x.service.reply({ operationKey: "missing", issueId: result.issueId, body: "no" })).toThrowError(expect.objectContaining({ code: "LANE_UNAVAILABLE" }));
   });
 
-  it("allows only explicit user close, keeps prior replies and replays successes after close", () => {
+  it("a user close keeps prior replies and replays earlier successes, refuses the lane, and a new reply reopens it", () => {
     const x = setup();
     const published = publishQuestion(x);
     const replyInput = { operationKey: "reply", issueId: published.issueId, body: "Please proceed.", questionId: published.questionId };
@@ -50,7 +50,6 @@ describe("issue identity and lifecycle", () => {
     expect(x.service.reply(replyInput)).toEqual(reply);
     expect(x.service.append(x.caller, { operationKey: "a", issueId: published.issueId, kind: "answer", body: "Done." })).toEqual(appended);
     expect(x.service.publish(x.caller, { operationKey: "publish", title: "Choose", kind: "question", body: "Which option?" })).toEqual(published);
-    expect(() => x.service.reply({ ...replyInput, operationKey: "new" })).toThrowError(expect.objectContaining({ code: "ISSUE_CLOSED" }));
     expect(() => x.service.append(x.caller, { operationKey: "later", issueId: published.issueId, kind: "answer", body: "new" })).toThrowError(expect.objectContaining({ code: "ISSUE_CLOSED" }));
     expect(() => x.service.updateQuestion(x.caller, { operationKey: "end", issueId: published.issueId, questionId: published.questionId!, status: "closed" } as never)).toThrowError(expect.objectContaining({ code: "INVALID_INPUT" }));
     expect(x.service.list({ filter: "closed" }).items[0]?.attentionReasons).toEqual([]);
@@ -61,6 +60,9 @@ describe("issue identity and lifecycle", () => {
     expect(readClosed.questions).toEqual(closed.questions);
     expect(readClosed.thread).toEqual({ ...closed.thread, readSeq: closed.displayedThroughSeq });
     expect(x.service.list({ filter: "closed" }).items[0]?.attentionReasons).toEqual([]);
+    // A new reply from the user is what reopens it.
+    x.service.reply({ ...replyInput, operationKey: "new" });
+    expect(x.service.detail(published.issueId).thread).toMatchObject({ status: "open", closedAt: null, closedBy: null });
   });
 
   it("records actual TUI user closure with provenance and refuses subsequent discussion", () => {
@@ -89,7 +91,9 @@ describe("issue identity and lifecycle", () => {
       expect(x.service.list({ filter: "closed" }).items[0]?.attentionReasons).toEqual([]);
       expect(() => x.service.append(x.caller, { operationKey: "new-answer", issueId: published.issueId, kind: "answer", body: "Too late." })).toThrowError(expect.objectContaining({ code: "ISSUE_CLOSED" }));
       expect(() => x.service.updateQuestion(x.caller, { operationKey: "new-resolution", issueId: published.issueId, questionId: published.questionId!, status: "not_needed", reason: "Too late." })).toThrowError(expect.objectContaining({ code: "ISSUE_CLOSED" }));
-      expect(() => x.service.reply({ operationKey: "new-reply", issueId: published.issueId, body: "Too late." })).toThrowError(expect.objectContaining({ code: "ISSUE_CLOSED" }));
+      // The user can still reply, which reopens it; recording processing never did.
+      x.service.reply({ operationKey: "new-reply", issueId: published.issueId, body: "One more thing." });
+      expect(x.service.detail(published.issueId).thread).toMatchObject({ status: "open", closedBy: null });
     });
   }
 

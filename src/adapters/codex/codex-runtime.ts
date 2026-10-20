@@ -1,4 +1,4 @@
-import { LANE_ROUTER_INSTRUCTIONS } from "../../tools/tool-contract.js";
+import { communicationToolCatalog } from "../../application/builtin-tools.js";
 import type { CallerContext } from "../../router/types.js";
 import type { ToolCatalog } from "../../application/tool-catalog.js";
 import { AppServerClient } from "./app-server-client.js";
@@ -126,8 +126,9 @@ export class CodexRuntime {
     await this.options.process.shutdown();
   }
 
+  /** The same instructions an MCP lane gets for this catalog, so neither backend is told less. */
   decorateThreadStart(params: Record<string, unknown>): Record<string, unknown> {
-    return { ...params, dynamicTools: this.dynamicTools, developerInstructions: LANE_ROUTER_INSTRUCTIONS };
+    return { ...params, dynamicTools: this.dynamicTools, developerInstructions: (this.options.catalog ?? communicationToolCatalog).instructions };
   }
 
   claimThread(threadId: string, cwd?: string, startup?: ThreadStartup): void {

@@ -47,7 +47,9 @@ test("real Codex runtime uses its supplied catalog for thread decoration and dis
     process: { client: { onNotification: () => () => {} }, start: () => { throw new Error("fixture process must not start"); } } as never,
   });
   const decorated = runtime.decorateThreadStart({ cwd: "fixture" });
-  expect(decorated).toMatchObject({ cwd: "fixture", developerInstructions: LANE_ROUTER_INSTRUCTIONS });
+  // The product catalog's instructions: the communication rules, then the issues rules.
+  expect(decorated).toMatchObject({ cwd: "fixture", developerInstructions: productToolCatalog.instructions });
+  expect(decorated.developerInstructions).toMatch(new RegExp(`^${LANE_ROUTER_INSTRUCTIONS.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}\\n\\nIssues `, "u"));
   expect((decorated.dynamicTools as any[]).map(tool => tool.name)).toEqual(productToolCatalog.definitions.map(tool => tool.name));
   runtime.claimThread("owned", "fixture");
   await runtime.dispatchTool({ threadId: "owned", turnId: "turn", callId: "call", tool: "lane_issue_read", arguments: { issueId: "saved" } });

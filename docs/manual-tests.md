@@ -363,6 +363,53 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
 
 自动测试：`tests/modules/issues/reply-target.test.ts`（happy-dom）覆盖设计稿第四节第 1–5 条。第五节的四个变异各自让预定的用例变红。
 
+### lane 结束问答、回复即重开、默认发问答
+
+需求与设计见 `docs/superpowers/specs/2026-10-20-issue-lane-close-and-default-publish.md`。
+
+- **lane 结束：** `lane_issue_update` 的 `close`，带 `reason`。
+  - 议题里有问题在等用户（`waiting_user`）或等 lane（`waiting_lane`）时，拒绝，错误码 `QUESTIONS_WAITING`，信息里写明先答复或标成 `not_needed`。被拒时什么都不写。
+  - 成功时写一条系统记录「lane 结束：原因」，作者是 lane，议题记为 lane 结束的。
+- **回复即重开：** 用户回复已结束的议题，不管是谁结束的，都会重开它。
+  - 历史先多一条「用户回复，议题重新打开」，再是回复本身。
+  - lane 收到的信开头写「这条问答原先已结束（由 lane / 用户结束），用户的回复让它重新打开了。」
+  - lane 对已结束的议题仍然不能追加、了结问题或再结束；`record_processed` 和已读照旧允许。
+- **记下结束方：** 议题多一个 `closedBy`，取值 `user` 或 `lane`，开着时为空。页面结束和 `record_tui_close` 记 `user`。列表、详情和 `lane_issue_read` 都返回它。
+- **待我处理：** lane 结束、但还有用户没读过的 lane 内容的议题，留在「待我处理」，原因是「未读答复」，读完就离开。用户结束的照旧不进。
+- **页面：**
+  - 列表徽标：lane 结束的写「lane 已结束」，用户结束的写「已结束」。
+  - 详情元信息：「已结束（lane 结束的）」或「已结束（你结束的）」。
+  - 已结束的议题照样有回复框，上方写「这条问答已经结束（由 lane / 你结束）。回复会重新打开它。」。「结束议题」按钮仍然隐藏。
+- **说明：** 问答模块导出 `ISSUE_INSTRUCTIONS`。工具目录带上问答工具时，把它接在 Lane Router 原有说明后面；只有通信工具的目录不带。Claude 从 MCP 的 `instructions` 拿到它，Codex 从 `developerInstructions` 拿到它，两边是同一段字符串。
+- **问答库升到 v2：** 打开 v1 库时，先用 SQLite 的 `VACUUM INTO` 把它复制成同目录的 `issues.sqlite.v1.bak`，再在一个事务里加 `closed_by` 列，并把已结束的议题回填为 `user`。
+  - 复制会带上 WAL 里还没写回主文件的内容。
+  - 备份文件已经存在时不覆盖，复制失败就不升级，问答模块按不可用处理。
+  - 回退方法见下面「停止、恢复、备份与回退」。
+
+自动测试：
+- `tests/modules/issues/lane-close.test.ts`：第五节第 1–4、6 条。
+- `tests/modules/issues/schema-upgrade.test.ts`：第 5 条。v1 夹具是冻结的 `tests/fixtures/issues/v1-schema.sql`，和改动前代码建出的库逐项比对过，完全一致。
+- `tests/tools/issue-lane-close-contract.test.ts`：第 7、8 条。
+- `tests/modules/issues/lane-close-browser.test.ts`：第 9 条，浏览器组。
+- 第六节的十个变异各自让预定的用例变红。
+- 旧规则改写的已有用例：`lifecycle.test.ts`、`http.test.ts`、`tests/e2e/issue-inbox.test.ts` 原来断言回复已结束议题报 `ISSUE_CLOSED`，现在断言议题重开。`ui.test.ts` 有两条原来断言结束后回复框消失，现在断言回复框还在、显示重开提示。
+
+#### TC-ISSUES-LANECLOSE-1：lane 结束自己的议题，用户回复让它重开（第 10 条，尚未执行）
+
+**前提：**
+- 主检出构建到含此改动的版本，并连 Codex 宿主一起重启 Router（`scripts/restart-router.ps1 -CodexHost`，由 design 执行）。重启会断开开着的 Codex 窗口，时机归用户。
+- 上线时确认数据目录里生成了 `issues.sqlite.v1.bak`。
+- 正在跑的 lane 要等下次开新会话或恢复，才拿到新的工具和说明。Claude lane 在 MCP 服务启动时拿到，Codex lane 在 thread 启动或恢复时拿到。
+
+1. `lane-router/inbox` 开新会话或重连 MCP 后，用 `close` 结束自己那七条早已做完的议题，每条写明原因。
+2. 用户在问答页「已结束」里看这七条。
+3. 用户在其中一条里回复。
+
+**预期：**
+- 第 1 步：每条都成功；历史里多一条「lane 结束：原因」。
+- 第 2 步：七条都显示「lane 已结束」。
+- 第 3 步：议题回到「进行中」；inbox 收到信，信里有「原先已结束」那句。
+
 ### 四项议题工具
 
 工具调用身份取自当前已绑定会话，只能读取或修改本 lane 的议题；不用参数指定 owner、backend、generation、source 或 `confirmed`。业务写入均使用非空 `operationKey`；同一操作重试保持同键同内容，同键异内容返回 `OPERATION_CONFLICT`。RPC call ID 不是业务操作键。
@@ -372,7 +419,7 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
 | `lane_issue_publish` | `operationKey`、`title`、`kind`、`body`。`kind: "answer"` 必须另带 `originalQuestion`；`kind: "question"` 不带该字段。只发布两类议题。 |
 | `lane_issue_read` | 详情使用 `issueId`，可加 `afterSeq`、`limit`；列表不带 `issueId`，可加 `filter`（`attention/open/closed/all`）、`before: {updatedAt,id}`、`limit`，agent 列表默认 `all`。分页上限 200，默认 50。读取不代用户标已读。 |
 | `lane_issue_append` | `operationKey`、`issueId`、`kind`、`body`，可带 `questionId`。`kind` 为 `answer/explanation/question/tui_user`；`explanation` 必须关联问题，新增 `question` 不带旧问题 ID。带 `questionId` 的 `answer`，会把正在等待本 lane 的那个问题标为已回答（与 `resolve_question` 留下同样的系统记录）；不想结束这个问题就不带 `questionId`。相关 TUI 用户原话用 `tui_user`，注明来源、原样保存，不产生回声投递。 |
-| `lane_issue_update` | 公共参数为 `operationKey`、`issueId`、`action`。`resolve_question` 另带 `questionId`，`status: "answered"` 需 `answerEntryId`，`status: "not_needed"` 需 `reason`；`record_processed` 另带 `deliveryId`；专门的 `record_tui_close` 另带用户实际结束原话 `body`。没有普通 agent close 或任意状态更新。 |
+| `lane_issue_update` | 公共参数为 `operationKey`、`issueId`、`action`。`resolve_question` 另带 `questionId`，`status: "answered"` 需 `answerEntryId`，`status: "not_needed"` 需 `reason`；`record_processed` 另带 `deliveryId`；`close` 另带 `reason`，由 lane 结束议题，议题里不能有等待中的问题；专门的 `record_tui_close` 另带用户实际结束原话 `body`。没有任意状态更新。 |
 
 agent 收到 mailbox 提醒后先读完整正文，使用其中的 `issueId` 调 `lane_issue_read`，查询 `deliveryId` 的处理事实后在原任务内处理。处理完后用 `lane_issue_append`（`kind: answer`，带正文里给出的问题 ID）答复，该问题自动标为已回答；再用 `record_processed` 记录该投递，最后用原 `lane_ack` resolve 邮件。网页回复的投递正文末尾写着这三步和要带的 ID。重复提醒不等于允许重复业务副作用；这些记录不保证外部业务副作用恰好一次。`resolve_question` 仍用于标「无需回答」，或补标历史上已经答过的问题。
 
@@ -469,6 +516,12 @@ lane-router-lane issue record-tui-close --json-file ./issue-tui-close.json
 维护由外部具名操作对话核对准确运行入口、PID/版本、在用配置、备份位置和允许中断窗口后执行。**操作方须先让所有写入方停止提交新写入**，再发起受控关闭并等待完成；当前没有新增自动 stop-ingress 机制。`main` 的实际资源关闭顺序是先等模块 `close()` 停止调度、排空在途交接并关模块库，再关 HTTP server、Host/runtime 和 core 库；不能以该顺序代替前述停写入条件。恢复时在 core mailbox 对账后 `start()` 恢复待交接记录。临时停用通过受控生命周期重新装配通信-only 进程，恢复时重新显式装配；不删数据库、不后台热启第二份模块、不从本手册推断一个不存在的维护命令。
 
 在停止写入并排空后，把两个 SQLite 数据库、相关 `-wal`/`-shm` 状态及 mailbox/core 数据作为**同一一致备份集**保存；若数据库已干净关闭且侧文件消失，记录该事实。不要在运行中随意复制单个主库文件，也不独立丢弃 WAL。恢复/回退前再保留当前一致集，使用同一备份集恢复两库和对应 mailbox/core 数据；回退构建与数据恢复是两个不同动作，不用旧代码强开未来模块版本。只恢复一库可能失去跨库关联：历史保留，原稳定 lane ID 缺失/归档时拒绝误投递，绝不自动改挂同名新 lane。本功能不新增通用 backup 工具。
+
+**问答库版本升级的回退（v1 到 v2 起）：**
+- 新版 Router 第一次打开旧版本的问答库时，先把它复制成同目录的 `issues.sqlite.v<旧版本>.bak`，比如 `issues.sqlite.v1.bak`，再原地升级。
+- 旧版 Router 不认新版本，会以 `Unsupported issues schema version` 拒绝打开，问答模块不可用。
+- 要回退代码时：停 Router，用这个 `.bak` 换回 `issues.sqlite`，删掉旁边的 `-wal`、`-shm`，再启动旧版。
+- **升级之后写入问答的内容都会丢失**，包括新议题、回复和结束记录。core 库和 mailbox 里对应的信还在，回退前要先确认能接受这一点。
 
 ### 议题功能现场验收（尚未执行）
 

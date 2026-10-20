@@ -14,17 +14,26 @@ export interface ApplicationTools {
   call: ToolHandler;
 }
 
-/** Definitions are pure data; binding handlers never changes the published directory. */
+/**
+ * Definitions are pure data; binding handlers never changes the published directory. The
+ * instructions are what a conversation is told at its start about using these tools: the parts
+ * arrive with the tools they are about, so a catalog without a module's tools never carries its rules.
+ */
 export class ToolCatalog {
   readonly definitions: readonly ToolDefinition[];
   private readonly byName = new Map<string, ToolDefinition>();
 
-  constructor(definitions: readonly ToolDefinition[]) {
+  constructor(definitions: readonly ToolDefinition[], readonly instructions = "") {
     for (const definition of definitions) {
       if (this.byName.has(definition.name)) throw new Error(`Duplicate tool: ${definition.name}`);
       this.byName.set(definition.name, definition);
     }
     this.definitions = [...definitions];
+  }
+
+  /** This catalog plus a module's tools, and that module's instructions after these when it has any. */
+  extend(definitions: readonly ToolDefinition[], instructions?: string): ToolCatalog {
+    return new ToolCatalog([...this.definitions, ...definitions], [this.instructions, instructions ?? ""].filter(Boolean).join("\n\n"));
   }
 
   has(name: string): boolean { return this.byName.has(name); }

@@ -361,7 +361,7 @@
   function renderList() {
     const host = byId("thread-list"), panel = host.closest(".list-panel");
     const items = keepingSelected();
-    const signature = JSON.stringify([selectedId, items.map(item => [item.id, item.kept, item.title, item.status, item.attentionReasons, item.waitingLaneCount, ownerText(item.owner), item.owner.presence, item.updatedAt])]);
+    const signature = JSON.stringify([selectedId, items.map(item => [item.id, item.kept, item.title, item.status, item.closedBy, item.attentionReasons, item.waitingLaneCount, ownerText(item.owner), item.owner.presence, item.updatedAt])]);
     if (signature !== renderedList) { renderedList = signature; const scrollTop = panel.scrollTop; renderTopics(host, items); panel.scrollTop = scrollTop; }
     shownTopics = items;
     byId("load-threads").hidden = !listCursor; byId("load-threads").disabled = listLoading;
@@ -388,7 +388,7 @@
       button.dataset.issueId = item.id; button.setAttribute("aria-current", String(item.id === selectedId));
       if (item.kept) { button.classList.add("kept"); button.append(node("span", "badge", "已不在当前筛选")); }
       // These are facts returned by the list API; reading does not decide whether a question still needs an answer.
-      if (item.status === "closed") button.append(node("span", "badge", "已结束"));
+      if (item.status === "closed") button.append(node("span", "badge", item.closedBy === "lane" ? "lane 已结束" : "已结束"));
       for (const reason of item.attentionReasons) {
         if (reason === "waiting_user") button.append(node("span", "badge ask", "待我回答"));
         if (reason === "unread_lane_content") button.append(node("span", "badge unread", "未读答复"));
@@ -546,10 +546,11 @@
     byId("detail-empty").hidden = true; byId("detail-content").hidden = false;
     byId("detail-title").textContent = detail.thread.title;
     // Lanes refer to an issue by the first eight characters of its ID; the whole ID is on hover.
-    const meta = byId("detail-meta"), metaSignature = JSON.stringify([detail.owner, closed, id]);
+    const meta = byId("detail-meta"), metaSignature = JSON.stringify([detail.owner, closed, detail.thread.closedBy, id]);
     if (meta.dataset.signature !== metaSignature) {
       const shortId = node("span", "issue-id", id.slice(0, 8)); shortId.title = id;
-      meta.replaceChildren(...ownerNodes(detail.owner), " · " + (closed ? "已结束" : "进行中") + " · ", shortId);
+      const state = closed ? "已结束（" + (detail.thread.closedBy === "lane" ? "lane 结束的" : "你结束的") + "）" : "进行中";
+      meta.replaceChildren(...ownerNodes(detail.owner), " · " + state + " · ", shortId);
       meta.dataset.signature = metaSignature;
     }
     byId("detail-status").textContent = view.loadError;
@@ -653,11 +654,16 @@
     return oneLine(entry.body.replace(/[\w-]+/g, ref));
   }
 
+  /**
+   * An ended issue keeps its reply box: ending stops the lane, not the user, and a reply reopens
+   * the issue. The line above the box says so, and who ended it.
+   */
   function renderCompose(id, closed) {
     const host = byId("compose"), view = viewFor(id);
-    if (closed) { host.replaceChildren(node("p", "muted", "议题已结束。讨论历史保留。")); host.removeAttribute("data-for"); host.removeAttribute("data-expanded"); return; }
     if (host.dataset.for !== id) {
       host.replaceChildren(); host.dataset.for = id; host.removeAttribute("data-expanded");
+      const reopen = node("p", "meta"); reopen.id = "reopen-hint"; reopen.hidden = true;
+      host.append(reopen);
       const form = node("form"); form.id = "reply-form";
       const bodyLabel = node("label", "visually-hidden", "继续讨论"); bodyLabel.htmlFor = "reply-body";
       const textarea = node("textarea"); textarea.id = "reply-body"; textarea.placeholder = "写下回复，或直接说哪里还不清楚…";
@@ -687,6 +693,9 @@
     }
     if (select.value !== view.questionId) select.value = view.questionId;
     byId("reply-body").disabled = Boolean(view.operation); select.disabled = Boolean(view.operation); byId("send-reply").disabled = Boolean(view.operation);
+    const reopen = byId("reopen-hint");
+    reopen.hidden = !closed;
+    reopen.textContent = closed ? "这条问答已经结束（由" + (view.detail.thread.closedBy === "lane" ? " lane " : "你") + "结束）。回复会重新打开它。" : "";
     showTargetHint(id);
     sizeCompose(id);
   }
@@ -779,7 +788,8 @@
   }
   function startReply(id) {
     const view = viewFor(id);
-    if (view.operation || selectedId !== id || view.detail.thread.status === "closed") return;
+    // An ended issue takes a reply too; saving it is what reopens the issue.
+    if (view.operation || selectedId !== id) return;
     if (!view.draft.trim()) { view.notice = "请先填写回复。"; view.warning = true; renderDetail(id); return; }
     view.operation = { action: "replies", operationKey: crypto.randomUUID(), payload: { body: view.draft, ...(view.questionId ? { questionId: view.questionId } : {}) }, state: "new" };
     void runOperation(id);

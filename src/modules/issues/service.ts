@@ -7,8 +7,8 @@ import {
   IssueError,
   type AppendIssueInput, type AttentionReason, type CloseIssueInput, type CreateIssueInput, type IssueDetail,
   type IssueEntry, type IssueEntryResult, type IssueHistoryQuery, type IssueList,
-  type IssueListQuery, type IssueOwner, type IssuePresence, type IssueProcessedResult, type IssueQuestion, type IssueThread,
-  type IssueWakeResult, type PublishIssueInput, type ReadIssueInput, type RecordProcessedInput, type ReplyIssueInput,
+  type IssueCloser, type IssueListQuery, type IssueOwner, type IssuePresence, type IssueProcessedResult, type IssueQuestion, type IssueThread,
+  type IssueWakeResult, type LaneCloseIssueInput, type PublishIssueInput, type ReadIssueInput, type RecordProcessedInput, type ReplyIssueInput,
   type UpdateIssueQuestionInput,
 } from "./types.js";
 
@@ -36,7 +36,7 @@ export class IssuesService {
       const now = this.now();
       const issueId = this.newId();
       this.store.insertThread({ id: issueId, ownerLaneId: actor.laneId, title, originKind: input.kind,
-        status: "open", createdAt: now, updatedAt: now, closedAt: null, readSeq: 0, nextSeq: 1 });
+        status: "open", createdAt: now, updatedAt: now, closedAt: null, closedBy: null, readSeq: 0, nextSeq: 1 });
       if (originalQuestion !== null) {
         const prompt = this.addEntry(issueId, "question", "user", "agent_reported_tui_user", originalQuestion, null, actor);
         const answer = this.addEntry(issueId, "answer", "lane", "agent", body, prompt.id, actor);
@@ -92,11 +92,31 @@ export class IssuesService {
     });
   }
 
-  /** Dedicated report of the user's actual TUI words; ordinary agent updates cannot close threads. */
+  /** Dedicated report of the user's actual TUI words; the issue is ended by the user. */
   recordTuiClose(context: CallerContext, input: CloseIssueInput): IssueEntryResult {
     const normalized = closeInput(input);
     return this.agentWrite(context, "record_tui_close", normalized.operationKey, normalized, normalized.issueId,
-      (actor) => this.end(normalized.issueId, normalized.body, "agent_reported_tui_user", actor));
+      (actor) => this.end(normalized.issueId, normalized.body, "user", "agent_reported_tui_user", actor));
+  }
+
+  /**
+   * The lane ends its own issue once its matter is done. A question still waiting on either side
+   * keeps it open: one waiting on the lane is a reply it has not answered, which ending the issue
+   * would carry off. The user can still reply, which reopens it; the lane cannot.
+   */
+  closeByLane(context: CallerContext, input: LaneCloseIssueInput): IssueEntryResult {
+    fields(input, ["operationKey", "issueId", "reason"]);
+    const operationKey = text(input.operationKey, "operationKey");
+    const issueId = text(input.issueId, "issueId");
+    const reason = text(input.reason, "reason");
+    return this.agentWrite(context, "close", operationKey, { issueId, reason }, issueId, (actor) => {
+      const waiting = this.store.questions(issueId).filter((question) => question.status === "waiting_user" || question.status === "waiting_lane");
+      if (waiting.length > 0) {
+        throw new IssueError("QUESTIONS_WAITING", `This issue still has waiting questions: ${waiting.map((question) => `${question.id} (${question.status})`).join(", ")}. `
+          + "Answer each with lane_issue_append (kind answer, with its questionId), or mark it not_needed with lane_issue_update resolve_question, then close.");
+      }
+      return this.end(issueId, `lane 结束：${reason}`, "lane", "agent", actor);
+    });
   }
 
   /** Processing is an independent saved fact, including for a reply whose issue has since closed. */
@@ -163,7 +183,7 @@ export class IssuesService {
       }
       const now = this.now();
       const thread: IssueThread = { id: this.newId(), ownerLaneId: laneId, title, originKind: "question",
-        status: "open", createdAt: now, updatedAt: now, closedAt: null, readSeq: 0, nextSeq: 1 };
+        status: "open", createdAt: now, updatedAt: now, closedAt: null, closedBy: null, readSeq: 0, nextSeq: 1 };
       this.store.insertThread(thread);
       const entry = this.addEntry(thread.id, "question", "user", "user_page", body, null, null);
       const question = this.addQuestion(entry, "lane", "waiting_lane");
@@ -193,6 +213,10 @@ export class IssuesService {
     catch { return { status: "failed", reason: "terminal_launch_failed" }; }
   }
 
+  /**
+   * A reply to an ended issue reopens it, whoever ended it: ending stops the lane, never the user.
+   * The reopening is recorded before the reply and told to the lane at the head of its letter.
+   */
   reply(input: ReplyIssueInput): IssueEntryResult {
     fields(input, ["operationKey", "issueId", "body", "questionId"]);
     const operationKey = text(input.operationKey, "operationKey");
@@ -203,15 +227,23 @@ export class IssuesService {
       const thread = this.requireThread(issueId);
       this.requireActiveLane(thread.ownerLaneId);
       const question = questionId === null ? null : this.requireQuestion(issueId, questionId);
+      const reopened = thread.status === "closed";
+      if (reopened) {
+        this.store.updateThread({ ...thread, status: "open", closedAt: null, closedBy: null });
+        this.addEntry(issueId, "event", "user", "user_page", "用户回复，议题重新打开", null, null);
+      }
       const entry = this.addEntry(issueId, "reply", "user", "user_page", body, question?.promptEntryId ?? null, null);
       const round = this.userTurn(entry, question);
       const prompt = question === null ? null : this.store.entry(issueId, question.promptEntryId);
       const deliveryId = this.deliver(thread, entry, round.id, {
-        opening: "用户已在议题页面回复，无需回 TUI 重复。请在原任务内继续处理。",
+        opening: [
+          ...(reopened ? [`这条问答原先已结束（由${thread.closedBy === "lane" ? " lane " : "用户"}结束），用户的回复让它重新打开了。`] : []),
+          "用户已在议题页面回复，无需回 TUI 重复。请在原任务内继续处理。",
+        ].join("\n"),
         entryLabel: "回复", context: [...(prompt ? [`关联问题：\n${prompt.body}`] : []), `用户回复：\n${body}`],
       });
       return { ...result(entry, round.id), deliveryId };
-    });
+    }, true);
   }
 
   markRead(input: ReadIssueInput): { issueId: string; readSeq: number } {
@@ -231,7 +263,7 @@ export class IssuesService {
   close(input: CloseIssueInput): IssueEntryResult {
     const normalized = closeInput(input);
     return this.userWrite("close", normalized.operationKey, normalized, normalized.issueId,
-      () => this.end(normalized.issueId, normalized.body, "user_page", null));
+      () => this.end(normalized.issueId, normalized.body, "user", "user_page", null));
   }
 
   private listOwned(query: IssueListQuery, ownerLaneId?: string): IssueList {
@@ -249,7 +281,7 @@ export class IssuesService {
       if (thread.status === "open") {
         if (thread.waitingUserCount > 0) attentionReasons.push("waiting_user");
         if (unreadLaneCount > 0) attentionReasons.push("unread_lane_content");
-      }
+      } else if (thread.closedBy === "lane" && unreadLaneCount > 0) attentionReasons.push("unread_lane_content");
       return { ...thread, owner: this.owner(thread.ownerLaneId), attentionReasons };
     });
     const last = items.at(-1);
@@ -377,10 +409,11 @@ export class IssuesService {
     return question ? this.waitFor(question, "waiting_lane") : this.addQuestion(entry, "lane", "waiting_lane");
   }
 
-  private end(issueId: string, body: string, source: IssueEntry["source"], actor: LaneCallerIdentity | null): IssueEntryResult {
-    const entry = this.addEntry(issueId, "event", "user", source, body, null, actor);
+  /** The closing record's author is who ended the issue, and so is its saved closer. */
+  private end(issueId: string, body: string, closedBy: IssueCloser, source: IssueEntry["source"], actor: LaneCallerIdentity | null): IssueEntryResult {
+    const entry = this.addEntry(issueId, "event", closedBy, source, body, null, actor);
     const thread = this.requireThread(issueId);
-    this.store.updateThread({ ...thread, status: "closed", closedAt: entry.createdAt });
+    this.store.updateThread({ ...thread, status: "closed", closedAt: entry.createdAt, closedBy });
     return result(entry);
   }
 }

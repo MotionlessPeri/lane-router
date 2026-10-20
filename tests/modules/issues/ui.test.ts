@@ -210,14 +210,16 @@ test("handoff and processed facts remain separate from question status and displ
   expect(text).toContain("等待 lane"); expect(f.x.service.detail(f.first.issueId).thread.status).toBe("open");
 });
 
-test("explicit close can be cancelled and confirmed with no reason, then history has no reply controls", async () => {
+test("explicit close can be cancelled and confirmed with no reason, then the ended issue still takes a reply, which would reopen it", async () => {
   const f = await boot(); await f.selected(f.first.issueId);
   f.change("#reply-body", "尚未发送的草稿"); f.click("#close-issue"); f.click("#cancel-close");
   expect(f.x.service.detail(f.first.issueId).thread.status).toBe("open"); expect(f.query("#reply-body").value).toBe("尚未发送的草稿");
   f.click("#close-issue"); f.click("#confirm-close");
   await vi.waitFor(() => expect(f.x.service.detail(f.first.issueId).thread.status).toBe("closed"));
-  await vi.waitFor(() => expect(f.query("#reply-body")).toBeNull());
-  expect(f.query("#send-reply")).toBeNull(); expect(f.query("#issue-detail").textContent).toContain("请选 A，或直接追问");
+  await vi.waitFor(() => expect(f.query("#reopen-hint")?.hidden).toBe(false));
+  expect(f.query("#reopen-hint").textContent).toBe("这条问答已经结束（由你结束）。回复会重新打开它。");
+  expect(f.query("#close-issue").hidden).toBe(true);
+  expect(f.query("#send-reply")).not.toBeNull(); expect(f.query("#issue-detail").textContent).toContain("请选 A，或直接追问");
   f.click('[data-filter="closed"]'); await vi.waitFor(() => expect(f.query("#thread-list").textContent).toContain("Choose"));
 });
 
@@ -480,7 +482,9 @@ test("the reply area opens while it is in use and folds back when it is not", as
   await vi.waitFor(() => expect(f.calls.some(c => c.path.endsWith("/close"))).toBe(true));
   expect(expanded()).toBe("true");
   release();
-  await vi.waitFor(() => expect(f.query("#reply-body")).toBeNull());
+  // The ended issue keeps its reply area, folded again now that nothing is in flight or typed.
+  await vi.waitFor(() => expect(f.query("#reopen-hint")?.hidden).toBe(false));
+  expect(expanded()).toBe("false");
 });
 
 // Nobody chose a reply target on the real board (0 of 19 replies), so every answer to a lane's

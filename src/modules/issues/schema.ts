@@ -1,8 +1,9 @@
-import type Database from "better-sqlite3";
+import { existsSync, statSync } from "node:fs";
 
-export const ISSUE_SCHEMA_VERSION = 1;
+import Database from "better-sqlite3";
 
-const SCHEMA = `
+/** v1 as first released. Every later version is v1 plus the UPGRADES before it, fresh or upgraded alike. */
+const V1 = `
 CREATE TABLE issue_thread (
   id TEXT PRIMARY KEY NOT NULL,
   owner_lane_id TEXT NOT NULL,
@@ -90,12 +91,32 @@ CREATE TABLE issue_schema_version (
   singleton INTEGER PRIMARY KEY CHECK(singleton=1),
   version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version>0)
 );
-INSERT INTO issue_schema_version(singleton,version) VALUES(1,${ISSUE_SCHEMA_VERSION});
+INSERT INTO issue_schema_version(singleton,version) VALUES(1,1);
 `;
 
-const TABLES = ["issue_delivery", "issue_entry", "issue_operation", "issue_question", "issue_schema_version", "issue_thread"];
+/**
+ * Additions only, never a changed or dropped column, so an upgraded database is the old one plus
+ * these. UPGRADES[i] takes version i+1 to i+2; its structure runs on fresh databases too, its data
+ * statements only matter to existing rows.
+ */
+const UPGRADES: readonly { readonly structure: string; readonly data: string }[] = [
+  {
+    // Who ended an issue. The status-coupled CHECK still lets an ended issue with no closer through,
+    // because SQLite counts a NULL result as passing: that is what lets this column be added over
+    // ended v1 rows at all. The fill below leaves none, and openings check for any later.
+    structure: "ALTER TABLE issue_thread ADD COLUMN closed_by TEXT CHECK((status='open' AND closed_by IS NULL) OR (status='closed' AND closed_by IN ('user','lane')))",
+    // v1 could only be ended on the page or by recording the user's TUI words: by the user.
+    data: "UPDATE issue_thread SET closed_by='user' WHERE status='closed'",
+  },
+];
 
-/** Validate before changing journal mode or running DDL: rejected existing files remain untouched. */
+export const ISSUE_SCHEMA_VERSION = UPGRADES.length + 1;
+
+/**
+ * Validate before changing journal mode or running DDL: rejected existing files remain untouched.
+ * An older version is checked against exactly what that version was, copied aside, then upgraded
+ * in one transaction and checked again as the current version.
+ */
 export function initializeIssueSchema(database: Database.Database): void {
   const tables = database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string }[];
   const userVersion = database.pragma("user_version", { simple: true });
@@ -104,25 +125,66 @@ export function initializeIssueSchema(database: Database.Database): void {
   if (tables.length === 0 && userVersion === 0) {
     const objects = database.prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all();
     if (objects.length > 0) throw new Error("Unknown nonempty issues schema");
-    database.transaction(() => database.exec(SCHEMA))();
+    database.transaction(() => { database.exec(V1); upgrade(database, 1); })();
     return;
   }
-  if (userVersion !== 0 || JSON.stringify(tables.map((table) => table.name)) !== JSON.stringify(TABLES)) {
-    throw new Error("Unknown nonempty issues schema");
-  }
+  if (userVersion !== 0 || !tables.some((table) => table.name === "issue_schema_version")) throw new Error("Unknown nonempty issues schema");
   const versions = database.prepare("SELECT singleton,version FROM issue_schema_version").all() as { singleton: number; version: number }[];
-  if (versions.length !== 1 || versions[0]?.singleton !== 1 || versions[0]?.version !== ISSUE_SCHEMA_VERSION) {
+  const version = versions[0]?.version;
+  if (versions.length !== 1 || versions[0]?.singleton !== 1 || !Number.isInteger(version) || version! < 1 || version! > ISSUE_SCHEMA_VERSION) {
     throw new Error("Unsupported issues schema version");
   }
-  const expected = SCHEMA.split(";").flatMap((statement) => {
-    const sql = normalizeSql(statement);
-    const match = /^CREATE (TABLE|INDEX) ([a-z_]+)/.exec(sql);
-    return match ? [{ type: match[1]!.toLowerCase(), name: match[2]!, sql }] : [];
-  }).sort((a, b) => a.name.localeCompare(b.name));
-  const actual = (database.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all() as { type: string; name: string; sql: string }[])
-    .map((object) => ({ ...object, sql: normalizeSql(object.sql) })).sort((a, b) => a.name.localeCompare(b.name));
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("Unknown or altered issues schema");
+  requireSchema(database, version!);
+  if (version! < ISSUE_SCHEMA_VERSION) {
+    backUp(database, version!);
+    database.transaction(() => upgrade(database, version!))();
+    requireSchema(database, ISSUE_SCHEMA_VERSION);
+  }
+  const unattributed = database.prepare("SELECT count(*) AS count FROM issue_thread WHERE (status='closed') != (closed_by IS NOT NULL)").get() as { count: number };
+  if (unattributed.count !== 0) throw new Error("Invalid issues closure facts");
+}
+
+/** Runs every upgrade after `from` and records the version reached; the caller holds the transaction. */
+function upgrade(database: Database.Database, from: number): void {
+  for (const step of UPGRADES.slice(from - 1)) { database.exec(step.structure); database.exec(step.data); }
+  database.prepare("UPDATE issue_schema_version SET version=? WHERE singleton=1").run(ISSUE_SCHEMA_VERSION);
+}
+
+/**
+ * The copy is SQLite's own, so it holds what is still only in the write-ahead log. One already
+ * there is an earlier attempt's and is kept; a backup that cannot be written stops the upgrade.
+ */
+function backUp(database: Database.Database, version: number): void {
+  if (database.memory) return;
+  const target = `${database.name}.v${version}.bak`;
+  if (existsSync(target) && statSync(target).isFile()) return;
+  database.prepare("VACUUM INTO ?").run(target);
+}
+
+/** The objects a database of `version` has, as SQLite records them: built, not hand-written. */
+const expectedSchemas = new Map<number, string>();
+function expectedSchema(version: number): string {
+  let schema = expectedSchemas.get(version);
+  if (schema === undefined) {
+    const scratch = new Database(":memory:");
+    try {
+      scratch.exec(V1);
+      for (const step of UPGRADES.slice(0, version - 1)) scratch.exec(step.structure);
+      schema = schemaOf(scratch);
+    } finally { scratch.close(); }
+    expectedSchemas.set(version, schema);
+  }
+  return schema;
+}
+
+function requireSchema(database: Database.Database, version: number): void {
+  if (schemaOf(database) !== expectedSchema(version)) throw new Error("Unknown or altered issues schema");
   if ((database.pragma("foreign_key_check") as unknown[]).length !== 0) throw new Error("Invalid issues foreign keys");
+}
+
+function schemaOf(database: Database.Database): string {
+  return JSON.stringify((database.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all() as { type: string; name: string; sql: string }[])
+    .map((object) => ({ ...object, sql: normalizeSql(object.sql) })).sort((a, b) => a.name.localeCompare(b.name)));
 }
 
 function normalizeSql(sql: string): string { return sql.trim().replace(/\s+/g, " "); }

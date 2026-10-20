@@ -86,9 +86,10 @@ test("HTTP reply, bounded read and explicit close use one business service and r
   expect(f.x.service.detail(a.issueId).thread.readSeq).toBe(1);
   expect((await (await f.get()).json() as any).result.items).toEqual([]);
   expect((await f.post(a.issueId, "close", { operationKey: "close", body: "This discussion is finished." })).status).toBe(200);
-  const closed = await f.post(a.issueId, "replies", { operationKey: "late", body: "late" });
-  expect(closed.status).toBe(409); expect(await closed.json()).toMatchObject({ code: "ISSUE_CLOSED" });
   expect((await (await f.get("/issues/api/threads?filter=closed")).json() as any).result.items[0].id).toBe(a.issueId);
+  // A later reply reopens the issue rather than being refused.
+  const late = await f.post(a.issueId, "replies", { operationKey: "late", body: "late" });
+  expect(late.status).toBe(200); expect(f.x.service.detail(a.issueId).thread).toMatchObject({ status: "open", closedBy: null });
   expect(f.call).not.toHaveBeenCalled();
 });
 

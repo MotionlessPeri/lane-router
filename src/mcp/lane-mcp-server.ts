@@ -8,7 +8,6 @@ import { resolve } from "node:path";
 
 import type { ClaudeChannelNotification, ClaudeChannelSink } from "../adapters/claude/channel-bridge.js";
 import type { BackendName, CallerContext } from "../router/types.js";
-import { LANE_ROUTER_INSTRUCTIONS } from "../tools/tool-contract.js";
 import { communicationToolCatalog, productToolCatalog } from "../application/builtin-tools.js";
 import type { ToolCatalog } from "../application/tool-catalog.js";
 import { laneMcpTools, parseLaneToolArguments } from "./tool-schemas.js";
@@ -59,7 +58,7 @@ export class LaneMcpServer {
   constructor(private readonly options: LaneMcpServerOptions) {
     this.protocol = new Server(
       { name: "lane-router", version: "0.1.0" },
-      { capabilities: { tools: {}, experimental: { "claude/channel": {} } }, instructions: LANE_ROUTER_INSTRUCTIONS },
+      { capabilities: { tools: {}, experimental: { "claude/channel": {} } }, instructions: (options.catalog ?? communicationToolCatalog).instructions },
     );
     this.channelSink = { notification: (value: ClaudeChannelNotification) => this.protocol.notification(value as never) };
     this.protocol.oninitialized = () => this.options.channel?.attach(this.channelSink);

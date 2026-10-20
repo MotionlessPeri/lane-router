@@ -8,7 +8,7 @@ import { initializeIssueSchema } from "./schema.js";
 import type { IssueDelivery, IssueEntry, IssueListQuery, IssueOperation, IssueQuestion, IssueThread } from "./types.js";
 
 const THREAD = `id,owner_lane_id AS ownerLaneId,title,origin_kind AS originKind,status,
-  created_at AS createdAt,updated_at AS updatedAt,closed_at AS closedAt,read_seq AS readSeq,next_seq AS nextSeq`;
+  created_at AS createdAt,updated_at AS updatedAt,closed_at AS closedAt,closed_by AS closedBy,read_seq AS readSeq,next_seq AS nextSeq`;
 const ENTRY = `id,issue_id AS issueId,seq,kind,author,source,body,related_entry_id AS relatedEntryId,
   recorded_by_binding_id AS recordedByBindingId,recorded_by_generation AS recordedByGeneration,created_at AS createdAt`;
 const QUESTION = `id,issue_id AS issueId,prompt_entry_id AS promptEntryId,asked_to AS askedTo,status,
@@ -45,12 +45,12 @@ export class SqliteIssueStore implements IssueStore {
   }
 
   insertThread(thread: IssueThread): void {
-    this.database.prepare(`INSERT INTO issue_thread(id,owner_lane_id,title,origin_kind,status,created_at,updated_at,closed_at,read_seq,next_seq)
-      VALUES(@id,@ownerLaneId,@title,@originKind,@status,@createdAt,@updatedAt,@closedAt,@readSeq,@nextSeq)`).run(thread);
+    this.database.prepare(`INSERT INTO issue_thread(id,owner_lane_id,title,origin_kind,status,created_at,updated_at,closed_at,closed_by,read_seq,next_seq)
+      VALUES(@id,@ownerLaneId,@title,@originKind,@status,@createdAt,@updatedAt,@closedAt,@closedBy,@readSeq,@nextSeq)`).run(thread);
   }
 
   updateThread(thread: IssueThread): void {
-    this.database.prepare(`UPDATE issue_thread SET status=@status,updated_at=@updatedAt,closed_at=@closedAt,
+    this.database.prepare(`UPDATE issue_thread SET status=@status,updated_at=@updatedAt,closed_at=@closedAt,closed_by=@closedBy,
       read_seq=@readSeq,next_seq=@nextSeq WHERE id=@id`).run(thread);
   }
 
@@ -58,7 +58,9 @@ export class SqliteIssueStore implements IssueStore {
     const waiting = "(SELECT count(*) FROM issue_question q WHERE q.issue_id=t.id AND q.status='waiting_user')";
     const unread = "(SELECT count(*) FROM issue_entry e WHERE e.issue_id=t.id AND e.author='lane' AND e.kind!='event' AND e.seq>t.read_seq)";
     const filter = query.filter ?? "attention";
-    const status = filter === "all" ? "1" : filter === "attention" ? `t.status='open' AND (${waiting}>0 OR ${unread}>0)` : "t.status=@status";
+    // An issue the lane ended may end on an answer the user has not read; it waits for that reading.
+    const attention = `(t.status='open' AND (${waiting}>0 OR ${unread}>0)) OR (t.status='closed' AND t.closed_by='lane' AND ${unread}>0)`;
+    const status = filter === "all" ? "1" : filter === "attention" ? attention : "t.status=@status";
     const columns = THREAD.split(",").map((column) => `t.${column.trim()}`).join(",");
     return this.database.prepare(`SELECT ${columns},${waiting} AS waitingUserCount,
       (SELECT count(*) FROM issue_question q WHERE q.issue_id=t.id AND q.status='waiting_lane') AS waitingLaneCount,

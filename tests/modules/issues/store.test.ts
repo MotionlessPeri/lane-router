@@ -6,7 +6,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { openIssueStore } from "../../../src/modules/issues/index.js";
+import { ISSUE_SCHEMA_VERSION, openIssueStore } from "../../../src/modules/issues/index.js";
 import { openRouterDatabase } from "../../../src/router/database.js";
 import { publishQuestion, setupIssues } from "../../fixtures/issues/setup.js";
 
@@ -146,7 +146,7 @@ describe("independent issue persistence", () => {
       const issues = new Database(x.path, { readonly: true });
       try {
         expect(issues.pragma("user_version", { simple: true })).toBe(0);
-        expect(issues.prepare("SELECT version FROM issue_schema_version WHERE singleton=1").get()).toEqual({ version: 1 });
+        expect(issues.prepare("SELECT version FROM issue_schema_version WHERE singleton=1").get()).toEqual({ version: ISSUE_SCHEMA_VERSION });
         expect(issues.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()).toEqual(["issue_delivery", "issue_entry", "issue_operation", "issue_question", "issue_schema_version", "issue_thread"].map((name) => ({ name })));
       } finally { issues.close(); }
     } finally { core.close(); }

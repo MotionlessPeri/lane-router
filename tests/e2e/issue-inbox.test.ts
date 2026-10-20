@@ -28,7 +28,7 @@ async function result<T>(response: Response): Promise<T> {
 const publish = { operationKey: "publish", title: "选择方案", kind: "question", body: "选择 A 还是 B？\n请确认取舍。" };
 
 describe("issue inbox across real adapters and independent durable stores", () => {
-  it("publishes, replies, reads full mailbox context, processes with tools and ends only on user close", async () => {
+  it("publishes, replies, reads full mailbox context, processes with tools, ends on user close and reopens on a later reply", async () => {
     const x = setup(); const a = await adapters(x);
     expect(a.applicationTools.catalog.definitions).toHaveLength(13);
     const question = await a.call("lane_issue_publish", publish) as IssueEntryResult;
@@ -61,8 +61,9 @@ describe("issue inbox across real adapters and independent durable stores", () =
     expect((await result<IssueDetail>(await a.get(`/issues/api/threads/${question.issueId}`))).thread.status).toBe("open");
     await result(await a.post(question.issueId, "close", { operationKey: "close", body: "我确认本议题结束。" }));
     expect((await result<IssueList>(await a.get("/issues/api/threads?filter=closed"))).items[0]?.id).toBe(question.issueId);
-    const rejected = await a.post(question.issueId, "replies", { operationKey: "late", body: "late" });
-    expect(rejected.status).toBe(409); expect(await rejected.json()).toMatchObject({ code: "ISSUE_CLOSED" });
+    // A reply after the end reopens the issue rather than being refused.
+    await result(await a.post(question.issueId, "replies", { operationKey: "late", body: "late" }));
+    expect((await result<IssueDetail>(await a.get(`/issues/api/threads/${question.issueId}`))).thread).toMatchObject({ status: "open", closedBy: null });
   });
 
   it("syncs actual related TUI input and dedicated user closure through JSON-file CLI without echo delivery", async () => {

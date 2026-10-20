@@ -6,7 +6,7 @@ export type EntrySource = "agent" | "user_page" | "agent_reported_tui_user";
 export type AttentionReason = "waiting_user" | "unread_lane_content";
 
 export class IssueError extends Error {
-  constructor(readonly code: "INVALID_INPUT" | "INVALID_REFERENCE" | "ISSUE_NOT_FOUND" | "ISSUE_CLOSED" | "LANE_UNAVAILABLE" | "OPERATION_CONFLICT", message: string) {
+  constructor(readonly code: "INVALID_INPUT" | "INVALID_REFERENCE" | "ISSUE_NOT_FOUND" | "ISSUE_CLOSED" | "LANE_UNAVAILABLE" | "OPERATION_CONFLICT" | "QUESTIONS_WAITING", message: string) {
     super(message);
     this.name = "IssueError";
   }
@@ -21,9 +21,12 @@ export interface IssueThread {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly closedAt: number | null;
+  /** Who ended it; set exactly when the issue is closed. */
+  readonly closedBy: IssueCloser | null;
   readonly readSeq: number;
   readonly nextSeq: number;
 }
+export type IssueCloser = "user" | "lane";
 
 export interface IssueEntry {
   readonly id: string;
@@ -145,6 +148,8 @@ export interface ReplyIssueInput {
   readonly questionId?: string;
 }
 export interface CloseIssueInput { readonly operationKey: string; readonly issueId: string; readonly body: string }
+/** A lane ending its own issue; the reason goes into the issue's history. */
+export interface LaneCloseIssueInput { readonly operationKey: string; readonly issueId: string; readonly reason: string }
 export interface ReadIssueInput { readonly operationKey: string; readonly issueId: string; readonly throughSeq: number }
 export interface RecordProcessedInput { readonly operationKey: string; readonly issueId: string; readonly deliveryId: string }
 export interface IssueProcessedResult { readonly issueId: string; readonly deliveryId: string; readonly processedAt: number }
