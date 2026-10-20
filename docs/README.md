@@ -27,6 +27,7 @@
 - [lane 结束问答，lane 默认把要用户回答的问题发到问答（需求与设计）](superpowers/specs/2026-10-20-issue-lane-close-and-default-publish.md)
 - [问答里的文件：点开 lane 写的本机路径，回复里贴图和发文件（需求与设计）](superpowers/specs/2026-10-20-issue-files.md)
 - [问答页回复对象：空着时自动选上新来的问题（补充稿）](superpowers/specs/2026-10-20-issue-reply-target-adopt.md)
+- [问答页：用户写的内容按纯文本显示（需求与设计）](superpowers/specs/2026-10-20-issue-user-text-plain.md)
 - [Codex 宿主独立进程：需求与设计](superpowers/specs/2026-10-19-codex-host-process.md)
 
 ## 界面样稿
