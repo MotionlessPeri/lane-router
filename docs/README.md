@@ -23,6 +23,9 @@
 - [问答页已读：有焦点且条目末尾进入视野才算读过（需求与设计）](superpowers/specs/2026-10-19-issue-read-on-sight.md)
 - [问答页小修五项（需求与设计）](superpowers/specs/2026-10-19-issue-ui-touchups.md)
 - [问答页改成左侧边栏布局（需求与设计）](superpowers/specs/2026-10-20-issue-page-sidebar-layout.md)
+- [从问答页开启问答，lane 没开着就唤醒（需求与设计）](superpowers/specs/2026-10-20-issue-start-from-page.md)
+- [lane 结束问答，lane 默认把要用户回答的问题发到问答（需求与设计）](superpowers/specs/2026-10-20-issue-lane-close-and-default-publish.md)
+- [问答里的文件：点开 lane 写的本机路径，回复里贴图和发文件（需求与设计）](superpowers/specs/2026-10-20-issue-files.md)
 - [Codex 宿主独立进程：需求与设计](superpowers/specs/2026-10-19-codex-host-process.md)
 
 ## 界面样稿
