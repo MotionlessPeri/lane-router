@@ -920,6 +920,36 @@ describe("resume info", () => {
   });
 });
 
+describe("lanes a new issue can go to", () => {
+  it("lists only lanes in service with a conversation, by project then lane ignoring case, with no more than the page needs", async () => {
+    const x = setup();
+    try {
+      await x.core.attachCurrent(caller("thread-mocap"), { address: "Mocap/solve", roleDescription: "secret role text" });
+      await x.core.attachCurrent(caller("thread-zed"), { address: "alpha/Zed", roleDescription: "zed" });
+      await x.core.attachCurrent(caller("thread-beta"), { address: "alpha/beta", roleDescription: "beta" });
+      await x.core.attachCurrent(caller("thread-gone"), { address: "alpha/gone", roleDescription: "gone" });
+      await x.core.attachCurrent(caller("thread-left"), { address: "alpha/left", roleDescription: "left" });
+      x.state.archiveLane("alpha/gone", 500);
+      const left = x.state.activeBindingForLane("alpha/left")!;
+      x.state.deactivateBinding(left.id, left.generation, 501);
+      x.state.createLane({ address: "alpha/never", project: "alpha", roleDescription: "never ran", now: 502 });
+      // A backend this Router does not run cannot be asked, so its lane is not reopenable from here.
+      x.state.createLane({ address: "lane-router/claude", project: "lane-router", roleDescription: "claude", now: 503 });
+      x.state.createBinding({ id: "binding-claude", laneAddress: "lane-router/claude", backend: "claude", conversationId: "session-claude", generation: 1, startup: {}, now: 504 });
+      x.backend.restoreState = "offline";
+      const id = (address: string) => x.state.requireLane(address).id;
+      expect(x.core.listActiveLanes()).toEqual([
+        { laneId: id("alpha/beta"), address: "alpha/beta", project: "alpha", backend: "codex", restorePresence: "offline" },
+        { laneId: id("alpha/Zed"), address: "alpha/Zed", project: "alpha", backend: "codex", restorePresence: "offline" },
+        { laneId: id("lane-router/claude"), address: "lane-router/claude", project: "lane-router", backend: "claude", restorePresence: "unavailable" },
+        { laneId: id("Mocap/solve"), address: "Mocap/solve", project: "Mocap", backend: "codex", restorePresence: "offline" },
+      ]);
+      x.backend.restoreState = "online";
+      expect(x.core.listActiveLanes().map((lane) => lane.restorePresence)).toEqual(["online", "online", "unavailable", "online"]);
+    } finally { x.database.close(); }
+  });
+});
+
 describe("lane sets", () => {
   function withLanes() {
     const x = setup();

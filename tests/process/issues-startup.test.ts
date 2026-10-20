@@ -10,7 +10,13 @@ import { NotificationPump } from "../../src/router/notification-pump.js";
 import { openIssuesModule, openIssueStore } from "../../src/modules/issues/index.js";
 import { openGraphStore } from "../../src/modules/graphs/index.js";
 
-const fake = vi.hoisted(() => ({ options: [] as any[], stopError: false, modelError: false, moduleStartError: false, moduleCloseError: false, events: [] as string[], ensured: 0 }));
+const fake = vi.hoisted(() => ({ options: [] as any[], stopError: false, modelError: false, moduleStartError: false, moduleCloseError: false, events: [] as string[], ensured: 0, restorers: [] as any[] }));
+// Every restorer the process builds, so a test can see which one an action reached.
+vi.mock("../../src/process/conversation-restorer.js", () => ({ ConversationRestorer: class {
+  readonly restore = vi.fn(async () => ({ status: "launch_requested" }));
+  readonly resolveCwd = vi.fn(async () => null);
+  constructor() { fake.restorers.push(this); }
+} }));
 // The core's whole Codex side is the host link's hub; the host itself runs in another process.
 vi.mock("../../src/process/codex-host-hub.js", () => ({ CodexHostHub: class {
   readonly client = { request: vi.fn(async () => { if (fake.modelError) throw new Error("fixture models fail"); return { data: [], nextCursor: null }; }), isConnected: () => false, onNotification: () => () => {} };
@@ -37,7 +43,7 @@ afterEach(async () => {
   for (const runtime of running.splice(0)) await runtime.close().catch(() => {});
   vi.restoreAllMocks(); vi.unstubAllEnvs();
   roots.splice(0).forEach(root => rmSync(root, { recursive: true, force: true }));
-  fake.events.length = 0; fake.options.length = 0; fake.ensured = 0;
+  fake.events.length = 0; fake.options.length = 0; fake.ensured = 0; fake.restorers.length = 0;
 });
 const codexCall = (name: string, args: Record<string, unknown>) =>
   fake.options[0].callTool(name, args, { ...caller, requestKey: `codex:${name}` }, new AbortController().signal);
@@ -77,6 +83,24 @@ test("standalone explicitly assembles issues after reconciliation and exposes pr
   await x.runtime.close();
   expect(fake.events.indexOf("issues-close")).toBeLessThan(fake.events.indexOf("codex-host-close"));
   expect(existsSync(join(path, "router.lock"))).toBe(false);
+});
+
+// The restorer's 30-second reservation only keeps a lane from opening twice when the board, the
+// project restore and the issue page all ask the same instance.
+test("a new issue from the page wakes its lane through the one restorer the board and core share", async () => {
+  const path = root(); const x = await boot(path);
+  await x.client.call("lane_attach_current", { address: "fixture/work", role_description: "Fixture role" }, caller);
+  const { url } = JSON.parse(readFileSync(join(path, "discovery.json"), "utf8"));
+  const lanes = await (await fetch(`${url}/issues/api/lanes`)).json() as any;
+  expect(lanes.result.items).toEqual([{ laneId: expect.any(String), address: "fixture/work", project: "fixture", backend: "codex", restorePresence: "unavailable" }]);
+  const response = await fetch(`${url}/issues/api/threads`, {
+    method: "POST", headers: { origin: url, "x-lane-router-action": "issues-create", "content-type": "application/json" },
+    body: JSON.stringify({ actionToken: lanes.actionToken, operationKey: "new", laneId: lanes.result.items[0].laneId, title: "T", body: "B" }),
+  });
+  expect(response.status).toBe(200);
+  expect((await response.json() as any).wake).toEqual({ status: "launch_requested" });
+  expect(fake.restorers).toHaveLength(1);
+  expect(fake.restorers[0].restore.mock.calls).toEqual([[expect.objectContaining({ laneAddress: "fixture/work", backend: "codex", conversationId: "fake-thread" })]]);
 });
 
 test("core-only assembly never constructs the module or creates its database", async () => {

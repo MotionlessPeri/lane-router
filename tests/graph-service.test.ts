@@ -17,6 +17,7 @@ function setupGraph() {
     resolveCaller(ctx) { const found = identities.get(ctx.conversationId); if (!found) throw new Error("NOT_ATTACHED"); return { ...found }; },
     assertCurrentCaller(ctx, expected) { beforeAssert?.(); if (JSON.stringify(identities.get(ctx.conversationId)) !== JSON.stringify(expected)) throw new Error("BINDING_CHANGED"); },
     readLane(id) { return { laneId: id, address: `project/${id}`, archivedAt: null, binding: null, reach: null }; },
+    listActiveLanes() { return []; },
   };
   const make = () => new GraphsService({ store, lanes, now: () => ++clock, newId: () => `id-${++counter}` });
   let service = make();

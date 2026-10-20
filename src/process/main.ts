@@ -32,7 +32,7 @@ import { spawnHeadlessZcodeLane } from "./zcode-lane-spawner.js";
 import { ToolService } from "../tools/tool-service.js";
 import { bindBuiltinTools, communicationToolCatalog, productToolCatalog } from "../application/builtin-tools.js";
 import type { ApplicationTools } from "../application/tool-catalog.js";
-import { openIssuesModule } from "../modules/issues/index.js";
+import { openIssuesModule, type IssueWakePort } from "../modules/issues/index.js";
 import { openGraphs } from "../modules/graphs/index.js";
 import { ClaudeChannelHub, LocalRouterServer } from "./local-server.js";
 import { RuntimeLock } from "./runtime-lock.js";
@@ -182,7 +182,7 @@ export async function runRouterProcess(options: {
     tools = new ToolService(core);
     if (options.issues !== false) {
       try {
-        issues = openIssuesModule({ databasePath: join(dataRoot, "issues.sqlite"), lanes: core, delivery: core,
+        issues = openIssuesModule({ databasePath: join(dataRoot, "issues.sqlite"), lanes: core, delivery: core, wake: issueWakePort(state, restore),
           onError: error => process.stderr.write(`Issues module: ${error instanceof Error ? error.message : "unknown error"}\n`) });
       } catch (error) {
         process.stderr.write(`ISSUES_UNAVAILABLE: ${error instanceof Error ? error.message : "unknown error"}\n`);
@@ -266,6 +266,23 @@ export async function runRouterProcess(options: {
     rmSync(discoveryPath, { force: true });
     await closeResources();
   } };
+}
+
+/**
+ * The 问答 page's wake, by the lane's stable ID so an address reused since cannot open the wrong
+ * lane. It must be handed the restorer the board and the core already use: the 30-second
+ * reservation that keeps a lane from opening twice lives on that one instance. The restorer's
+ * message can name a directory on this machine, and the page has no use for it.
+ */
+export function issueWakePort(state: Pick<RouterStateStore, "activeBindingForLaneId">, restore: Pick<ConversationRestorer, "restore">): IssueWakePort {
+  return {
+    async wake(laneId) {
+      const binding = state.activeBindingForLaneId(laneId);
+      if (binding === undefined) return { status: "failed", reason: "no_binding" };
+      const restored = await restore.restore(binding);
+      return restored.status === "failed" ? { status: "failed", reason: restored.reason } : { status: restored.status };
+    },
+  };
 }
 
 /** Loads or creates the private bearer credential shared with the trusted local DSH Host. */

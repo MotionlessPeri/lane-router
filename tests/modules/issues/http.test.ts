@@ -5,8 +5,8 @@ import { IssuesHttp } from "../../../src/modules/issues/http.js";
 
 const cleanup: Array<() => unknown | Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
-async function fixture(mode: "ready" | "absent" | "broken" = "ready") {
-  const x = setupIssues(); cleanup.push(() => x.dispose());
+async function fixture(mode: "ready" | "absent" | "broken" = "ready", options: Parameters<typeof setupIssues>[0] = {}) {
+  const x = setupIssues(options); cleanup.push(() => x.dispose());
   const readPage = vi.fn(() => "<html>injected issue asset</html>");
   const call = vi.fn();
   const server = new LocalRouterServer({ tools: { call } as never,
@@ -21,7 +21,11 @@ async function fixture(mode: "ready" | "absent" | "broken" = "ready") {
     method: "POST", headers: { origin: url, "x-lane-router-action": `issues-${action === "replies" ? "reply" : action}`, "content-type": "application/json", ...headers },
     body: JSON.stringify({ actionToken: token, ...body as object }),
   });
-  return { x, url, token, get, post, call, readPage };
+  const create = (body: unknown, headers: Record<string, string> = {}) => fetch(`${url}/issues/api/threads`, {
+    method: "POST", headers: { origin: url, "x-lane-router-action": "issues-create", "content-type": "application/json", ...headers },
+    body: JSON.stringify({ actionToken: token, ...body as object }),
+  });
+  return { x, url, token, get, post, create, call, readPage };
 }
 
 test("issues HTTP serves injected asset, attention lists and paginated history with instance token", async () => {
@@ -43,9 +47,11 @@ test("issues HTTP serves injected asset, attention lists and paginated history w
 test("unknown issue methods and action URLs never consume a body", async () => {
   const handler = new IssuesHttp({ origin: () => "http://127.0.0.1", actionToken: "token", service: {} as never });
   for (const [method, url] of [
-    ["POST", "/issues/api/threads"], ["POST", "/issues/api/threads/i/replies?probe=1"],
+    ["POST", "/issues/api/threads?probe=1"], ["POST", "/issues/api/threads?"], ["POST", "/issues/api/threads/"],
+    ["PUT", "/issues/api/threads"], ["POST", "/issues/api/threads/i/replies?probe=1"],
     ["POST", "/issues/api/threads/i/replies?"], ["PATCH", "/issues/api/threads/i"],
     ["GET", "/issues/api/threads/i/replies"], ["POST", "/issues/api/create"], ["OPTIONS", "/issues"],
+    ["POST", "/issues/api/lanes"], ["GET", "/issues/api/lanes/lane-one"],
   ]) {
     const request = { method, url, headers: {}, [Symbol.asyncIterator]: vi.fn(() => { throw new Error("body read"); }) };
     const response = { writeHead: vi.fn(), end: vi.fn() };
@@ -124,4 +130,86 @@ test("HTTP protections reject identity and extra fields after origin, header, JS
     const response = await f.get(`/issues/api/threads?${query}`); expect(response.status, query).toBe(400);
   }
   expect(f.x.service.detail(a.issueId).deliveries).toEqual([]);
+});
+
+test("a new issue goes through the same four checks before the service, takes only its own fields, and says nothing about waking without a port", async () => {
+  const f = await fixture(); const create = vi.spyOn(f.x.service, "create");
+  const input = { operationKey: "new", laneId: "lane-two", title: "新话题", body: "正文" };
+  const cases = [
+    [{ origin: "https://other.invalid" }, {}, 403, "origin is not the Router dashboard"],
+    [{ "x-lane-router-action": "issues-reply" }, {}, 403, "action header is invalid"],
+    [{ "content-type": "text/plain" }, {}, 400, "content-type must be application/json"],
+    [{}, { actionToken: "wrong" }, 403, "action token is invalid"],
+  ] as const;
+  for (const [headers, body, status, error] of cases) {
+    const response = await f.create({ ...input, ...body }, headers); expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ error });
+  }
+  for (const key of ["ownerLaneId", "issueId", "questionId", "author", "source", "target", "confirmed"]) {
+    const response = await f.create({ ...input, [key]: "spoof" });
+    expect(response.status, key).toBe(400); expect(await response.json()).toMatchObject({ code: "INVALID_INPUT" });
+  }
+  expect(create).not.toHaveBeenCalled();
+  // A query string is not this entry; the request falls through to the server's own answer.
+  const queried = await fetch(`${f.url}/issues/api/threads?x=1`, { method: "POST", headers: { origin: f.url, "x-lane-router-action": "issues-create", "content-type": "application/json" }, body: JSON.stringify({ actionToken: f.token, ...input }) });
+  expect(queried.status).toBe(404);
+  expect(create).not.toHaveBeenCalled();
+  expect(f.x.service.list({ filter: "all" }).items).toEqual([]);
+
+  const saved = await f.create(input); expect(saved.status).toBe(200);
+  const body = await saved.json() as any;
+  expect(Object.keys(body)).toEqual(["result"]);
+  expect(body.result).toEqual({ issueId: expect.any(String), entryId: expect.any(String), entrySeq: 1, questionId: expect.any(String), deliveryId: expect.any(String) });
+  expect(create.mock.calls).toEqual([[input]]);
+  expect(f.x.service.detail(body.result.issueId).thread).toMatchObject({ ownerLaneId: "lane-two", title: "新话题" });
+  // The same operation again is the same answer, as for a reply.
+  expect(await (await f.create(input)).json()).toEqual(body);
+  const refused = await f.create({ ...input, operationKey: "ghost", laneId: "lane-ghost" });
+  expect(refused.status).toBe(409); expect(await refused.json()).toMatchObject({ code: "LANE_UNAVAILABLE" });
+  const reply = await f.post(body.result.issueId, "replies", { operationKey: "reply", body: "补充" });
+  expect(Object.keys(await reply.json() as object)).toEqual(["result"]);
+});
+
+test("a saved new issue or reply wakes its lane once and returns what the wake said; a failed or throwing wake is still a 200, and a refused save wakes nothing", async () => {
+  const wake = vi.fn(async (_laneId: string): Promise<any> => ({ status: "launch_requested" }));
+  const f = await fixture("ready", { wake: { wake } });
+  const created = await f.create({ operationKey: "new", laneId: "lane-two", title: "新话题", body: "正文" });
+  expect(created.status).toBe(200);
+  const body = await created.json() as any; const issueId = body.result.issueId;
+  expect(body).toEqual({ result: expect.objectContaining({ issueId }), wake: { status: "launch_requested" } });
+  expect(wake.mock.calls).toEqual([["lane-two"]]);
+
+  wake.mockResolvedValueOnce({ status: "failed", reason: "session_not_found" });
+  const failed = await f.post(issueId, "replies", { operationKey: "reply", body: "补充" });
+  expect(failed.status).toBe(200);
+  expect(await failed.json()).toEqual({ result: expect.objectContaining({ issueId, deliveryId: expect.any(String) }), wake: { status: "failed", reason: "session_not_found" } });
+  wake.mockRejectedValueOnce(new Error("spawn EPERM"));
+  const thrown = await f.post(issueId, "replies", { operationKey: "again", body: "再补充" });
+  expect(thrown.status).toBe(200); expect((await thrown.json() as any).wake).toEqual({ status: "failed", reason: "terminal_launch_failed" });
+  expect(wake.mock.calls).toEqual([["lane-two"], ["lane-two"], ["lane-two"]]);
+  const detail = f.x.service.detail(issueId);
+  expect(detail.entries.map(entry => entry.body)).toEqual(["正文", "补充", "再补充"]);
+  expect(detail.deliveries).toHaveLength(3);
+
+  // Saves that fail, and writes that are not messages to the lane, wake nothing.
+  const reference = await f.post(issueId, "replies", { operationKey: "bad", body: "x", questionId: "absent" });
+  expect(reference.status).toBe(400);
+  const unknown = await f.create({ operationKey: "ghost", laneId: "lane-ghost", title: "T", body: "B" });
+  expect(unknown.status).toBe(409);
+  expect((await f.post(issueId, "read", { operationKey: "read", throughSeq: 1 })).status).toBe(200);
+  const closed = await f.post(issueId, "close", { operationKey: "close", body: "结束" });
+  expect(closed.status).toBe(200); expect(Object.keys(await closed.json() as object)).toEqual(["result"]);
+  expect(wake).toHaveBeenCalledTimes(3);
+});
+
+test("the lanes a new issue can go to come from the lane query with the page token, and the entry takes no query", async () => {
+  const f = await fixture();
+  f.x.restorePresence.set("lane-two", "offline");
+  f.x.addLane("lane-gone", "project/gone"); f.x.lanes.set("lane-gone", { ...f.x.lanes.get("lane-gone")!, archivedAt: 9 });
+  const response = await f.get("/issues/api/lanes"); expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ actionToken: f.token, result: { items: [
+    { laneId: "lane-one", address: "project/work", project: "project", backend: "codex", restorePresence: "online" },
+    { laneId: "lane-two", address: "project/other", project: "project", backend: "codex", restorePresence: "offline" },
+  ] } });
+  for (const query of ["project=project", "x"]) expect((await f.get(`/issues/api/lanes?${query}`)).status, query).toBe(400);
 });

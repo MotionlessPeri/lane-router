@@ -1,7 +1,7 @@
 import type { BackendRegistry, RestorePresence } from "./backend.js";
 import { isAddressSegment, parseLaneAddress, senderLabel } from "./address.js";
 import type { MailboxStore } from "./mailbox-store.js";
-import type { LaneAccess, LaneAccessFacts, LaneCallerIdentity } from "./lane-access.js";
+import type { ActiveLane, LaneAccess, LaneAccessFacts, LaneCallerIdentity } from "./lane-access.js";
 import type { UserMessageDelivery, UserMessageInput, UserMessageResult, UserMessageTargetState } from "./user-message.js";
 import type { NotificationPump } from "./notification-pump.js";
 import type { RouterStateStore } from "./state-store.js";
@@ -139,6 +139,26 @@ export class RouterCore implements UserMessageDelivery, LaneAccess {
       binding: binding ? { bindingId: binding.id, generation: binding.generation, backend: binding.backend } : null,
       reach: binding ? this.dependencies.backends.find(binding.backend)?.reach(binding) ?? null : null,
     };
+  }
+
+  /**
+   * Presence is the backend's `restorePresence`, for the reason `archiveLane` gives: `reach` calls
+   * a Codex lane whose window is closed `unconfirmed`, and the question here is whether opening it
+   * would open anything. A backend this Router does not run is `unavailable`, as in `resumeInfo`.
+   * Sorted as the board's launcher sorts, so "MobuLiveLink" sits among the m's.
+   */
+  listActiveLanes(): ActiveLane[] {
+    const state = this.dependencies.state;
+    const byName = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base" });
+    return state.listAllLanes().flatMap((lane) => {
+      if (lane.archivedAt !== null) return [];
+      const binding = state.activeBindingForLaneId(lane.id);
+      if (!binding) return [];
+      return [{
+        laneId: lane.id, address: lane.address, project: lane.project, backend: binding.backend,
+        restorePresence: this.dependencies.backends.find(binding.backend)?.restorePresence(binding) ?? "unavailable",
+      }];
+    }).sort((a, b) => byName(a.project, b.project) || byName(a.address, b.address));
   }
 
   directory(project: string): DirectoryEntry[] {

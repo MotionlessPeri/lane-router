@@ -8,7 +8,7 @@
   :root { color-scheme: light dark; --bg: light-dark(#f7f8fa, #15181e); --panel: light-dark(#fff, #1c2028); --text: light-dark(#202938, #edf0f6); --muted: light-dark(#667083, #aab3c3); --line: light-dark(#e2e6ed, #353c49); --hover: light-dark(#edf1f7, #29313e); --active: light-dark(#e9effc, #25334d); --blue: light-dark(#355ca8, #aac6ff); --warm: light-dark(#875b14, #efc478); }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.65 system-ui, "Microsoft YaHei", sans-serif; overflow-wrap: anywhere; }
-  button, textarea, select { font: inherit; color: inherit; }
+  button, textarea, select, input { font: inherit; color: inherit; }
   button, select { cursor: pointer; }
   button { border: 1px solid var(--line); border-radius: 7px; padding: 6px 11px; background: var(--panel); }
   button:hover { background: var(--hover); }
@@ -24,6 +24,7 @@
   .sidebar { display: flex; flex-direction: column; gap: 10px; padding: 14px 12px 0; background: var(--panel); }
   .sidebar-head { display: flex; align-items: baseline; gap: 12px; padding: 0 4px; }
   .sidebar-head a { margin-left: auto; font-size: 13px; }
+  #new-issue { flex: none; padding: 3px 10px; }
   #filters { display: flex; flex-wrap: wrap; gap: 4px; }
   #filters button { border-color: transparent; background: transparent; padding: 5px 9px; }
   #filters [aria-pressed="true"] { background: var(--text); color: var(--panel); }
@@ -97,6 +98,17 @@
   #close-confirmation p { margin-bottom: 10px; }
   #operation-status { white-space: pre-wrap; margin-top: 12px; }
   #operation-recovery { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  /* The new-issue view takes the place of the issue. Its fields are width: 100%, and a form control
+     sized by a percentage gives the form no minimum width, so a long lane address in 发给 cannot
+     widen it past the window. */
+  #new-issue-view { min-width: 0; background: var(--panel); padding: 16px; }
+  #new-form { display: grid; gap: 6px; margin-top: 16px; }
+  #new-form label:not(.visually-hidden) { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  #new-lane, #new-title { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+  #new-body { width: 100%; height: calc(10 * 1.65em + 22px); min-height: calc(3 * 1.65em + 22px); margin-top: 8px; padding: 11px; resize: vertical; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .compose-bottom #send-new { margin-left: auto; }
+  #new-status { white-space: pre-wrap; margin-top: 12px; }
+  #new-recovery { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
   [hidden] { display: none !important; }
   /* Wide screens: a sidebar down the left edge holds the title, the filters and the issue list, and
      the open issue fills the rest of the window, which never counts as less than 420px high. The list
@@ -116,19 +128,20 @@
     #detail-header, #compose-region { flex: none; }
     #history-region { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
     #compose-region { max-height: 50%; overflow-y: auto; }
+    #new-issue-view { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 16px 32px; }
   }
   @media (max-width: 680px) {
     .sidebar { padding: 14px 14px 0; border-bottom: 1px solid var(--line); }
     .list-panel { margin: 0 -14px; padding: 8px 14px 12px; }
     .detail-head { flex-wrap: wrap; }
-    #reply-body { font-size: 16px; }
+    #reply-body, #new-body, #new-title { font-size: 16px; }
   }
   @media (pointer: coarse) { button, select { min-height: 44px; } }
 </style>
 </head>
 <body>
 <aside class="sidebar">
-  <div class="sidebar-head"><h1 title="集中查看答复与问题。看不懂可以继续追问，一轮回复不会自动结束议题。&#10;议题从 TUI 发起 · 本页可直接继续讨论">问答</h1><a href="/dashboard">运行看板</a></div>
+  <div class="sidebar-head"><h1 title="集中查看答复与问题。看不懂可以继续追问，一轮回复不会自动结束议题。&#10;可以在这里新开问答，也可以接着已有的问答讨论">问答</h1><button type="button" id="new-issue" class="primary">新问答</button><a href="/dashboard">运行看板</a></div>
   <nav id="filters" aria-label="议题筛选">
     <button type="button" data-filter="attention" aria-pressed="true">待我处理</button>
     <button type="button" data-filter="open" aria-pressed="false">进行中</button>
@@ -164,6 +177,20 @@
         <div id="operation-recovery" hidden><button type="button" id="retry-operation">用同一操作重试</button><button type="button" id="check-history">查看后端历史</button></div>
       </div>
     </div>
+  </section>
+  <section id="new-issue-view" aria-label="新问答" hidden>
+    <div class="detail-head"><h2>新问答</h2><button type="button" id="cancel-new">取消</button></div>
+    <form id="new-form">
+      <label for="new-lane">发给</label>
+      <select id="new-lane"></select>
+      <label for="new-title">标题</label>
+      <input type="text" id="new-title" placeholder="默认取正文第一行" autocomplete="off">
+      <label for="new-body" class="visually-hidden">正文</label>
+      <textarea id="new-body" placeholder="写下要对这个 lane 说的话…"></textarea>
+      <div class="compose-bottom"><span class="meta">发出后交给所选 lane，等同于在 TUI 里对它说。</span><button type="submit" id="send-new" class="primary">发送</button></div>
+    </form>
+    <p id="new-status" role="status"></p>
+    <div id="new-recovery" hidden><button type="button" id="retry-new">用同一操作重试</button><button type="button" id="check-new">查看后端历史</button></div>
   </section>
 </main>
 <script src="/issues/assets/markdown-it.js"></script>
@@ -257,7 +284,7 @@
         throw error;
       }
       if (init === undefined) actionToken = data.actionToken;
-      return data.result;
+      return data;
     } finally { clearTimeout(timeout); }
   }
   function post(id, action, payload) {
@@ -319,7 +346,7 @@
       for (let page = 0; page < listPages; page++) {
         const query = new URLSearchParams({ filter: requestedFilter, limit: String(PAGE_SIZE) });
         if (cursor) { query.set("beforeUpdatedAt", String(cursor.updatedAt)); query.set("beforeId", cursor.id); }
-        const result = await request("/issues/api/threads?" + query);
+        const { result } = await request("/issues/api/threads?" + query);
         if (version !== listVersion) return;
         for (const item of result.items) items.set(item.id, item);
         cursor = result.nextCursor;
@@ -346,6 +373,7 @@
    * marks read.
    */
   function selectIssue(id) {
+    if (composing) { composing = false; renderNew(); }
     const region = byId("history-region");
     // Where the reader was in the issue being left, to come back to.
     if (selectedId && byId("issue-detail").dataset.issueId === selectedId) viewFor(selectedId).scrollTop = region.scrollTop;
@@ -389,7 +417,7 @@
     view.loading = true;
     if (selectedId === id) byId("load-history").disabled = true;
     try {
-      const result = await request("/issues/api/threads/" + encodeURIComponent(id) + "?afterSeq=" + afterSeq + "&limit=" + PAGE_SIZE);
+      const { result } = await request("/issues/api/threads/" + encodeURIComponent(id) + "?afterSeq=" + afterSeq + "&limit=" + PAGE_SIZE);
       if (version !== view.version) return;
       const entries = new Map(view.entries.map(entry => [entry.seq, entry]));
       for (const entry of result.entries) if (!metadataOnly || entry.seq <= view.through) entries.set(entry.seq, entry);
@@ -595,15 +623,17 @@
   // A draft is kept in this browser, per issue, so a reload does not lose it. A browser that refuses
   // storage (a private window, blocked site data) keeps drafts in memory only, as before.
   const DRAFT_KEY = "lane-router.issues.draft.";
-  function storedDraft(id) {
-    try { return document.defaultView.localStorage.getItem(DRAFT_KEY + id) ?? ""; } catch { return ""; }
+  function stored(key) {
+    try { return document.defaultView.localStorage.getItem(key) ?? ""; } catch { return ""; }
   }
-  function storeDraft(id, text) {
+  function store(key, text) {
     try {
       const storage = document.defaultView.localStorage;
-      if (text) storage.setItem(DRAFT_KEY + id, text); else storage.removeItem(DRAFT_KEY + id);
+      if (text) storage.setItem(key, text); else storage.removeItem(key);
     } catch { /* memory only */ }
   }
+  const storedDraft = id => stored(DRAFT_KEY + id);
+  const storeDraft = (id, text) => store(DRAFT_KEY + id, text);
   /**
    * The reply area opens to about six lines while it is in use — focused, holding a draft, or with
    * an operation in flight or unresolved — and folds back to two otherwise. A history that was at
@@ -658,7 +688,7 @@
     const read = view.reads.get(throughSeq);
     if (read.sending) return;
     read.sending = true;
-    post(id, "read", { operationKey: read.operationKey, throughSeq }).then(result => {
+    post(id, "read", { operationKey: read.operationKey, throughSeq }).then(({ result }) => {
       view.readAck = Math.max(view.readAck, result.readSeq); view.readError = "";
     }).catch(error => { view.readError = "已读位置未确认，将在下次刷新时重试：" + error.message; }).finally(() => {
       read.sending = false; if (selectedId === id) byId("read-status").textContent = view.readError;
@@ -677,11 +707,12 @@
     const wasUncertain = operation.state === "uncertain";
     operation.state = "sending"; view.notice = "正在保存，请稍候…"; view.warning = false; renderDetail(id);
     try {
-      const result = await post(id, operation.action, { ...operation.payload, operationKey: operation.operationKey });
+      const { result, wake } = await post(id, operation.action, { ...operation.payload, operationKey: operation.operationKey });
       if (!result || result.issueId !== id || typeof result.entryId !== "string") throw new Error("未取得可核对的保存结果");
       if (operation.action === "replies") { view.draft = ""; view.questionId = ""; storeDraft(id, ""); }
-      view.operation = null; view.confirmClose = false; view.warning = false;
-      view.notice = operation.action === "replies" ? "已保存，待入箱。请在历史中查看后续交接与处理事实。" : "议题已结束，历史仍可查看。";
+      view.operation = null; view.confirmClose = false;
+      view.notice = operation.action === "replies" ? wakeNotice(wake) : "议题已结束，历史仍可查看。";
+      view.warning = operation.action === "replies" && wake?.status === "failed";
       // The shared composer can now belong to another issue; only reset this issue's controls.
       if (selectedId === id) { byId("compose").removeAttribute("data-for"); renderDetail(id); }
       // The reply just sent is the newest entry; the reader is taken to it once it is back, and
@@ -696,12 +727,131 @@
     }
   }
 
-  for (const button of document.querySelectorAll("[data-filter]")) button.addEventListener("click", () => {
-    filter = button.dataset.filter; listPages = 1; listCursor = null; listItems = []; shownTopics = []; listVersion++; listLoading = false;
-    for (const tab of document.querySelectorAll("[data-filter]")) tab.setAttribute("aria-pressed", String(tab === button));
+  /** What became of a message just saved and its lane, from the wake the save answered with. */
+  const wakeReasons = { no_binding: "没有对话记录", session_not_found: "找不到原来的对话", invalid_startup_cwd: "原来的工作目录不在了",
+    backend_unavailable: "这种 lane 不能由 Router 打开，或者 Codex 宿主没连上", terminal_launch_failed: "终端没能启动" };
+  function wakeNotice(wake) {
+    if (wake?.status === "launch_requested") return "已发送。这个 lane 没开着，已经让 Router 打开它的窗口。";
+    if (wake?.status === "skipped_launching") return "已发送。这个 lane 正在打开。";
+    if (wake?.status === "failed") return "已发送，但没能打开这个 lane（" + (wakeReasons[wake.reason] || wake.reason) + "）。消息会等它打开后再处理，可以去运行看板手动恢复。";
+    return "已发送。";
+  }
+
+  /**
+   * The new-issue view takes the issue's place; while it is open no issue is selected. Its one
+   * draft is kept in this browser apart from the issue drafts, read the first time the view opens,
+   * and the lane last chosen is chosen again while it is still listed. 取消 only closes the view.
+   */
+  const NEW_DRAFT = "lane-router.issues.new-draft", NEW_LANE = "lane-router.issues.new-lane";
+  const restoreLabels = { online: "在线", offline: "没开着，发出后会打开它的窗口", unavailable: "暂时打不开，消息会等它恢复" };
+  const fresh = { loaded: false, title: "", body: "", laneId: "", operation: null, notice: "", warning: false };
+  let composing = false, lanes = null, lanesError = "", renderedLanes = "";
+  function openNew() {
+    if (composing) { byId("new-body").focus(); return; }
+    if (selectedId && byId("issue-detail").dataset.issueId === selectedId) viewFor(selectedId).scrollTop = byId("history-region").scrollTop;
+    selectedId = null; historyFor = null; sight?.observer.disconnect(); sight = null;
+    byId("issue-detail").removeAttribute("data-issue-id");
+    renderList();
+    if (!fresh.loaded) {
+      fresh.loaded = true;
+      try { const draft = JSON.parse(stored(NEW_DRAFT) || "{}"); fresh.title = String(draft.title ?? ""); fresh.body = String(draft.body ?? ""); } catch { /* no draft */ }
+      fresh.laneId = stored(NEW_LANE);
+    }
+    byId("new-title").value = fresh.title; byId("new-body").value = fresh.body;
+    composing = true; renderNew(); void loadLanes();
+  }
+  function closeNew() {
+    composing = false; renderNew();
+    byId("detail-empty").textContent = "选择一个议题，查看完整讨论。";
+    byId("detail-empty").hidden = false; byId("detail-content").hidden = true;
+  }
+  async function loadLanes() {
+    try { lanes = (await request("/issues/api/lanes")).result.items; lanesError = ""; }
+    catch (error) { lanesError = "读取 lane 列表失败：" + error.message; }
+    renderNew();
+  }
+  function renderNew() {
+    byId("new-issue-view").hidden = !composing; byId("issue-detail").hidden = composing;
+    if (!composing) return;
+    const select = byId("new-lane"), signature = JSON.stringify(lanes);
+    if (signature !== renderedLanes) {
+      renderedLanes = signature;
+      const none = node("option", null, lanes ? "选择 lane…" : "正在读取 lane…"); none.value = "";
+      const groups = new Map();
+      for (const lane of lanes ?? []) {
+        if (!groups.has(lane.project)) { const group = node("optgroup"); group.label = lane.project; groups.set(lane.project, group); }
+        const option = node("option", null, lane.address + " · " + (restoreLabels[lane.restorePresence] || lane.restorePresence));
+        option.value = lane.laneId; groups.get(lane.project).append(option);
+      }
+      select.replaceChildren(none, ...groups.values());
+    }
+    const listed = (lanes ?? []).some(lane => lane.laneId === fresh.laneId);
+    select.value = listed ? fresh.laneId : "";
+    const busy = Boolean(fresh.operation);
+    for (const id of ["new-lane", "new-title", "new-body"]) byId(id).disabled = busy;
+    byId("send-new").disabled = busy || !listed || !fresh.body.trim();
+    byId("new-status").textContent = fresh.notice || lanesError;
+    byId("new-status").className = fresh.warning || (!fresh.notice && lanesError) ? "warning" : "meta";
+    byId("new-recovery").hidden = !fresh.operation || fresh.operation.state !== "uncertain";
+    byId("retry-new").disabled = Boolean(fresh.operation && fresh.operation.state === "sending");
+  }
+  const storeNewDraft = () => store(NEW_DRAFT, fresh.title || fresh.body ? JSON.stringify({ title: fresh.title, body: fresh.body }) : "");
+  /** The body's first line with text in it, less a Markdown heading's marks, cut to 60 characters. */
+  function defaultTitle(body) {
+    const line = body.split("\n").map(text => text.trim()).find(Boolean) ?? "";
+    return [...(line.replace(/^#{1,6}\s+/, "").trim() || line)].slice(0, 60).join("");
+  }
+  function startNew() {
+    if (fresh.operation || !composing) return;
+    const lane = (lanes ?? []).find(item => item.laneId === fresh.laneId);
+    if (!lane || !fresh.body.trim()) return;
+    fresh.operation = { operationKey: crypto.randomUUID(), payload: { laneId: lane.laneId, title: fresh.title.trim() || defaultTitle(fresh.body), body: fresh.body }, state: "new" };
+    void runNew();
+  }
+  /** As runOperation, for an issue that does not exist yet: one key per draft, kept until settled. */
+  async function runNew() {
+    const operation = fresh.operation;
+    if (!operation || operation.state === "sending") return;
+    const wasUncertain = operation.state === "uncertain";
+    operation.state = "sending"; fresh.notice = "正在保存，请稍候…"; fresh.warning = false; renderNew();
+    try {
+      const { result, wake } = await request("/issues/api/threads", {
+        method: "POST", headers: { "content-type": "application/json", "x-lane-router-action": "issues-create" },
+        body: JSON.stringify({ ...operation.payload, operationKey: operation.operationKey, actionToken }),
+      });
+      if (!result || typeof result.issueId !== "string" || typeof result.entryId !== "string") throw new Error("未取得可核对的保存结果");
+      Object.assign(fresh, { operation: null, title: "", body: "", notice: "", warning: false, laneId: operation.payload.laneId });
+      byId("new-title").value = ""; byId("new-body").value = "";
+      store(NEW_DRAFT, ""); store(NEW_LANE, fresh.laneId);
+      const view = viewFor(result.issueId);
+      view.notice = wakeNotice(wake); view.warning = wake?.status === "failed";
+      // It waits on the lane, so it is under 进行中, not 待我处理. A reader who has gone elsewhere
+      // in the meantime stays there.
+      if (composing) { composing = false; renderNew(); showFilter("open"); selectIssue(result.issueId); }
+      else void loadList();
+    } catch (error) {
+      if (wasUncertain || error.uncertain !== false) {
+        operation.state = "uncertain"; fresh.notice = "结果未确定：" + error.message + "。正文和操作已保留，请用同一操作重试，或查看后端历史。确认前不能修改或重新发送。";
+      } else { fresh.operation = null; fresh.notice = "保存失败：" + error.message + "。草稿已保留，可修改后重试。"; }
+      fresh.warning = true; renderNew();
+    }
+  }
+
+  function showFilter(name) {
+    filter = name; listPages = 1; listCursor = null; listItems = []; shownTopics = []; listVersion++; listLoading = false;
+    for (const tab of document.querySelectorAll("[data-filter]")) tab.setAttribute("aria-pressed", String(tab.dataset.filter === name));
     renderList(); void loadList();
-  });
-  const refresh = () => { void loadList(); if (selectedId) void loadDetail(selectedId); };
+  }
+  for (const button of document.querySelectorAll("[data-filter]")) button.addEventListener("click", () => showFilter(button.dataset.filter));
+  byId("new-issue").addEventListener("click", openNew);
+  byId("cancel-new").addEventListener("click", closeNew);
+  byId("new-lane").addEventListener("change", () => { if (!fresh.operation) { fresh.laneId = byId("new-lane").value; store(NEW_LANE, fresh.laneId); renderNew(); } });
+  byId("new-title").addEventListener("input", () => { if (!fresh.operation) { fresh.title = byId("new-title").value; storeNewDraft(); } });
+  byId("new-body").addEventListener("input", () => { if (!fresh.operation) { fresh.body = byId("new-body").value; storeNewDraft(); renderNew(); } });
+  byId("new-form").addEventListener("submit", event => { event.preventDefault(); startNew(); });
+  byId("retry-new").addEventListener("click", () => { void runNew(); });
+  byId("check-new").addEventListener("click", () => showFilter("open"));
+  const refresh = () => { void loadList(); if (selectedId) void loadDetail(selectedId); if (composing) void loadLanes(); };
   byId("refresh").addEventListener("click", refresh);
   byId("load-threads").addEventListener("click", () => { void loadList(true); });
   byId("load-history").addEventListener("click", () => { if (selectedId) void loadDetail(selectedId, true); });
@@ -721,7 +871,7 @@
   document.defaultView.addEventListener("focus", () => { if (sight) noteSeen(sight.id); });
   // An operation in flight or of unknown outcome holds a key a reload would lose, so leaving asks
   // first. A draft alone does not: it is kept in storage.
-  document.defaultView.addEventListener("beforeunload", event => { if ([...views.values()].some(view => view.operation)) event.preventDefault(); });
+  document.defaultView.addEventListener("beforeunload", event => { if (fresh.operation || [...views.values()].some(view => view.operation)) event.preventDefault(); });
   void loadList();
   setInterval(() => { if (document.visibilityState !== "hidden") refresh(); }, 5000);
 })();

@@ -2,12 +2,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { IssuesService, openIssueStore } from "../../../src/modules/issues/index.js";
+import { IssuesService, openIssueStore, type IssueWakePort } from "../../../src/modules/issues/index.js";
+import type { RestorePresence } from "../../../src/router/backend.js";
 import type { LaneAccess, LaneAccessFacts, LaneCallerIdentity } from "../../../src/router/lane-access.js";
 import type { CallerContext } from "../../../src/router/types.js";
 
 /** IDs are short and numbered unless `newId` is given, e.g. real UUIDs where a page shortens them. */
-export function setupIssues(options: { newId?: () => string } = {}) {
+export function setupIssues(options: { newId?: () => string; wake?: IssueWakePort } = {}) {
   const root = mkdtempSync(join(tmpdir(), "lane-issues-"));
   const path = join(root, "issues.sqlite");
   let store = openIssueStore(path);
@@ -23,6 +24,8 @@ export function setupIssues(options: { newId?: () => string } = {}) {
   };
   const caller = addLane("lane-one");
   const other = addLane("lane-two", "project/other");
+  /** What the backend would say about reopening each lane; online unless a test says otherwise. */
+  const restorePresence = new Map<string, RestorePresence>();
   let beforeAssert: (() => void) | undefined;
   const access: LaneAccess = {
     resolveCaller(context) {
@@ -38,11 +41,19 @@ export function setupIssues(options: { newId?: () => string } = {}) {
       }
     },
     readLane(id) { return lanes.get(id) ?? null; },
+    // In the order the lanes were added; RouterCore's own query is what sorts.
+    listActiveLanes() {
+      return [...lanes.values()].flatMap(lane => lane.archivedAt !== null || lane.binding === null ? [] : [{
+        laneId: lane.laneId, address: lane.address, project: lane.address.split("/")[0]!,
+        backend: lane.binding.backend, restorePresence: restorePresence.get(lane.laneId) ?? "online",
+      }]);
+    },
   };
-  const makeService = () => new IssuesService({ store, lanes: access, now: () => ++tick, newId: options.newId ?? (() => `id-${++sequence}`) });
+  const makeService = () => new IssuesService({ store, lanes: access, now: () => ++tick, newId: options.newId ?? (() => `id-${++sequence}`),
+    ...(options.wake ? { wake: options.wake } : {}) });
   let service = makeService();
   return {
-    root, path, caller, other, access, lanes, identities, addLane,
+    root, path, caller, other, access, lanes, identities, addLane, restorePresence,
     get service() { return service; }, get store() { return store; },
     beforeAssert(fn: () => void) { beforeAssert = fn; },
     reopen() { store.close(); store = openIssueStore(path); service = makeService(); },

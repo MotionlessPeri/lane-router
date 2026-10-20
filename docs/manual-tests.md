@@ -237,6 +237,73 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
 - **1920×1000：** 侧边栏 320px，内容 x 352–1888，历史区 733px。
 - **375×800：** 整页滚动，`scrollWidth` 375，没有横向滚动；历史区 `overflow` 为 `visible`。
 
+### 从问答页新开问答，lane 没开着就唤醒
+
+需求与设计见 `docs/superpowers/specs/2026-10-20-issue-start-from-page.md`。
+
+**新问答：**
+- 侧边栏顶上「问答」旁边有「新问答」按钮。点了以后，右边不显示议题，换成新问答视图：
+  - 「发给」：按项目分组列出在役、跑过对话的 lane，每项写着「在线」「没开着，发出后会打开它的窗口」或「暂时打不开，消息会等它恢复」。
+  - 「标题」：可以不填。不填时取正文第一行有字的那行，去掉行首的 `#`，截到 60 个字。
+  - 正文。
+- 没选 lane 或正文为空时不能发送。
+- 发出后切到「进行中」并选中这条新议题。lane 收到的信写明：这是用户本人的话，等同于在 TUI 里说的，答复写在这条问答里。
+- 草稿（标题和正文）存在这台机器的浏览器里，刷新后还在，发出后清掉。点「取消」只关掉视图，不清草稿。上次选的 lane 下次会预选，它不在列表里了就不预选。
+- 发送结果不明时，和回复一样，出现「用同一操作重试」和「查看后端历史」。新问答的「查看后端历史」会把列表切到「进行中」，新问答视图留着不关。
+
+**唤醒：**
+- 新问答或回复保存成功后，Router 用运行看板「恢复 lane」的同一套逻辑打开这个 lane 的窗口。lane 在线就跳过；30 秒内重复打开同一条 lane 会被挡住，看板和问答页共用这一道防重。
+- 状态行显示结果：
+  - 「已发送。」
+  - 「已发送。这个 lane 没开着，已经让 Router 打开它的窗口。」
+  - 「已发送。这个 lane 正在打开。」
+  - 「已发送，但没能打开这个 lane（原因）。消息会等它打开后再处理，可以去运行看板手动恢复。」
+- 打不开不影响保存：信已经在 lane 的信箱里，lane 下次开着时会处理。
+
+自动测试：
+- `tests/modules/issues/create.test.ts`：建议题的事务、各种拒绝、同键重放，以及唤醒端口抛错时算作唤醒失败。
+- `tests/modules/issues/http.test.ts`：新入口的四项检查、字段白名单、响应里的 `wake`，以及 `GET /issues/api/lanes`。
+- `tests/router/router-core.test.ts`：可选 lane 的筛选和排序。
+- `tests/process/issue-wake.test.ts`：`main.ts` 的唤醒实现。
+- `tests/process/issues-startup.test.ts`：在整个 Router 进程里，唤醒用的是和看板、核心共用的那一个 restorer。
+- `tests/modules/issues/ui.test.ts`：happy-dom 下的页面行为。
+- `tests/modules/issues/layout-browser.test.ts` 的「new issue」一组：在 Edge 里从发送到选中走一遍，并量宽窄两种窗口下的布局。
+
+#### TC-ISSUES-START-1：给在线 lane 新开问答（第 9 条）
+
+**前提：** 主检出构建到含此改动的版本，并重启 Router（改了后端）。构建和重启的时机归用户。
+
+1. 打开 `/issues`，点「新问答」。
+2. 「发给」选一个标着「在线」的 lane，标题留空，正文写一个它能直接回答的小问题，发送。
+3. 等 lane 答复。
+
+**预期：**
+- 第 2 步：
+  - 列表切到「进行中」，选中新议题，标题是正文第一行。
+  - 状态行写「已发送。」。
+  - 议题第一条是「我 · 提问」，问题状态是「等待 lane」。
+- 第 3 步：lane 在这条问答里答复，问题自动变成「已回答」。lane 没有回 TUI 找人确认。
+
+**最后验证：** 尚未执行。
+
+#### TC-ISSUES-WAKE-1：唤醒没开着的 Claude lane 和 Codex lane（第 10 条）
+
+**前提：**
+- 同上，主检出构建到含此改动的版本，并重启 Router。
+- 准备一个没开着的 Claude lane 和一个没开着的 Codex lane，都跑过对话。Codex lane 最好是宿主里已经卸载的，也就是关窗后 Router 或宿主重启过。
+
+1. 在问答页给 Claude lane 发一条（新问答或回复都行），不碰任何 TUI。
+2. 对 Codex lane 做同样的事。
+3. 在运行看板上「恢复 lane」，恢复一个信箱里有积压信的 lane，同样不碰 TUI。
+
+**预期：**
+- 第 1、2 步：
+  - 状态行写「已发送。这个 lane 没开着，已经让 Router 打开它的窗口。」，桌面上弹出这个 lane 的终端窗口。
+  - 没人打字，lane 也会自己开始处理这封信，并在问答里答复。
+- 第 3 步：lane 起来后同样自己处理积压的信。
+
+**最后验证：** 尚未执行。
+
 ### 四项议题工具
 
 工具调用身份取自当前已绑定会话，只能读取或修改本 lane 的议题；不用参数指定 owner、backend、generation、source 或 `confirmed`。业务写入均使用非空 `operationKey`；同一操作重试保持同键同内容，同键异内容返回 `OPERATION_CONFLICT`。RPC call ID 不是业务操作键。

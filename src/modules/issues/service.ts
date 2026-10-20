@@ -1,14 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { LaneAccessFacts, LaneCallerIdentity } from "../../router/lane-access.js";
+import type { ActiveLane, LaneAccessFacts, LaneCallerIdentity } from "../../router/lane-access.js";
 import type { CallerContext } from "../../router/types.js";
 import type { IssuesServiceOptions, IssueStore } from "./ports.js";
 import {
   IssueError,
-  type AppendIssueInput, type AttentionReason, type CloseIssueInput, type IssueDetail,
+  type AppendIssueInput, type AttentionReason, type CloseIssueInput, type CreateIssueInput, type IssueDetail,
   type IssueEntry, type IssueEntryResult, type IssueHistoryQuery, type IssueList,
   type IssueListQuery, type IssueOwner, type IssuePresence, type IssueProcessedResult, type IssueQuestion, type IssueThread,
-  type PublishIssueInput, type ReadIssueInput, type RecordProcessedInput, type ReplyIssueInput, type UpdateIssueQuestionInput,
+  type IssueWakeResult, type PublishIssueInput, type ReadIssueInput, type RecordProcessedInput, type ReplyIssueInput,
+  type UpdateIssueQuestionInput,
 } from "./types.js";
 
 /** Business authority is here; clients display saved facts and never infer completion from delivery. */
@@ -143,6 +144,55 @@ export class IssuesService {
     });
   }
 
+  /**
+   * The user opens a topic with one lane from the page. The lane is told these are the user's own
+   * words, the same as typing in its TUI, and that the answer belongs in this issue. Who opened it
+   * is the first entry's author; `originKind` keeps the schema's existing values.
+   */
+  create(input: CreateIssueInput): IssueEntryResult {
+    fields(input, ["operationKey", "laneId", "title", "body"]);
+    const operationKey = text(input.operationKey, "operationKey");
+    const laneId = text(input.laneId, "laneId");
+    const title = text(input.title, "title").trim();
+    const body = text(input.body, "body");
+    return this.store.transaction(() => this.operation("user:local", "create", operationKey, { laneId, title, body }, () => {
+      const lane = this.options.lanes.readLane(laneId);
+      // No conversation means nothing would ever read the delivery, and nothing could be woken.
+      if (lane === null || lane.archivedAt !== null || lane.binding === null) {
+        throw new IssueError("LANE_UNAVAILABLE", "The lane is missing, archived or has no conversation");
+      }
+      const now = this.now();
+      const thread: IssueThread = { id: this.newId(), ownerLaneId: laneId, title, originKind: "question",
+        status: "open", createdAt: now, updatedAt: now, closedAt: null, readSeq: 0, nextSeq: 1 };
+      this.store.insertThread(thread);
+      const entry = this.addEntry(thread.id, "question", "user", "user_page", body, null, null);
+      const question = this.addQuestion(entry, "lane", "waiting_lane");
+      const deliveryId = this.deliver(thread, entry, question.id, {
+        opening: "用户在问答页新开了一个问答。这是用户本人的话，等同于在 TUI 里对你说的，按你处理用户指令的方式处理，不需要回 TUI 确认。答复写在这条问答里。",
+        entryLabel: "条目", context: [`用户的话：\n${body}`],
+      });
+      return { ...result(entry, question.id), deliveryId };
+    }));
+  }
+
+  /** The lanes a new issue can go to. */
+  listLanes(): { readonly items: readonly ActiveLane[] } {
+    return { items: this.options.lanes.listActiveLanes() };
+  }
+
+  /**
+   * Opens the issue's lane if it is not open, once a save has put a message in its mailbox. Waking
+   * is never part of the save: a port that throws is a failed wake, and with no port there is
+   * nothing to report.
+   */
+  async wakeOwner(issueId: string): Promise<IssueWakeResult | undefined> {
+    const wake = this.options.wake;
+    if (!wake) return undefined;
+    const { ownerLaneId } = this.requireThread(issueId);
+    try { return await wake.wake(ownerLaneId); }
+    catch { return { status: "failed", reason: "terminal_launch_failed" }; }
+  }
+
   reply(input: ReplyIssueInput): IssueEntryResult {
     fields(input, ["operationKey", "issueId", "body", "questionId"]);
     const operationKey = text(input.operationKey, "operationKey");
@@ -155,25 +205,11 @@ export class IssuesService {
       const question = questionId === null ? null : this.requireQuestion(issueId, questionId);
       const entry = this.addEntry(issueId, "reply", "user", "user_page", body, question?.promptEntryId ?? null, null);
       const round = this.userTurn(entry, question);
-      const deliveryId = this.newId();
       const prompt = question === null ? null : this.store.entry(issueId, question.promptEntryId);
-      // Freeze the assembled context once. Delivery retries must never rebuild it from later history.
-      const deliveryBody = [
-        "用户已在议题页面回复，无需回 TUI 重复。请在原任务内继续处理。",
-        `议题 ID: ${issueId}\n标题: ${thread.title}\n所属 lane ID: ${thread.ownerLaneId}`,
-        `回复 entry ID: ${entry.id}\n投递 delivery ID: ${deliveryId}\n问题 ID: ${round.id}`,
-        ...(prompt ? [`关联问题：\n${prompt.body}`] : []),
-        `用户回复：\n${body}`,
-        `查询完整议题：调用 lane_issue_read，参数 ${JSON.stringify({ issueId })}。`,
-        `下一步：处理完后，用 lane_issue_append（kind: answer，questionId: ${round.id}）答复，该问题会自动标为已回答；再用 lane_issue_update 的 record_processed（deliveryId: ${deliveryId}）记录这次投递；最后用 lane_ack 确认这封邮件。`,
-        "处理回执使用上述 delivery ID；入箱与处理完成是分别记录的事实。",
-      ].join("\n\n");
-      const now = this.now();
-      this.store.insertDelivery({ id: deliveryId, issueId, entryId: entry.id, ownerLaneId: thread.ownerLaneId,
-        body: deliveryBody, sourceKind: "user", sourceOrigin: "issues", requestKey: `issues:${deliveryId}`,
-        handoffState: "pending", coreMessageId: null, attemptCount: 0, nextAttemptAt: now,
-        lastError: null, lastTargetState: null, processedAt: null, processedByBindingId: null,
-        processedByGeneration: null, createdAt: now });
+      const deliveryId = this.deliver(thread, entry, round.id, {
+        opening: "用户已在议题页面回复，无需回 TUI 重复。请在原任务内继续处理。",
+        entryLabel: "回复", context: [...(prompt ? [`关联问题：\n${prompt.body}`] : []), `用户回复：\n${body}`],
+      });
       return { ...result(entry, round.id), deliveryId };
     });
   }
@@ -293,6 +329,27 @@ export class IssuesService {
     this.store.insertEntry(entry);
     this.store.updateThread({ ...thread, nextSeq: thread.nextSeq + 1, updatedAt: now });
     return entry;
+  }
+
+  /** Freeze the assembled context once. Delivery retries must never rebuild it from later history. */
+  private deliver(thread: IssueThread, entry: IssueEntry, questionId: string, wording: { opening: string; entryLabel: string; context: readonly string[] }): string {
+    const deliveryId = this.newId();
+    const body = [
+      wording.opening,
+      `议题 ID: ${thread.id}\n标题: ${thread.title}\n所属 lane ID: ${thread.ownerLaneId}`,
+      `${wording.entryLabel} entry ID: ${entry.id}\n投递 delivery ID: ${deliveryId}\n问题 ID: ${questionId}`,
+      ...wording.context,
+      `查询完整议题：调用 lane_issue_read，参数 ${JSON.stringify({ issueId: thread.id })}。`,
+      `下一步：处理完后，用 lane_issue_append（kind: answer，questionId: ${questionId}）答复，该问题会自动标为已回答；再用 lane_issue_update 的 record_processed（deliveryId: ${deliveryId}）记录这次投递；最后用 lane_ack 确认这封邮件。`,
+      "处理回执使用上述 delivery ID；入箱与处理完成是分别记录的事实。",
+    ].join("\n\n");
+    const now = this.now();
+    this.store.insertDelivery({ id: deliveryId, issueId: thread.id, entryId: entry.id, ownerLaneId: thread.ownerLaneId,
+      body, sourceKind: "user", sourceOrigin: "issues", requestKey: `issues:${deliveryId}`,
+      handoffState: "pending", coreMessageId: null, attemptCount: 0, nextAttemptAt: now,
+      lastError: null, lastTargetState: null, processedAt: null, processedByBindingId: null,
+      processedByGeneration: null, createdAt: now });
+    return deliveryId;
   }
 
   private addQuestion(prompt: IssueEntry, askedTo: IssueQuestion["askedTo"], status: IssueQuestion["status"], answerEntryId: string | null = null): IssueQuestion {

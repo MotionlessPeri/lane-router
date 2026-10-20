@@ -1,5 +1,5 @@
 import type { LaneAccess } from "../../router/lane-access.js";
-import type { IssueDelivery, IssueEntry, IssueListQuery, IssueOperation, IssueQuestion, IssueThread } from "./types.js";
+import type { IssueDelivery, IssueEntry, IssueListQuery, IssueOperation, IssueQuestion, IssueThread, IssueWakeResult } from "./types.js";
 
 export interface IssueListRow extends IssueThread {
   readonly waitingUserCount: number;
@@ -48,9 +48,16 @@ export interface IssueStore {
   close(): void;
 }
 
+/** Opens a lane's existing conversation when it is not open; never creates one or changes its model. */
+export interface IssueWakePort {
+  wake(laneId: string): Promise<IssueWakeResult>;
+}
+
 export interface IssuesServiceOptions {
   readonly store: IssueStore;
   readonly lanes: LaneAccess;
+  /** Absent when this Router cannot open windows; then nothing is said about waking at all. */
+  readonly wake?: IssueWakePort;
   readonly now?: () => number;
   readonly newId?: () => string;
 }

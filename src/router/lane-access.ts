@@ -1,3 +1,4 @@
+import type { RestorePresence } from "./backend.js";
 import type { BackendName, CallerContext, ReachSnapshot } from "./types.js";
 
 /** Resolved by the host from the current conversation, never supplied as tool arguments. */
@@ -20,6 +21,16 @@ export interface LaneAccessFacts {
   readonly reach: ReachSnapshot | null;
 }
 
+/** A lane a user could address right now: in service and with a conversation to reopen. */
+export interface ActiveLane {
+  readonly laneId: string;
+  readonly address: string;
+  readonly project: string;
+  readonly backend: BackendName;
+  /** Whether reopening it would find it already open, not whether a notification would reach it. */
+  readonly restorePresence: RestorePresence;
+}
+
 /** In-process identity and query access without handing host storage to consumers. */
 export interface LaneAccess {
   resolveCaller(context: CallerContext): LaneCallerIdentity;
@@ -27,4 +38,6 @@ export interface LaneAccess {
   assertCurrentCaller(context: CallerContext, expected: LaneCallerIdentity): void;
   /** Null means missing; archivedAt, binding and reach remain independent facts. */
   readLane(laneId: string): LaneAccessFacts | null;
+  /** By project, then lane, ignoring case; no role text, conversation or message ever leaves here. */
+  listActiveLanes(): readonly ActiveLane[];
 }

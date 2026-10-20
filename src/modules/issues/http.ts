@@ -19,18 +19,21 @@ export class IssuesHttp {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     const markdownAsset = url.pathname === "/issues/assets/markdown-it.js";
     const detail = /^\/issues\/api\/threads\/([^/]+)$/u.exec(url.pathname);
-    const write = request.method === "POST" && request.url === url.pathname
-      ? /^\/issues\/api\/threads\/([^/]+)\/(replies|read|close)$/u.exec(url.pathname) : null;
-    const reading = request.method === "GET" && (url.pathname === "/issues" || markdownAsset || url.pathname === "/issues/api/threads" || detail !== null);
-    if (!reading && !write) return false;
+    const lanes = url.pathname === "/issues/api/lanes";
+    const exact = request.method === "POST" && request.url === url.pathname;
+    const creating = exact && url.pathname === "/issues/api/threads";
+    const write = exact ? /^\/issues\/api\/threads\/([^/]+)\/(replies|read|close)$/u.exec(url.pathname) : null;
+    const reading = request.method === "GET" && (url.pathname === "/issues" || markdownAsset || url.pathname === "/issues/api/threads" || detail !== null || lanes);
+    if (!reading && !write && !creating) return false;
     const service = this.options.service;
     if (!service) { json(response, 503, { error: "ISSUES_UNAVAILABLE: issue module is unavailable", code: "ISSUES_UNAVAILABLE" }); return true; }
+    const action = creating ? "create" : write?.[2];
     // Parsing failures keep the server's established 400 response, after the same ordered checks.
-    const body = write ? await readPageAction(request, response, {
+    const body = action ? await readPageAction(request, response, {
       origin: this.options.origin, actionToken: this.options.actionToken,
-      action: `issues-${write[2] === "replies" ? "reply" : write[2]}`,
+      action: `issues-${action === "replies" ? "reply" : action}`,
     }) : undefined;
-    if (write && body === undefined) return true;
+    if (action && body === undefined) return true;
     try {
       if (reading) {
         if (markdownAsset) {
@@ -40,20 +43,31 @@ export class IssuesHttp {
         } else if (url.pathname === "/issues") {
           const page = (this.options.readPage ?? (() => readFileSync(new URL("../../ui/issues/index.html", import.meta.url), "utf8")))();
           response.writeHead(200, { "content-type": "text/html; charset=utf-8" }); response.end(page);
+        } else if (lanes) {
+          queryFields(url.searchParams, []);
+          json(response, 200, { result: service.listLanes(), actionToken: this.options.actionToken });
         } else {
           const result = detail ? service.detail(decodeURIComponent(detail[1]!), historyQuery(url.searchParams)) : service.list(listQuery(url.searchParams));
           json(response, 200, { result, actionToken: this.options.actionToken });
         }
-      } else if (write && body) {
+      } else if (action && body) {
         const { actionToken: _token, ...input } = body;
-        const action = write[2];
-        const fields = action === "replies" ? ["operationKey", "body", "questionId"] : action === "read" ? ["operationKey", "throughSeq"] : ["operationKey", "body"];
+        const fields = action === "create" ? ["operationKey", "laneId", "title", "body"] : action === "replies" ? ["operationKey", "body", "questionId"]
+          : action === "read" ? ["operationKey", "throughSeq"] : ["operationKey", "body"];
         if (Object.keys(input).some(key => !fields.includes(key))) throw new IssueError("INVALID_INPUT", "Unexpected issue action field");
-        const issueId = decodeURIComponent(write[1]!);
-        const result = action === "replies" ? service.reply({ ...input, issueId } as Parameters<IssuesService["reply"]>[0])
-          : action === "read" ? service.markRead({ ...input, issueId } as Parameters<IssuesService["markRead"]>[0])
-          : service.close({ ...input, issueId } as Parameters<IssuesService["close"]>[0]);
-        json(response, 200, { result });
+        if (action === "create" || action === "replies") {
+          const result = action === "create" ? service.create(input as unknown as Parameters<IssuesService["create"]>[0])
+            : service.reply({ ...input, issueId: decodeURIComponent(write![1]!) } as Parameters<IssuesService["reply"]>[0]);
+          // After the save and never deciding its status: a lane that cannot be opened still has
+          // the message waiting in its mailbox.
+          const wake = await service.wakeOwner(result.issueId);
+          json(response, 200, wake === undefined ? { result } : { result, wake });
+        } else {
+          const issueId = decodeURIComponent(write![1]!);
+          const result = action === "read" ? service.markRead({ ...input, issueId } as Parameters<IssuesService["markRead"]>[0])
+            : service.close({ ...input, issueId } as Parameters<IssuesService["close"]>[0]);
+          json(response, 200, { result });
+        }
       }
     } catch (error) {
       if (error instanceof IssueError) {

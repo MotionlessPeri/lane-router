@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Window } from "happy-dom";
 import { afterEach, expect, test, vi } from "vitest";
+import type { IssueWakePort, IssueWakeResult } from "../../../src/modules/issues/index.js";
 import { LocalRouterServer } from "../../../src/process/local-server.js";
 import { setupIssues } from "../../fixtures/issues/setup.js";
 
@@ -37,8 +38,8 @@ class MemoryStorage {
   setItem(key: string, value: string) { this.items.set(key, String(value)); }
   removeItem(key: string) { this.items.delete(key); }
 }
-async function boot(options: { firstTitle?: string; firstBody?: string; secondBody?: string; skipMarkdown?: boolean; prepare?: (x: ReturnType<typeof setupIssues>) => void; intercept?: Intercept; withoutObserver?: boolean; uuids?: boolean; storage?: "refused" } = {}) {
-  const x = setupIssues(options.uuids ? { newId: randomUUID } : {}); cleanup.push(() => x.dispose());
+async function boot(options: { firstTitle?: string; firstBody?: string; secondBody?: string; skipMarkdown?: boolean; prepare?: (x: ReturnType<typeof setupIssues>) => void; intercept?: Intercept; withoutObserver?: boolean; uuids?: boolean; storage?: "refused"; wake?: IssueWakePort } = {}) {
+  const x = setupIssues({ ...(options.uuids ? { newId: randomUUID } : {}), ...(options.wake ? { wake: options.wake } : {}) }); cleanup.push(() => x.dispose());
   const first = x.service.publish(x.caller, { operationKey: "first", kind: "question", title: options.firstTitle ?? "Choose", body: options.firstBody ?? "请选 A，或直接追问" });
   const second = x.service.publish(x.other, { operationKey: "second", kind: "answer", title: "研究答复", originalQuestion: "原来的问题", body: options.secondBody ?? "已有答复" });
   options.prepare?.(x);
@@ -699,7 +700,7 @@ test("5. a draft is kept in the browser for its issue, back after a reload, and 
   expect(again.query("#reply-body").value).toBe("写到一半的回复");
   again.click("#send-reply");
   await vi.waitFor(() => expect(f.x.service.detail(f.first.issueId).deliveries).toHaveLength(1));
-  await vi.waitFor(() => expect(again.query("#operation-status").textContent).toContain("已保存"));
+  await vi.waitFor(() => expect(again.query("#operation-status").textContent).toBe("已发送。"));
   expect(f.storage.getItem(key)).toBeNull();
   expect(again.query("#reply-body").value).toBe("");
   expect(f.x.service.detail(f.first.issueId).entries.at(-1)?.body).toBe("写到一半的回复");
@@ -733,6 +734,186 @@ test("7. the page is called 问答", async () => {
   const f = await boot();
   expect(f.document.title).toBe("问答 · Lane Router");
   expect(f.query("h1").textContent).toBe("问答");
+  expect(f.query("h1").title).toBe("集中查看答复与问题。看不懂可以继续追问，一轮回复不会自动结束议题。\n可以在这里新开问答，也可以接着已有的问答讨论");
+});
+
+// docs/superpowers/specs/2026-10-20-issue-start-from-page.md, 3.5 and section 5, items 6-8.
+const NEW_DRAFT = "lane-router.issues.new-draft", NEW_LANE = "lane-router.issues.new-lane";
+const isCreate = (call: Call) => call.path === "/issues/api/threads" && call.init?.method === "POST";
+const created = (f: Awaited<ReturnType<typeof boot>>, title: string) => f.x.service.list({ filter: "all" }).items.find(item => item.title === title);
+async function openNew(f: Awaited<ReturnType<typeof boot>>) {
+  f.click("#new-issue");
+  await vi.waitFor(() => expect(f.document.querySelectorAll("#new-lane option[value]:not([value=''])").length).toBeGreaterThan(0));
+}
+
+test("新问答 replaces the issue with its own view, lanes grouped by project with their state in words, and send needs a lane and a body", async () => {
+  const f = await boot({ prepare(x) {
+    x.addLane("lane-three", "studio/solve");
+    x.restorePresence.set("lane-two", "offline"); x.restorePresence.set("lane-three", "unavailable");
+  } });
+  await f.selected(f.first.issueId);
+  expect(f.query("#new-issue").className).toBe("primary");
+  expect(f.query("#new-issue-view").hidden).toBe(true);
+  await openNew(f);
+  expect(f.query("#issue-detail").hidden).toBe(true); expect(f.query("#new-issue-view").hidden).toBe(false);
+  expect(f.query("#new-issue-view h2").textContent).toBe("新问答");
+  expect(f.query('#thread-list [aria-current="true"]')).toBeNull();
+  expect(f.calls.some(call => call.path === "/issues/api/lanes")).toBe(true);
+  const groups = [...f.document.querySelectorAll("#new-lane optgroup")].map(group => [group.getAttribute("label"),
+    [...group.querySelectorAll("option")].map(option => [option.getAttribute("value"), option.textContent])]);
+  expect(groups).toEqual([
+    ["project", [["lane-one", "project/work · 在线"], ["lane-two", "project/other · 没开着，发出后会打开它的窗口"]]],
+    ["studio", [["lane-three", "studio/solve · 暂时打不开，消息会等它恢复"]]],
+  ]);
+  expect(f.query("#new-lane").value).toBe("");
+  expect(f.query("#new-title").placeholder).toBe("默认取正文第一行");
+  expect(f.query("#send-new").disabled).toBe(true);
+  f.change("#new-body", "正文"); expect(f.query("#send-new").disabled).toBe(true);
+  f.change("#new-lane", "lane-two"); expect(f.query("#send-new").disabled).toBe(false);
+  f.change("#new-body", " \n "); expect(f.query("#send-new").disabled).toBe(true);
+  f.click("#send-new"); expect(f.calls.filter(isCreate)).toHaveLength(0);
+  // Choosing an issue from the list leaves the view, and 取消 does too.
+  await f.selected(f.second.issueId);
+  expect(f.query("#new-issue-view").hidden).toBe(true); expect(f.query("#issue-detail").hidden).toBe(false);
+  await openNew(f); f.click("#cancel-new");
+  expect(f.query("#new-issue-view").hidden).toBe(true); expect(f.query("#issue-detail").hidden).toBe(false);
+  expect(f.query("#detail-empty").textContent).toBe("选择一个议题，查看完整讨论。");
+});
+
+test("an empty title is the body's first line without its heading marks, cut to 60 characters", async () => {
+  const f = await boot();
+  await openNew(f);
+  const send = async (count: number) => {
+    f.click("#send-new");
+    await vi.waitFor(() => expect(f.query("#new-issue-view").hidden).toBe(true));
+    expect(f.calls.filter(isCreate)).toHaveLength(count);
+    return f.calls.filter(isCreate)[count - 1]!.body;
+  };
+  f.change("#new-lane", "lane-one"); f.change("#new-body", "\n  ## 构建为什么慢？  \n第二行细节");
+  expect(await send(1)).toMatchObject({ laneId: "lane-one", title: "构建为什么慢？", body: "\n  ## 构建为什么慢？  \n第二行细节" });
+  expect(created(f, "构建为什么慢？")).toBeDefined();
+  await openNew(f);
+  f.change("#new-lane", "lane-one"); f.change("#new-body", "长".repeat(59) + "😀尾巴");
+  expect((await send(2)).title).toBe("长".repeat(59) + "😀");
+  await openNew(f);
+  f.change("#new-lane", "lane-one"); f.change("#new-title", "  自己起的标题 "); f.change("#new-body", "# 不用这行");
+  expect((await send(3)).title).toBe("自己起的标题");
+});
+
+test.each<[IssueWakeResult | undefined, string, string]>([
+  [undefined, "已发送。", "meta"],
+  [{ status: "skipped_online" }, "已发送。", "meta"],
+  [{ status: "launch_requested" }, "已发送。这个 lane 没开着，已经让 Router 打开它的窗口。", "meta"],
+  [{ status: "skipped_launching" }, "已发送。这个 lane 正在打开。", "meta"],
+  [{ status: "failed", reason: "session_not_found" }, "已发送，但没能打开这个 lane（找不到原来的对话）。消息会等它打开后再处理，可以去运行看板手动恢复。", "warning"],
+])("a sent new issue is shown under 进行中, selected, with the wake result %j", async (result, text, className) => {
+  const f = await boot(result ? { wake: { wake: async () => result } } : {});
+  await openNew(f);
+  f.change("#new-lane", "lane-two"); f.change("#new-title", "新话题"); f.change("#new-body", "帮我看看"); f.click("#send-new");
+  await vi.waitFor(() => expect(created(f, "新话题")).toBeDefined());
+  const issueId = created(f, "新话题")!.id;
+  await vi.waitFor(() => expect(f.query("#issue-detail").getAttribute("data-issue-id")).toBe(issueId));
+  expect(f.query("#new-issue-view").hidden).toBe(true); expect(f.query("#issue-detail").hidden).toBe(false);
+  expect(f.query('[data-filter="open"]').getAttribute("aria-pressed")).toBe("true");
+  await vi.waitFor(() => expect(f.query(`#thread-list [data-issue-id="${issueId}"]`)?.getAttribute("aria-current")).toBe("true"));
+  expect(f.calls.some(call => call.path.startsWith("/issues/api/threads?filter=open"))).toBe(true);
+  expect(f.query("#operation-status").textContent).toBe(text);
+  expect(f.query("#operation-status").className).toBe(className);
+  const call = f.calls.find(isCreate)!;
+  expect(new Headers(call.init?.headers).get("x-lane-router-action")).toBe("issues-create");
+  expect(call.body).toEqual({ operationKey: expect.any(String), laneId: "lane-two", title: "新话题", body: "帮我看看", actionToken: expect.any(String) });
+});
+
+test("a reply shows the same wake result, with each reason it could not open the lane in words", async () => {
+  const wake = vi.fn<IssueWakePort["wake"]>(async () => ({ status: "launch_requested" }));
+  const f = await boot({ wake: { wake } });
+  await f.selected(f.first.issueId);
+  f.change("#reply-body", "第一条"); f.click("#send-reply");
+  await vi.waitFor(() => expect(f.query("#operation-status").textContent).toBe("已发送。这个 lane 没开着，已经让 Router 打开它的窗口。"));
+  const reasons = {
+    no_binding: "没有对话记录", session_not_found: "找不到原来的对话", invalid_startup_cwd: "原来的工作目录不在了",
+    backend_unavailable: "这种 lane 不能由 Router 打开，或者 Codex 宿主没连上", terminal_launch_failed: "终端没能启动",
+  } as const;
+  for (const [reason, words] of Object.entries(reasons)) {
+    wake.mockResolvedValueOnce({ status: "failed", reason: reason as keyof typeof reasons });
+    await vi.waitFor(() => expect(f.query("#reply-body").disabled).toBe(false));
+    f.change("#reply-body", `回复 ${reason}`); f.click("#send-reply");
+    await vi.waitFor(() => expect(f.query("#operation-status").textContent).toBe(`已发送，但没能打开这个 lane（${words}）。消息会等它打开后再处理，可以去运行看板手动恢复。`));
+    expect(f.query("#operation-status").className).toBe("warning");
+  }
+  expect(wake).toHaveBeenCalledTimes(6);
+});
+
+test("an unsettled new issue keeps its one operation and payload, retries with the same key, and asks before the page is left", async () => {
+  let lost = true;
+  const f = await boot({ intercept: async (call, send) => {
+    if (isCreate(call) && lost) { lost = false; await send(); throw new TypeError("response lost"); }
+    return send();
+  } });
+  const leaving = () => { const event = new f.window.Event("beforeunload", { cancelable: true }); f.window.dispatchEvent(event); return event.defaultPrevented; };
+  await openNew(f);
+  f.change("#new-lane", "lane-one"); f.change("#new-title", "只建一次"); f.change("#new-body", "内容");
+  expect(leaving()).toBe(false);
+  f.click("#send-new");
+  await vi.waitFor(() => expect(f.query("#new-status").textContent).toContain("结果未确定"));
+  expect(f.query("#new-status").className).toBe("warning");
+  expect(f.query("#new-recovery").hidden).toBe(false);
+  for (const id of ["#new-lane", "#new-title", "#new-body", "#send-new"]) expect(f.query(id).disabled, id).toBe(true);
+  expect(leaving()).toBe(true);
+  f.click("#send-new"); expect(f.calls.filter(isCreate)).toHaveLength(1);
+  // 查看后端历史 shows 进行中 behind the view, where a saved issue would already be.
+  f.click("#check-new");
+  expect(f.query('[data-filter="open"]').getAttribute("aria-pressed")).toBe("true");
+  expect(f.query("#new-issue-view").hidden).toBe(false);
+  await vi.waitFor(() => expect(f.query(`#thread-list [data-issue-id="${created(f, "只建一次")!.id}"]`)).not.toBeNull());
+  f.click("#retry-new");
+  await vi.waitFor(() => expect(f.query("#issue-detail").getAttribute("data-issue-id")).toBe(created(f, "只建一次")!.id));
+  const sent = f.calls.filter(isCreate); expect(sent).toHaveLength(2); expect(sent[1]?.body).toEqual(sent[0]?.body);
+  expect(f.x.service.list({ filter: "all" }).items.filter(item => item.title === "只建一次")).toHaveLength(1);
+  expect(leaving()).toBe(false);
+});
+
+test("a refused new issue keeps the draft for another try", async () => {
+  const f = await boot({ intercept: async (call, send) => isCreate(call)
+    ? new Response(JSON.stringify({ error: "The lane is missing, archived or has no conversation", code: "LANE_UNAVAILABLE" }), { status: 409 }) : send() });
+  await openNew(f);
+  f.change("#new-lane", "lane-one"); f.change("#new-body", "保留这段"); f.click("#send-new");
+  await vi.waitFor(() => expect(f.query("#new-status").textContent).toBe("保存失败：The lane is missing, archived or has no conversation（409）。草稿已保留，可修改后重试。"));
+  expect(f.query("#new-recovery").hidden).toBe(true);
+  expect(f.query("#new-body").disabled).toBe(false); expect(f.query("#new-body").value).toBe("保留这段");
+  expect(f.query("#send-new").disabled).toBe(false);
+});
+
+test("the new-issue draft and the last lane are kept in the browser; the draft goes once sent, a lane no longer listed is not chosen", async () => {
+  const f = await boot();
+  await openNew(f);
+  f.change("#new-lane", "lane-two"); f.change("#new-title", "草稿标题"); f.change("#new-body", "写到一半");
+  expect(JSON.parse(f.storage.getItem(NEW_DRAFT)!)).toEqual({ title: "草稿标题", body: "写到一半" });
+  expect(f.storage.getItem(NEW_LANE)).toBe("lane-two");
+  f.click("#cancel-new"); await openNew(f);
+  expect([f.query("#new-lane").value, f.query("#new-title").value, f.query("#new-body").value]).toEqual(["lane-two", "草稿标题", "写到一半"]);
+
+  const again = await f.reload();
+  await openNew(again);
+  expect([again.query("#new-lane").value, again.query("#new-title").value, again.query("#new-body").value]).toEqual(["lane-two", "草稿标题", "写到一半"]);
+  again.click("#send-new");
+  await vi.waitFor(() => expect(created(f, "草稿标题")).toBeDefined());
+  await vi.waitFor(() => expect(again.query("#new-issue-view").hidden).toBe(true));
+  expect(f.storage.getItem(NEW_DRAFT)).toBeNull();
+  await openNew(again);
+  expect([again.query("#new-lane").value, again.query("#new-title").value, again.query("#new-body").value]).toEqual(["lane-two", "", ""]);
+
+  f.storage.setItem(NEW_LANE, "lane-gone");
+  const third = await f.reload();
+  await openNew(third);
+  expect(third.query("#new-lane").value).toBe("");
+});
+
+test("with the browser refusing storage, a new issue is still written and sent", async () => {
+  const f = await boot({ storage: "refused" });
+  await openNew(f);
+  f.change("#new-lane", "lane-one"); f.change("#new-body", "只在内存里"); f.click("#send-new");
+  await vi.waitFor(() => expect(created(f, "只在内存里")).toBeDefined());
 });
 
 // docs/superpowers/specs/2026-10-20-issue-page-sidebar-layout.md, 3.1: the status line fits the sidebar on one line.

@@ -127,6 +127,17 @@ export type UpdateIssueQuestionInput = { readonly operationKey: string; readonly
   | { readonly status: "answered"; readonly answerEntryId: string }
   | { readonly status: "not_needed"; readonly reason: string }
 );
+/** The user's own opening of a topic with one lane; the lane is named by its stable ID. */
+export interface CreateIssueInput {
+  readonly operationKey: string;
+  readonly laneId: string;
+  readonly title: string;
+  readonly body: string;
+}
+/** The restorer's answer without its message, plus the one failure only the lookup by lane ID has. */
+export type IssueWakeResult =
+  | { readonly status: "launch_requested" | "skipped_online" | "skipped_launching" }
+  | { readonly status: "failed"; readonly reason: "no_binding" | "session_not_found" | "invalid_startup_cwd" | "backend_unavailable" | "terminal_launch_failed" };
 export interface ReplyIssueInput {
   readonly operationKey: string;
   readonly issueId: string;

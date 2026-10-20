@@ -41,8 +41,8 @@ function longIssue(x: ReturnType<typeof setupIssues>, entries: number, readThrou
   return published.issueId;
 }
 
-async function open(prepare: (x: ReturnType<typeof setupIssues>) => void, viewport = WIDE) {
-  const x = setupIssues(); cleanup.push(() => x.dispose());
+async function open(prepare: (x: ReturnType<typeof setupIssues>) => void, viewport = WIDE, options: Parameters<typeof setupIssues>[0] = {}) {
+  const x = setupIssues(options); cleanup.push(() => x.dispose());
   prepare(x);
   const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, codex: { endpoint: "ws://127.0.0.1:1" } as never,
     instanceId: randomUUID(), issues: { service: x.service } } as ConstructorParameters<typeof LocalRouterServer>[0]);
@@ -465,6 +465,53 @@ describe.skipIf(browser === undefined)(`sidebar layout in a real browser (${BROW
       expect(sideways.page, `${viewport.width} wide`).toBe(viewport.width);
       expect(sideways.compose, `${viewport.width} wide`).toBeLessThanOrEqual(sideways.composeWidth);
       expect(send.right, `${viewport.width} wide`).toBeLessThanOrEqual(viewport.width);
+    }
+  });
+});
+
+// docs/superpowers/specs/2026-10-20-issue-start-from-page.md, section 5, items 6 and 7.
+describe.skipIf(browser === undefined)(`new issue in a real browser (${BROWSER})`, () => {
+  test("a new issue is written in its own view and sent, then shown under 进行中 with what became of its lane", async () => {
+    const wake = vi.fn(async (_laneId: string) => ({ status: "launch_requested" as const }));
+    const { x, page } = await open((fixture) => { fixture.restorePresence.set("lane-two", "offline"); longIssue(fixture, 1); }, WIDE, { wake: { wake } });
+    await page.click("#new-issue");
+    await page.waitForSelector('#new-lane option[value="lane-two"]', { state: "attached" });
+    expect(await page.isHidden("#issue-detail")).toBe(true);
+    expect(await page.textContent('#new-lane option[value="lane-two"]')).toBe("project/other · 没开着，发出后会打开它的窗口");
+    expect(await page.isDisabled("#send-new")).toBe(true);
+    await page.selectOption("#new-lane", "lane-two");
+    await page.fill("#new-body", "## 构建为什么慢\n细节");
+    await page.click("#send-new");
+    await vi.waitFor(() => expect(x.service.list({ filter: "open" }).items.map((item) => item.title)).toContain("构建为什么慢"));
+    const id = x.service.list({ filter: "open" }).items.find((item) => item.title === "构建为什么慢")!.id;
+    await page.waitForSelector(`#issue-detail[data-issue-id="${id}"]`);
+    expect(await page.isHidden("#new-issue-view")).toBe(true);
+    expect(await page.getAttribute('[data-filter="open"]', "aria-pressed")).toBe("true");
+    expect(await page.textContent("#operation-status")).toBe("已发送。这个 lane 没开着，已经让 Router 打开它的窗口。");
+    expect(wake.mock.calls).toEqual([["lane-two"]]);
+  });
+
+  test("新问答 sits on the sidebar's top line, and the new-issue view stays inside the window, wide and narrow", async () => {
+    for (const viewport of [WIDE, { width: 681, height: 700 }, NARROW]) {
+      const { page } = await open((fixture) => { fixture.addLane("lane-long", `project/${"很长的lane名字".repeat(8)}`); longIssue(fixture, 1); }, viewport);
+      const head = await page.evaluate(() => {
+        const sidebar = document.querySelector("aside.sidebar")!.getBoundingClientRect();
+        const parts = ["h1", "#new-issue", ".sidebar-head a"].map((query) => document.querySelector(query)!.getBoundingClientRect());
+        const middles = parts.map((part) => (part.top + part.bottom) / 2);
+        return { oneLine: Math.max(...middles) - Math.min(...middles) < 12, inside: parts.every((part) => part.left >= sidebar.left && part.right <= sidebar.right) };
+      });
+      expect(head, `${viewport.width} wide`).toEqual({ oneLine: true, inside: true });
+      await page.click("#new-issue");
+      await page.waitForSelector('#new-lane option[value="lane-long"]', { state: "attached" });
+      await page.selectOption("#new-lane", "lane-long");
+      const fit = await page.evaluate(() => ({
+        page: document.scrollingElement!.scrollWidth, height: document.scrollingElement!.scrollHeight,
+        select: document.getElementById("new-lane")!.getBoundingClientRect().right, send: document.getElementById("send-new")!.getBoundingClientRect().right,
+      }));
+      expect(fit.page, `${viewport.width} wide`).toBe(viewport.width);
+      expect(fit.select, `${viewport.width} wide`).toBeLessThanOrEqual(viewport.width);
+      expect(fit.send, `${viewport.width} wide`).toBeLessThanOrEqual(viewport.width);
+      if (viewport.width > 680) expect(fit.height, `${viewport.width} wide`).toBe(viewport.height);
     }
   });
 });
