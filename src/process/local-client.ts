@@ -76,6 +76,10 @@ const RECONNECT_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 5_000];
 
 export async function connectClaudeChannel(resolveRouterUrl: () => Promise<string>, conversationId: string, joinKey?: string): Promise<ClaudeChannelConnection> {
   let sink: ClaudeChannelSink | undefined;
+  // The channel opens before Claude has initialized the MCP server, and the Router notifies the
+  // moment it connects, so the first frame of a reopened lane arrives with nowhere to go. One
+  // notification stands for all of a lane's pending mail: the latest is kept and handed over once.
+  let held: ClaudeChannelNotification | undefined;
   let socket: WebSocket | undefined;
   let retry: NodeJS.Timeout | undefined;
   let failures = 0;
@@ -91,7 +95,9 @@ export async function connectClaudeChannel(resolveRouterUrl: () => Promise<strin
     next.on("message", (raw) => {
       try {
         const frame = JSON.parse(raw.toString()) as { type?: unknown; notification?: unknown };
-        if (frame.type === "notification" && sink) void sink.notification(toClaudeNotification(frame.notification));
+        if (frame.type !== "notification") return;
+        const notification = toClaudeNotification(frame.notification);
+        if (sink) void sink.notification(notification); else held = notification;
       } catch { /* malformed local notification is ignored */ }
     });
     next.on("error", () => undefined);
@@ -113,7 +119,11 @@ export async function connectClaudeChannel(resolveRouterUrl: () => Promise<strin
 
   await open();
   return {
-    attach(value) { sink = value; },
+    attach(value) {
+      sink = value;
+      const pending = held; held = undefined;
+      if (pending) void value.notification(pending);
+    },
     detach(value) { if (sink === value) sink = undefined; },
     close: () => new Promise<void>((resolve) => {
       closed = true;

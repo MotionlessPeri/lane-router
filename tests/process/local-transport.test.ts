@@ -272,6 +272,42 @@ test("bridges body-free Claude notifications and waits for lifecycle Stop before
   } finally { await channel.close(); await server.close(); }
 });
 
+// A reopened session's channel connects before Claude has finished starting the MCP server, and the
+// Router notifies the moment it connects. That frame used to be dropped, leaving the lane idle over
+// its pending mail until someone typed. One notification stands for all of a lane's pending mail,
+// so the latest is the only one worth keeping.
+test("a notification that arrives while no session is attached is handed over once, latest only, when one is", async () => {
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: "x" });
+  const discovery = await server.start();
+  const channel = await connectClaudeChannel(async () => discovery.url, "session-1");
+  const binding: BindingRecord = { id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, activeAt: 1, inactiveAt: null, cwd: null };
+  const pending = (...ids: string[]) => ({ laneAddress: "alpha/design", pendingPath: "C:/mailbox/pending", kind: "normal" as const,
+    messageIds: ids, messages: ids.map((id) => ({ id, sender: "alpha/hub", summary: `about ${id}` })) });
+  const arrived = () => new Promise((resolve) => setTimeout(resolve, 200));
+  const received: unknown[] = [];
+  const sink = { notification: async (value: unknown) => { received.push(value); } };
+  try {
+    await expect(server.claude.notify(binding, pending("message-1"))).resolves.toBe("sent");
+    await expect(server.claude.notify(binding, pending("message-1", "message-2"))).resolves.toBe("sent");
+    await arrived();
+    channel.attach(sink);
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    expect(JSON.stringify(received[0])).toContain("message-2");
+    // Handed over, then forgotten: attaching again replays nothing.
+    channel.detach(sink); channel.attach(sink);
+    await arrived();
+    expect(received).toHaveLength(1);
+    // Any stretch without a session holds the next frame the same way, not only the first one.
+    channel.detach(sink);
+    await server.claude.notify(binding, pending("message-3"));
+    await arrived();
+    expect(received).toHaveLength(1);
+    channel.attach(sink);
+    await vi.waitFor(() => expect(received).toHaveLength(2));
+    expect(JSON.stringify(received[1])).toContain("message-3");
+  } finally { await channel.close(); await server.close(); }
+});
+
 test("a Claude reconnect after Router restart resolves its durable binding and emits attention", async () => {
   const binding: BindingRecord = { id: "binding-1", laneAddress: "alpha/design", backend: "claude", conversationId: "session-1", generation: 1, startup: {}, activeAt: 1, inactiveAt: null, cwd: null };
   const hub = new ClaudeChannelHub((conversationId) => conversationId === "session-1" ? binding : undefined);

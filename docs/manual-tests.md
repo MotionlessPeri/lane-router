@@ -259,6 +259,11 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
   - 「已发送。这个 lane 正在打开。」
   - 「已发送，但没能打开这个 lane（原因）。消息会等它打开后再处理，可以去运行看板手动恢复。」
 - 打不开不影响保存：信已经在 lane 的信箱里，lane 下次开着时会处理。
+- **同时修的现有缺陷（Claude）：**
+  - **原来的问题：** Claude lane 恢复后，channel 一连上 Router 就收到通知，这时 Claude 还没初始化好 lane 的 MCP 服务。客户端把这一帧丢了，lane 就守着积压的信不动，直到有人打字。
+  - **现在：** 客户端先留住最新一帧，会话接上时补交一次。
+  - **影响范围：** 看板「恢复 lane」、`lane_restore_project` 和问答页的唤醒走的都是这条路，一起修好了。
+  - **测试：** `tests/process/local-transport.test.ts`。
 
 自动测试：
 - `tests/modules/issues/create.test.ts`：建议题的事务、各种拒绝、同键重放，以及唤醒端口抛错时算作唤醒失败。
