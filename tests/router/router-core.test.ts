@@ -70,7 +70,7 @@ function setup() {
   const resolveCwd = vi.fn(async (): Promise<string | null> => null);
   const core = new RouterCore({
     state, mailbox, backends, pump,
-    restore: { restore, resolveCwd },
+    restore: { restore, resolveCwd, reopens: (backend) => backend === "claude" || backend === "codex" },
     newId: (kind) => `${kind}-${++sequence}`,
     now: () => ++now,
   });
@@ -947,6 +947,38 @@ describe("lanes a new issue can go to", () => {
       x.backend.restoreState = "online";
       expect(x.core.listActiveLanes().map((lane) => lane.restorePresence)).toEqual(["online", "online", "unavailable", "online"]);
     } finally { x.database.close(); }
+  });
+
+  // Sending to a lane says whether it will open; a lane the restorer refuses never will.
+  it("calls a lane the Router cannot reopen unavailable unless it is already open", () => {
+    const root = mkdtempSync(join(tmpdir(), "lane-router-core-")); roots.push(root);
+    const database = openRouterDatabase(":memory:");
+    try {
+      const state = new RouterStateStore(database), mailbox = new MailboxStore(root);
+      const names = ["codex", "dsh", "native-codex", "zcode"] as const;
+      const backends = new BackendRegistry(names.map((name) => Object.assign(new FakeBackend(), {
+        name, restorePresence: (binding: BindingRecord): RestorePresence => binding.conversationId.endsWith("-open") ? "online" : "offline",
+      })) as never);
+      let sequence = 0;
+      for (const name of names) for (const state_ of ["open", "closed"]) {
+        const address = `p/${name}-${state_}`;
+        state.createLane({ address, project: "p", roleDescription: name, now: ++sequence });
+        state.createBinding({ id: `binding-${address}`, laneAddress: address, backend: name, conversationId: `${name}-${state_}`, generation: 1, startup: {}, now: ++sequence });
+      }
+      const core = (reopens?: (backend: string) => boolean) => new RouterCore({
+        state, mailbox, backends, pump: new NotificationPump(state, mailbox, backends),
+        restore: { restore: vi.fn(), ...(reopens ? { reopens } : {}) }, newId: (kind) => `${kind}-${++sequence}`, now: () => ++sequence,
+      });
+      const presence = (lanes: ReturnType<RouterCore["listActiveLanes"]>) => Object.fromEntries(lanes.map((lane) => [lane.address, lane.restorePresence]));
+      expect(presence(core((backend) => backend === "claude" || backend === "codex").listActiveLanes())).toEqual({
+        "p/codex-closed": "offline", "p/codex-open": "online",
+        "p/dsh-closed": "unavailable", "p/dsh-open": "online",
+        "p/native-codex-closed": "unavailable", "p/native-codex-open": "online",
+        "p/zcode-closed": "unavailable", "p/zcode-open": "online",
+      });
+      // A Router assembled without a restorer opens nothing.
+      expect(presence(core().listActiveLanes())["p/codex-closed"]).toBe("unavailable");
+    } finally { database.close(); }
   });
 });
 

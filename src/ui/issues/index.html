@@ -743,7 +743,7 @@
    * and the lane last chosen is chosen again while it is still listed. 取消 only closes the view.
    */
   const NEW_DRAFT = "lane-router.issues.new-draft", NEW_LANE = "lane-router.issues.new-lane";
-  const restoreLabels = { online: "在线", offline: "没开着，发出后会打开它的窗口", unavailable: "暂时打不开，消息会等它恢复" };
+  const restoreLabels = { online: "在线", offline: "没开着，发出后会打开它的窗口", unavailable: "Router 打不开它，消息会等它开着时再处理" };
   const fresh = { loaded: false, title: "", body: "", laneId: "", operation: null, notice: "", warning: false };
   let composing = false, lanes = null, lanesError = "", renderedLanes = "";
   function openNew() {

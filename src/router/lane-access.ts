@@ -27,7 +27,10 @@ export interface ActiveLane {
   readonly address: string;
   readonly project: string;
   readonly backend: BackendName;
-  /** Whether reopening it would find it already open, not whether a notification would reach it. */
+  /**
+   * What reopening it would do, not whether a notification would reach it: `online` finds it open,
+   * `offline` opens it, `unavailable` cannot open it, for now or for good.
+   */
   readonly restorePresence: RestorePresence;
 }
 

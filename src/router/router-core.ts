@@ -42,6 +42,8 @@ function validateUserMessage(input: UserMessageInput): string {
 
 export interface LaneRestorePort {
   restore(binding: BindingRecord): Promise<LaneRestoreResult>;
+  /** Whether `restore` can open a conversation of this backend at all; absent means it opens none. */
+  reopens?(backend: BackendName): boolean;
   /** Recovers a conversation's directory from platform records; null when nothing is found. */
   resolveCwd?(binding: BindingRecord): Promise<string | null>;
 }
@@ -144,8 +146,9 @@ export class RouterCore implements UserMessageDelivery, LaneAccess {
   /**
    * Presence is the backend's `restorePresence`, for the reason `archiveLane` gives: `reach` calls
    * a Codex lane whose window is closed `unconfirmed`, and the question here is whether opening it
-   * would open anything. A backend this Router does not run is `unavailable`, as in `resumeInfo`.
-   * Sorted as the board's launcher sorts, so "MobuLiveLink" sits among the m's.
+   * would open anything. So a closed lane of a backend the restorer cannot open is `unavailable`,
+   * as is one of a backend this Router does not run, as in `resumeInfo`. Sorted as the board's
+   * launcher sorts, so "MobuLiveLink" sits among the m's.
    */
   listActiveLanes(): ActiveLane[] {
     const state = this.dependencies.state;
@@ -154,9 +157,11 @@ export class RouterCore implements UserMessageDelivery, LaneAccess {
       if (lane.archivedAt !== null) return [];
       const binding = state.activeBindingForLaneId(lane.id);
       if (!binding) return [];
+      const presence = this.dependencies.backends.find(binding.backend)?.restorePresence(binding) ?? "unavailable";
+      const reopens = this.dependencies.restore?.reopens?.(binding.backend) === true;
       return [{
         laneId: lane.id, address: lane.address, project: lane.project, backend: binding.backend,
-        restorePresence: this.dependencies.backends.find(binding.backend)?.restorePresence(binding) ?? "unavailable",
+        restorePresence: presence === "offline" && !reopens ? "unavailable" as const : presence,
       }];
     }).sort((a, b) => byName(a.project, b.project) || byName(a.address, b.address));
   }

@@ -3,7 +3,7 @@ import { isAbsolute } from "node:path";
 
 import type { PlatformBackend } from "../router/backend.js";
 import type { RouterStateStore } from "../router/state-store.js";
-import type { BindingRecord } from "../router/types.js";
+import type { BackendName, BindingRecord } from "../router/types.js";
 import { ClaudeSessionLookupError, type ClaudeSessionLocator } from "./claude-session-locator.js";
 import {
   childEnvironment, newStatusPath, resolveTerminal, spawnTerminal, terminalLaunchScript, wtOnPath,
@@ -36,11 +36,21 @@ export class ConversationRestorer {
   private readonly reservations = new Map<string, number>();
   constructor(private readonly dependencies: RestorerDependencies) {}
 
+  /**
+   * Only Claude and Codex conversations reopen in a terminal. DSH and native-codex ones are
+   * restored by their Host. ZCode is not "later by someone else" but "not yet by anyone": spawning
+   * a ZCode client headless has no implementation, and falling through would hand a ZCode
+   * conversation to a Claude terminal.
+   */
+  reopens(backend: BackendName): backend is "claude" | "codex" {
+    return backend === "claude" || backend === "codex";
+  }
+
   async restore(binding: BindingRecord, override: RestoreOverride = {}): Promise<RestoreResult> {
-    if (binding.backend === "dsh" || binding.backend === "native-codex") return failure("backend_unavailable", `${binding.backend} conversations are restored by their Host`);
-    // Not "later by someone else" but "not yet by anyone": spawning a ZCode client headless has no
-    // implementation, and falling through would hand a ZCode conversation to a Claude terminal.
-    if (binding.backend === "zcode") return failure("backend_unavailable", "zcode conversations cannot be reopened by the Router yet");
+    if (!this.reopens(binding.backend)) {
+      return failure("backend_unavailable", binding.backend === "zcode"
+        ? "zcode conversations cannot be reopened by the Router yet" : `${binding.backend} conversations are restored by their Host`);
+    }
     const now = (this.dependencies.now ?? Date.now)();
     const reservedUntil = this.reservations.get(binding.id) ?? 0;
     if (reservedUntil > now) return { status: "skipped_launching" };

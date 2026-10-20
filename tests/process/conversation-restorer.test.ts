@@ -72,6 +72,20 @@ test("native Host binding never enters the shared terminal restore path", async 
   } finally { x.database.close(); }
 });
 
+// The lane list on the 问答 page asks this too, so it can say which lanes sending to would open.
+test("reopens Claude and Codex conversations only, and refuses the rest without launching", async () => {
+  const x = setup();
+  try {
+    for (const backend of ["claude", "codex", "dsh", "native-codex", "zcode"] as const) {
+      const reopens = backend === "claude" || backend === "codex";
+      expect(x.restorer.reopens(backend), backend).toBe(reopens);
+      if (reopens) continue;
+      await expect(x.restorer.restore({ ...x.binding, backend }), backend).resolves.toMatchObject({ status: "failed", reason: "backend_unavailable" });
+    }
+    expect(x.launch).not.toHaveBeenCalled();
+  } finally { x.database.close(); }
+});
+
 test("skips online clients and fails without launching when the backend is unavailable", async () => {
   const online = setup();
   try {

@@ -763,7 +763,7 @@ test("新问答 replaces the issue with its own view, lanes grouped by project w
     [...group.querySelectorAll("option")].map(option => [option.getAttribute("value"), option.textContent])]);
   expect(groups).toEqual([
     ["project", [["lane-one", "project/work · 在线"], ["lane-two", "project/other · 没开着，发出后会打开它的窗口"]]],
-    ["studio", [["lane-three", "studio/solve · 暂时打不开，消息会等它恢复"]]],
+    ["studio", [["lane-three", "studio/solve · Router 打不开它，消息会等它开着时再处理"]]],
   ]);
   expect(f.query("#new-lane").value).toBe("");
   expect(f.query("#new-title").placeholder).toBe("默认取正文第一行");

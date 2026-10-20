@@ -126,7 +126,8 @@ listActiveLanes(): readonly { laneId: string; address: string; project: string; 
 - 「发给」下拉框：按项目用 `<optgroup>` 分组，每项写「lane 地址 · 状态」。状态的对应：
   - `online`：在线。
   - `offline`：没开着，发出后会打开它的窗口。
-  - `unavailable`：暂时打不开，消息会等它恢复。
+  - `unavailable`：Router 打不开它，消息会等它开着时再处理。
+  - 2026-10-20 补充（impl 交付时提出，design 同意）：Router 的 restorer 打不开的后端（zcode、dsh、native-codex），只要不在线，`listActiveLanes` 就标成 `unavailable`；在线的照旧标 `online`。否则列表上会写「发出后会打开它的窗口」，实际却打不开。
   - 下拉框会预选上次用过的 lane；那个 lane 已不在列表里时不预选。
 - 「标题」输入框：占位文字是「默认取正文第一行」。用户没填时，取正文第一行，去掉首尾空白和行首的 Markdown 标题符号，截到 60 个字符。
 - 正文：和回复框同样的多行输入框。
