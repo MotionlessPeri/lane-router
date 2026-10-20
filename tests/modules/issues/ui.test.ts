@@ -150,17 +150,93 @@ test("question and answer history render Markdown headings, lists, tables, links
   }
 });
 
-test("Markdown replies are sent and stored verbatim before the saved history is rendered", async () => {
+// Spec 2026-10-20-issue-user-text-plain.md, acceptance 7: what the user writes is sent and kept
+// verbatim as before, and now also shown as typed rather than rendered.
+test("Markdown replies are sent and stored verbatim, and shown as the text the user typed", async () => {
   const f = await boot(); await f.selected(f.first.issueId);
   const markdown = "**我选 A**\n\n```ts\nconst value = '<raw>';\n```";
   f.change("#reply-body", markdown);
   expect(f.query("#reply-body").value).toBe(markdown);
   f.click("#send-reply");
-  await vi.waitFor(() => expect(f.query("#history .entry.user strong")?.textContent).toBe("我选 A"));
+  await vi.waitFor(() => expect(f.x.service.detail(f.first.issueId).entries.at(-1)?.body).toBe(markdown));
+  const saved = f.x.service.detail(f.first.issueId).entries.at(-1)!;
+  await vi.waitFor(() => expect(f.query(`#history [data-entry-seq="${saved.seq}"] .entry-body`)?.textContent).toBe(markdown));
   expect(f.calls.find(c => c.path.endsWith("/replies"))?.body.body).toBe(markdown);
-  expect(f.x.service.detail(f.first.issueId).entries.at(-1)?.body).toBe(markdown);
-  expect(f.query("#history .entry.user pre code").textContent).toBe("const value = '<raw>';\n");
+  const body = f.query(`#history [data-entry-seq="${saved.seq}"] .entry-body`);
+  expect(body.querySelector("strong")).toBeNull(); expect(body.querySelector("pre")).toBeNull();
   expect(f.x.service.detail(f.first.issueId).thread.status).toBe("open");
+});
+
+// Spec 2026-10-20-issue-user-text-plain.md, acceptance 1–5: an entry the user wrote is shown as
+// plain text, whichever way it arrived; the lane's entries are still Markdown.
+const TYPED = ["**粗**", "# 标题", "- 项", "1. 项", "`code`", "> 引用", "| a | b |", "<b>不加粗</b>", "",
+  "  行首两个空格，中间   三个空格", "", "", "空两行之后"].join("\n");
+const entryBodyOf = (f: Awaited<ReturnType<typeof boot>>, seq: number) => f.query(`#history [data-entry-seq="${seq}"] .entry-body`);
+function expectPlain(body: any, text: string) {
+  expect(body.classList.contains("plain-text")).toBe(true);
+  expect(body.textContent).toBe(text);
+  expect(body.children.length).toBe(0);
+}
+
+test("plain text 1: a page reply shows exactly as typed, with no Markdown or HTML and its spaces and blank lines kept", async () => {
+  const f = await boot(); await f.selected(f.first.issueId);
+  f.change("#reply-body", TYPED); f.click("#send-reply");
+  await vi.waitFor(() => expect(f.x.service.detail(f.first.issueId).entries.at(-1)?.body).toBe(TYPED));
+  const { seq } = f.x.service.detail(f.first.issueId).entries.at(-1)!;
+  await vi.waitFor(() => expect(entryBodyOf(f, seq)).not.toBeNull());
+  expectPlain(entryBodyOf(f, seq), TYPED);
+});
+
+test("plain text 2: the same text from the lane is still rendered as Markdown", async () => {
+  const f = await boot({ firstBody: TYPED }); await f.selected(f.first.issueId);
+  const body = entryBodyOf(f, 1);
+  expect(body.classList.contains("plain-text")).toBe(false);
+  expect(body.querySelector("h1")?.textContent).toBe("标题");
+  expect(body.querySelector("strong")?.textContent).toBe("粗");
+  expect(body.querySelector("ul li")?.textContent).toBe("项");
+  // The next line continues this list item in Markdown, so only its start is checked.
+  expect(body.querySelector("ol li")?.textContent).toMatch(/^项/u);
+  expect(body.querySelector("blockquote")?.textContent).toContain("引用");
+  expect(body.querySelector("code")?.textContent).toBe("code");
+  expect(body.querySelector("b")).toBeNull();
+});
+
+test("plain text 3: the user's TUI words a lane recorded are plain text, as the original question and as tui_user", async () => {
+  const f = await boot({ prepare(x) {
+    const issue = x.service.publish(x.caller, { operationKey: "tui", kind: "answer", title: "TUI 原话", originalQuestion: TYPED, body: "**lane 的答复**" });
+    x.service.append(x.caller, { operationKey: "tui-user", issueId: issue.issueId, kind: "tui_user", body: "- 用户在 TUI 里又说\n  第二行" });
+  } });
+  const issueId = f.x.service.list({ filter: "all" }).items.find(item => item.title === "TUI 原话")!.id;
+  await f.selected(issueId);
+  const entries = f.x.service.detail(issueId).entries;
+  expect(entries.map(entry => [entry.author, entry.source])).toEqual([["user", "agent_reported_tui_user"], ["lane", "agent"], ["user", "agent_reported_tui_user"]]);
+  expectPlain(entryBodyOf(f, 1), TYPED);
+  expect(entryBodyOf(f, 2).querySelector("strong")?.textContent).toBe("lane 的答复");
+  expectPlain(entryBodyOf(f, 3), "- 用户在 TUI 里又说\n  第二行");
+});
+
+test("plain text 4: the body of an issue the user started on the page is plain text", async () => {
+  const f = await boot({ prepare(x) { x.service.create({ operationKey: "started", laneId: "lane-one", title: "新问答", body: TYPED }); } });
+  const issueId = f.x.service.list({ filter: "all" }).items.find(item => item.title === "新问答")!.id;
+  // It waits on the lane, so it is under 进行中, not 待我处理.
+  f.click('[data-filter="open"]');
+  await vi.waitFor(() => expect(f.query(`[data-issue-id="${issueId}"]`)).not.toBeNull());
+  await f.selected(issueId);
+  expectPlain(entryBodyOf(f, 1), TYPED);
+});
+
+test("plain text 5: local paths in the user's plain text become links, with the sentence's punctuation left outside", async () => {
+  const f = await boot(); await f.selected(f.first.issueId);
+  const typed = "看 E:\\a\\b.md 和 E:/a/c/。";
+  f.change("#reply-body", typed); f.click("#send-reply");
+  await vi.waitFor(() => expect(f.x.service.detail(f.first.issueId).entries.at(-1)?.body).toBe(typed));
+  const { seq } = f.x.service.detail(f.first.issueId).entries.at(-1)!;
+  await vi.waitFor(() => expect(entryBodyOf(f, seq)?.querySelectorAll(".local-path").length).toBe(2));
+  const body = entryBodyOf(f, seq);
+  expect(body.classList.contains("plain-text")).toBe(true);
+  expect([...body.querySelectorAll(".local-path")].map((link: any) => link.textContent)).toEqual(["E:\\a\\b.md", "E:/a/c/"]);
+  expect(body.textContent).toBe(typed);
+  expect([...body.children].every((child: any) => child.classList.contains("local-path"))).toBe(true);
 });
 
 test("Markdown cannot activate raw HTML, executable links or automatic image loads", async () => {

@@ -221,11 +221,16 @@
       return renderer.renderToken(tokens, index, options);
     };
   } else byId("markdown-status").hidden = false;
-  function entryBody(text) {
+  /**
+   * The user's own words are shown as typed: what they write is not Markdown to them. Local paths
+   * in it still open. Without the Markdown component every entry is plain text.
+   */
+  function entryBody(text, plain) {
     const body = node("div", "entry-body");
     // HTML input stays escaped; only the parser's own markup reaches this sink.
-    if (markdown) { body.innerHTML = markdown.render(text); linkLocalPaths(body); }
+    if (markdown && !plain) body.innerHTML = markdown.render(text);
     else { body.classList.add("plain-text"); body.textContent = text; }
+    if (markdown) linkLocalPaths(body);
     body.querySelectorAll("pre").forEach(addCopyButton);
     return body;
   }
@@ -630,7 +635,7 @@
     article.dataset.entrySeq = String(entry.seq);
     const source = entry.source === "agent_reported_tui_user" ? "用户（agent 记录的 TUI 原话）" : entry.author === "user" ? "我" : "lane";
     const kind = { question: "提问", answer: "答复", reply: "回复" }[entry.kind] || entry.kind;
-    article.append(node("div", "entry-head", source + " · " + kind + " · #" + entry.seq + " · " + time(entry.createdAt)), entryBody(entry.body), node("div", "entry-facts"), end);
+    article.append(node("div", "entry-head", source + " · " + kind + " · #" + entry.seq + " · " + time(entry.createdAt)), entryBody(entry.body, entry.author === "user"), node("div", "entry-facts"), end);
     return article;
   }
   /** "#<seq>" for each loaded entry, and for each question by its prompt, keyed by ID. */

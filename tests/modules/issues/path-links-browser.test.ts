@@ -57,7 +57,8 @@ async function open() {
   ].join("\n");
   const x = setupIssues(); cleanup.push(() => x.dispose());
   const issue = x.service.publish(x.caller, { operationKey: `paths-${randomUUID()}`, kind: "answer", title: "路径", originalQuestion: "文件在哪", body: laneBody });
-  x.service.reply({ operationKey: `reply-${randomUUID()}`, issueId: issue.issueId, body: "我这边是 `" + join(root, "notes.md") + "`" });
+  // The user's own text is plain, so a path in it is just written out.
+  x.service.reply({ operationKey: `reply-${randomUUID()}`, issueId: issue.issueId, body: "我这边是 " + join(root, "notes.md") + "，你看看。" });
   const launches: Array<{ command: string; args: readonly string[]; env: Readonly<Record<string, string>> }> = [];
   const launch: LocalLaunch = async (command, args, env) => { launches.push({ command, args, env }); };
   const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: randomUUID(), issues: { service: x.service }, localOpen: { launch } });
@@ -99,7 +100,19 @@ test.skipIf(!browser)("absolute paths in inline code and plain text become links
   expect(await page.$$eval(`#history [data-entry-seq="${lane.seq}"] pre code`, codes => codes.map(code => code.textContent)))
     .toEqual([`E:\\a\\b.md\ncopy ${join(root, "notes.md")}\n`, `${join(root, "notes.md")}\n`]);
   // The user's own entries get the same links.
-  expect(await links(page, user.seq)).toEqual([{ text: join(root, "notes.md"), code: true, title: "用本机程序打开" }]);
+  expect(await links(page, user.seq)).toEqual([{ text: join(root, "notes.md"), code: false, title: "用本机程序打开" }]);
+});
+
+// Spec 2026-10-20-issue-user-text-plain.md, acceptance 6: a path in the user's plain text opens.
+test.skipIf(!browser)("a path in the user's own plain text asks the Router to open it", async () => {
+  const { root, x, issue, page, launches, asked } = await open();
+  const user = x.service.detail(issue.issueId).entries.find(entry => entry.author === "user" && entry.kind === "reply")!;
+  expect(await page.$eval(`#history [data-entry-seq="${user.seq}"] .entry-body`, body => body.classList.contains("plain-text"))).toBe(true);
+  const before = (await page.textContent("#operation-status"))!;
+  await page.locator(`#history [data-entry-seq="${user.seq}"] .entry-body .local-path`).click();
+  expect(await status(page, before)).toBe("已打开");
+  expect(asked).toEqual([join(root, "notes.md")]);
+  expect(launches.at(-1)?.env).toEqual({ LANE_ROUTER_OPEN_AS: "open", LANE_ROUTER_OPEN_PATH: join(root, "notes.md") });
 });
 
 test.skipIf(!browser)("a click asks the Router for the path without its line number and shows what happened", async () => {
