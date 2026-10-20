@@ -28,6 +28,8 @@
   #filters { display: flex; flex-wrap: wrap; gap: 4px; }
   #filters button { border-color: transparent; background: transparent; padding: 5px 9px; }
   #filters [aria-pressed="true"] { background: var(--text); color: var(--panel); }
+  /* As wide as the sidebar, on a phone too: a project's name and its 待我处理 count stay readable. */
+  #project-filter { width: 100%; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
   .list-bar { display: flex; align-items: center; gap: 8px; padding: 0 4px; }
   /* One line: only the time is written there, the full date and the polling interval go in its
      title, and the ellipsis is a fallback. A read error is shown whole. */
@@ -37,6 +39,15 @@
   .list-panel { margin: 0 -12px; padding: 8px 12px 12px; border-top: 1px solid var(--line); }
   main { min-width: 0; background: var(--panel); }
   #markdown-status { margin: 0; padding: 12px 16px 0; }
+  /* A group's head reads as a label over its issues: the project, how many, and what waits on the user,
+     that last kept to the right edge where it lines up from group to group. */
+  .project-group + .project-group { margin-top: 8px; }
+  .group-head { display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left; padding: 5px 13px; border-color: transparent; background: transparent; font-size: 13px; }
+  .group-head::before { content: "▾"; flex: none; width: 1em; color: var(--muted); }
+  .group-head[aria-expanded="false"]::before { content: "▸"; }
+  .group-name { min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .group-count { flex: none; color: var(--muted); font-size: 12px; }
+  .group-head .group-attention { flex: none; margin: 0 0 0 auto; }
   .topic { display: block; width: 100%; text-align: left; padding: 16px 13px; margin-bottom: 6px; border-color: transparent; background: transparent; border-radius: 9px; }
   .topic[aria-current="true"] { background: var(--active); border-color: var(--line); }
   .topic.kept { opacity: .55; }
@@ -165,6 +176,8 @@
     <button type="button" data-filter="all" aria-pressed="false">全部</button>
     <button type="button" data-filter="closed" aria-pressed="false">已结束</button>
   </nav>
+  <label for="project-filter" class="visually-hidden">项目筛选</label>
+  <select id="project-filter"><option value="">全部项目</option></select>
   <div class="list-bar"><p id="list-status" class="meta" role="status">正在读取议题…</p><button type="button" id="refresh">刷新</button></div>
   <nav class="list-panel" aria-label="议题列表"><div id="thread-list"></div><button type="button" id="load-threads" hidden>加载更多议题</button></nav>
 </aside>
@@ -218,6 +231,18 @@
   const views = new Map();
   let filter = "attention", selectedId = null, actionToken = null;
   let listItems = [], listCursor = null, listPages = 1, listVersion = 0, listLoading = false;
+  /**
+   * The list in groups by project. The counts in a group's head come with each read of the list, for
+   * its filter; null when they could not be read. The projects to choose from are those last read.
+   * The project chosen and the groups folded are kept in this browser; a project no longer listed
+   * is all projects, and what cannot be read folds nothing.
+   */
+  const PROJECT_KEY = "lane-router.issues.project", COLLAPSED_KEY = "lane-router.issues.collapsed-projects";
+  let projectCounts = null, projectNames = [], wantedProject = stored(PROJECT_KEY);
+  const collapsed = (() => {
+    try { const names = JSON.parse(stored(COLLAPSED_KEY) || "[]"); return new Set(Array.isArray(names) ? names : []); } catch { return new Set(); }
+  })();
+  const chosenProject = () => projectNames.includes(wantedProject) ? wantedProject : "";
   const byId = id => document.getElementById(id);
   const node = (tag, className, text) => {
     const element = document.createElement(tag);
@@ -380,10 +405,31 @@
   function renderList() {
     const host = byId("thread-list"), panel = host.closest(".list-panel");
     const items = keepingSelected();
-    const signature = JSON.stringify([selectedId, items.map(item => [item.id, item.kept, item.title, item.status, item.closedBy, item.attentionReasons, item.waitingLaneCount, ownerText(item.owner), item.owner.presence, item.updatedAt])]);
+    const signature = JSON.stringify([selectedId, projectCounts, [...collapsed], items.map(item => [item.id, item.kept, item.title, item.status, item.closedBy, item.attentionReasons, item.waitingLaneCount, ownerText(item.owner), item.owner.project, item.owner.presence, item.updatedAt])]);
     if (signature !== renderedList) { renderedList = signature; const scrollTop = panel.scrollTop; renderTopics(host, items); panel.scrollTop = scrollTop; }
     shownTopics = items;
     byId("load-threads").hidden = !listCursor; byId("load-threads").disabled = listLoading;
+    renderProjectFilter();
+  }
+  function renderProjectFilter() {
+    const select = byId("project-filter");
+    const options = [["", "全部项目"], ...projectNames.map(name => {
+      const attention = projectCounts?.find(item => item.project === name)?.attentionCount ?? 0;
+      return [name, attention > 0 ? name + " · 待我处理 " + attention : name];
+    })];
+    const signature = JSON.stringify(options);
+    if (select.dataset.options !== signature) {
+      select.dataset.options = signature;
+      select.replaceChildren(...options.map(([value, label]) => { const option = node("option", null, label); option.value = value; return option; }));
+    }
+    select.value = chosenProject();
+  }
+  function storeCollapsed() { store(COLLAPSED_KEY, JSON.stringify([...collapsed])); }
+  function toggleProject(project) {
+    if (!collapsed.delete(project)) collapsed.add(project);
+    storeCollapsed(); renderList();
+    // The head is drawn anew; the keyboard stays on it.
+    for (const group of byId("thread-list").querySelectorAll(".project-group")) if (group.dataset.project === (project ?? "")) group.querySelector(".group-head").focus();
   }
   /**
    * The issue on screen stays where it was in the list once it stops matching the filter (a reply
@@ -399,25 +445,51 @@
     items.splice(Math.min(index, items.length), 0, { ...shownTopics[index], kept: true, attentionReasons: [], waitingLaneCount: 0 });
     return items;
   }
+  /** Each group stands where its newest issue would in the flat list; within it, newest first. */
   function renderTopics(host, items) {
     host.replaceChildren();
     if (!items.length) host.append(node("p", "empty", "这里暂时没有议题。"));
+    const groups = new Map();
     for (const item of items) {
-      const button = node("button", "topic"); button.type = "button";
-      button.dataset.issueId = item.id; button.setAttribute("aria-current", String(item.id === selectedId));
-      if (item.kept) { button.classList.add("kept"); button.append(node("span", "badge", "已不在当前筛选")); }
-      // These are facts returned by the list API; reading does not decide whether a question still needs an answer.
-      if (item.status === "closed") button.append(node("span", "badge", item.closedBy === "lane" ? "lane 已结束" : "已结束"));
-      for (const reason of item.attentionReasons) {
-        if (reason === "waiting_user") button.append(node("span", "badge ask", "待我回答"));
-        if (reason === "unread_lane_content") button.append(node("span", "badge unread", "未读答复"));
-      }
-      // A closed issue waits on nobody, whatever its last round left open.
-      if (item.status !== "closed" && item.waitingLaneCount > 0) button.append(node("span", "badge", "等待 lane"));
-      const owner = node("span", "topic-meta"); owner.append(...ownerNodes(item.owner));
-      button.append(node("span", "topic-title", item.title), owner, node("span", "topic-meta", time(item.updatedAt)));
-      button.addEventListener("click", () => selectIssue(item.id)); host.append(button);
+      const project = item.owner.project ?? null;
+      groups.set(project, [...groups.get(project) ?? [], item]);
     }
+    for (const [project, members] of groups) host.append(projectGroup(project, members));
+  }
+  /**
+   * N is how many the filter lists in the project, M how many wait on the user. Fewer read than N (the
+   * rest are on later pages) says so; without the counts only what was read is told.
+   */
+  function projectGroup(project, members) {
+    const group = node("section", "project-group"); group.dataset.project = project ?? "";
+    const open = !collapsed.has(project), read = members.filter(item => !item.kept).length;
+    const counts = projectCounts?.find(item => item.project === project);
+    const head = node("button", "group-head"); head.type = "button"; head.setAttribute("aria-expanded", String(open));
+    head.append(node("span", "group-name", project ?? "lane 已不存在"),
+      node("span", "group-count", !counts ? "已显示 " + read + " 条" : read < counts.count ? counts.count + " 条，已显示 " + read : counts.count + " 条"));
+    if (counts && counts.attentionCount > 0) head.append(node("span", "badge ask group-attention", "待我处理 " + counts.attentionCount));
+    head.addEventListener("click", () => toggleProject(project));
+    const list = node("div", "group-items"); list.hidden = !open;
+    for (const item of members) list.append(topicButton(item));
+    group.append(head, list);
+    return group;
+  }
+  function topicButton(item) {
+    const button = node("button", "topic"); button.type = "button";
+    button.dataset.issueId = item.id; button.setAttribute("aria-current", String(item.id === selectedId));
+    if (item.kept) { button.classList.add("kept"); button.append(node("span", "badge", "已不在当前筛选")); }
+    // These are facts returned by the list API; reading does not decide whether a question still needs an answer.
+    if (item.status === "closed") button.append(node("span", "badge", item.closedBy === "lane" ? "lane 已结束" : "已结束"));
+    for (const reason of item.attentionReasons) {
+      if (reason === "waiting_user") button.append(node("span", "badge ask", "待我回答"));
+      if (reason === "unread_lane_content") button.append(node("span", "badge unread", "未读答复"));
+    }
+    // A closed issue waits on nobody, whatever its last round left open.
+    if (item.status !== "closed" && item.waitingLaneCount > 0) button.append(node("span", "badge", "等待 lane"));
+    const owner = node("span", "topic-meta"); owner.append(...ownerNodes(item.owner));
+    button.append(node("span", "topic-title", item.title), owner, node("span", "topic-meta", time(item.updatedAt)));
+    button.addEventListener("click", () => selectIssue(item.id));
+    return button;
   }
   async function loadList(more = false) {
     if (listLoading) return;
@@ -425,9 +497,21 @@
     const version = ++listVersion, requestedFilter = filter;
     listLoading = true; byId("load-threads").disabled = true;
     try {
+      // The projects first: which one may be chosen decides what the list asks for. Without them the
+      // list still reads, and the status line says what is missing.
+      let counts = null, countsError = "";
+      try { counts = (await request("/issues/api/projects?" + new URLSearchParams({ filter: requestedFilter }))).result.items; }
+      catch (error) { countsError = error.message; }
+      if (version !== listVersion) return;
+      if (counts) {
+        projectNames = counts.flatMap(item => item.project === null ? [] : [item.project]);
+        if (wantedProject && !projectNames.includes(wantedProject)) { wantedProject = ""; store(PROJECT_KEY, ""); }
+      }
+      const project = chosenProject();
       let cursor = null; const items = new Map();
       for (let page = 0; page < listPages; page++) {
         const query = new URLSearchParams({ filter: requestedFilter, limit: String(PAGE_SIZE) });
+        if (project) query.set("project", project);
         if (cursor) { query.set("beforeUpdatedAt", String(cursor.updatedAt)); query.set("beforeId", cursor.id); }
         const { result } = await request("/issues/api/threads?" + query);
         if (version !== listVersion) return;
@@ -435,11 +519,11 @@
         cursor = result.nextCursor;
         if (!cursor) break;
       }
-      listItems = [...items.values()]; listCursor = cursor;
+      listItems = [...items.values()]; listCursor = cursor; projectCounts = counts;
       const now = Date.now();
-      byId("list-status").textContent = "已刷新 " + clock(now);
+      byId("list-status").textContent = countsError ? "读取项目条数失败，组头只显示已读到的条数：" + countsError : "已刷新 " + clock(now);
       byId("list-status").title = "最后一次读取：" + time(now) + " · 每 5 秒读取后端";
-      byId("list-status").className = "meta";
+      byId("list-status").className = countsError ? "meta warning" : "meta";
     } catch (error) {
       if (version !== listVersion) return;
       byId("list-status").textContent = "读取失败，列表可能已过期：" + error.message;
@@ -1180,8 +1264,16 @@
       view.notice = wakeNotice(wake); view.warning = wake?.status === "failed";
       // It waits on the lane, so it is under 进行中, not 待我处理. A reader who has gone elsewhere
       // in the meantime stays there.
-      if (composing) { composing = false; renderNew(); showFilter("open"); selectIssue(result.issueId); }
-      else void loadList();
+      if (composing) {
+        composing = false; renderNew();
+        // And in sight: a choice of another project is lifted, and its own group unfolds.
+        const project = (lanes ?? []).find(lane => lane.laneId === operation.payload.laneId)?.project;
+        if (project !== undefined) {
+          if (wantedProject && wantedProject !== project) { wantedProject = ""; store(PROJECT_KEY, ""); }
+          if (collapsed.delete(project)) storeCollapsed();
+        }
+        showFilter("open"); selectIssue(result.issueId);
+      } else void loadList();
     } catch (error) {
       if (wasUncertain || error.uncertain !== false) {
         operation.state = "uncertain"; fresh.notice = "结果未确定：" + error.message + "。正文和操作已保留，请用同一操作重试，或查看后端历史。确认前不能修改或重新发送。";
@@ -1196,6 +1288,7 @@
     renderList(); void loadList();
   }
   for (const button of document.querySelectorAll("[data-filter]")) button.addEventListener("click", () => showFilter(button.dataset.filter));
+  byId("project-filter").addEventListener("change", () => { wantedProject = byId("project-filter").value; store(PROJECT_KEY, wantedProject); showFilter(filter); });
   byId("new-issue").addEventListener("click", openNew);
   byId("cancel-new").addEventListener("click", closeNew);
   byId("new-lane").addEventListener("change", () => { if (!fresh.operation) { fresh.laneId = byId("new-lane").value; store(NEW_LANE, fresh.laneId); renderNew(); } });

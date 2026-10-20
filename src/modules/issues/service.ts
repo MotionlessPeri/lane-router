@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { isAddressSegment } from "../../router/address.js";
 import type { ActiveLane, LaneAccessFacts, LaneCallerIdentity } from "../../router/lane-access.js";
 import type { CallerContext } from "../../router/types.js";
 import { ATTACHMENTS_PER_ENTRY } from "./attachments.js";
@@ -8,7 +9,8 @@ import {
   IssueError,
   type AppendIssueInput, type AttentionReason, type CloseIssueInput, type CreateIssueInput, type IssueAttachment, type IssueAttachmentInfo, type IssueDetail,
   type IssueEntry, type IssueEntryResult, type IssueHistoryQuery, type IssueList,
-  type IssueCloser, type IssueListQuery, type IssueOwner, type IssuePresence, type IssueProcessedResult, type IssueQuestion, type IssueThread,
+  type IssueCloser, type IssueFilter, type IssueListQuery, type IssueOwner, type IssuePresence, type IssueProcessedResult, type IssueProjectCount,
+  type IssueProjects, type IssueQuestion, type IssueThread,
   type IssueWakeResult, type LaneCloseIssueInput, type PublishIssueInput, type ReadIssueInput, type RecordProcessedInput, type ReplyIssueInput,
   type UpdateIssueQuestionInput,
 } from "./types.js";
@@ -152,6 +154,8 @@ export class IssuesService {
 
   listForLane(context: CallerContext, query: IssueListQuery = {}): IssueList {
     const actor = this.options.lanes.resolveCaller(context);
+    // A lane sees only its own issues; choosing a project is the page's.
+    fields(query, ["filter", "before", "limit"]);
     return this.listOwned({ ...query, filter: query.filter ?? "all" }, actor.laneId);
   }
 
@@ -162,6 +166,21 @@ export class IssuesService {
   }
 
   list(query: IssueListQuery = {}): IssueList { return this.listOwned(query); }
+
+  /** Each project that has an issue, with lanes gone gathered under null at the end. */
+  projects(query: { readonly filter?: IssueFilter } = {}): IssueProjects {
+    fields(query, ["filter"]);
+    const filter = listFilter(query.filter);
+    const byProject = new Map<string | null, IssueProjectCount>();
+    for (const { ownerLaneId, count, attentionCount } of this.store.countsByOwner(filter)) {
+      const project = this.options.lanes.readLane(ownerLaneId)?.project ?? null;
+      const sum = byProject.get(project) ?? { project, count: 0, attentionCount: 0 };
+      byProject.set(project, { project, count: sum.count + count, attentionCount: sum.attentionCount + attentionCount });
+    }
+    const items = [...byProject.values()].sort((left, right) => left.project === null ? 1 : right.project === null ? -1
+      : left.project.localeCompare(right.project, undefined, { sensitivity: "base" }));
+    return { items };
+  }
 
   detail(issueId: string, query: IssueHistoryQuery = {}): IssueDetail {
     text(issueId, "issueId");
@@ -293,15 +312,23 @@ export class IssuesService {
   }
 
   private listOwned(query: IssueListQuery, ownerLaneId?: string): IssueList {
-    fields(query, ["filter", "before", "limit"]);
-    if (query.filter !== undefined && !["attention", "all", "open", "closed"].includes(query.filter)) invalid("Unsupported list filter");
+    fields(query, ["filter", "before", "limit", "project"]);
+    if (query.filter !== undefined) listFilter(query.filter);
     if (query.before !== undefined) {
       fields(query.before, ["updatedAt", "id"]);
       integer(query.before.updatedAt, "before.updatedAt", 0);
       text(query.before.id, "before.id");
     }
     const limit = pageSize(query.limit);
-    const rows = this.store.listThreads({ ...query, limit: limit + 1 }, ownerLaneId);
+    const { project, ...listed } = query;
+    let owners: string[] | undefined;
+    if (project !== undefined) {
+      if (typeof project !== "string" || !isAddressSegment(project)) invalid("project must be one segment of a lane address");
+      // The project lives on the lane record, so the owners are found there, never stored twice.
+      owners = this.store.ownerLaneIds().filter((laneId) => this.options.lanes.readLane(laneId)?.project === project);
+      if (owners.length === 0) return { items: [], nextCursor: null };
+    }
+    const rows = this.store.listThreads({ ...listed, limit: limit + 1 }, ownerLaneId, owners);
     const items = rows.slice(0, limit).map(({ unreadLaneCount, ...thread }) => {
       const attentionReasons: AttentionReason[] = [];
       if (thread.status === "open") {
@@ -316,9 +343,10 @@ export class IssuesService {
 
   private owner(laneId: string): IssueOwner {
     const facts = this.options.lanes.readLane(laneId);
-    if (facts === null) return { laneId, address: null, state: "missing", presence: null };
-    if (facts.archivedAt !== null) return { laneId, address: facts.address, state: "archived", presence: null };
-    return { laneId, address: facts.address, state: "active", presence: presence(facts) };
+    if (facts === null) return { laneId, address: null, project: null, state: "missing", presence: null };
+    const { address, project } = facts;
+    if (facts.archivedAt !== null) return { laneId, address, project, state: "archived", presence: null };
+    return { laneId, address, project, state: "active", presence: presence(facts) };
   }
 
   private agentWrite<T>(context: CallerContext, operation: string, key: string, payload: object, issueId: string | undefined, work: (actor: LaneCallerIdentity) => T, allowClosed = false): T {
@@ -470,6 +498,13 @@ function fields(value: unknown, allowed: readonly string[]): void {
 function text(value: unknown, name: string): string {
   if (typeof value !== "string" || value.trim().length === 0) invalid(`${name} must be a nonempty string`);
   return value;
+}
+
+/** The filter asked for; none asked means 待我处理. */
+function listFilter(value: unknown): IssueFilter {
+  if (value === undefined) return "attention";
+  if (typeof value !== "string" || !["attention", "all", "open", "closed"].includes(value)) invalid("Unsupported list filter");
+  return value as IssueFilter;
 }
 
 function optionalId(value: unknown): string | null { return value === undefined ? null : text(value, "questionId"); }

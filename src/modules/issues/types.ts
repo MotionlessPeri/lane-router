@@ -108,15 +108,28 @@ export interface IssueOperation {
 }
 
 export interface IssueCursor { readonly updatedAt: number; readonly id: string }
+export type IssueFilter = "attention" | "open" | "closed" | "all";
 export interface IssueListQuery {
-  readonly filter?: "attention" | "open" | "closed" | "all";
+  readonly filter?: IssueFilter;
   readonly before?: IssueCursor;
   readonly limit?: number;
+  /** Only issues whose lane belongs to this project; the page's alone, not a lane tool's. */
+  readonly project?: string;
 }
+/** Per project with at least one issue: how many the filter lists, and how many need the user. */
+export interface IssueProjectCount {
+  /** Null gathers the issues of lanes that no longer exist. */
+  readonly project: string | null;
+  readonly count: number;
+  readonly attentionCount: number;
+}
+export interface IssueProjects { readonly items: readonly IssueProjectCount[] }
 export interface IssueHistoryQuery { readonly afterSeq?: number; readonly limit?: number }
 export interface IssueOwner {
   readonly laneId: string;
   readonly address: string | null;
+  /** Null when the lane no longer exists; an archived lane keeps its project. */
+  readonly project: string | null;
   readonly state: "active" | "archived" | "missing";
   /** The Router's belief about reaching the lane, not whether it is handling anything; null unless active. */
   readonly presence: IssuePresence | null;

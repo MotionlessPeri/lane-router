@@ -3,9 +3,9 @@ import { dirname } from "node:path";
 
 import Database from "better-sqlite3";
 
-import type { DeliveryHandoff, DeliveryProcessing, IssueListRow, IssueStore } from "./ports.js";
+import type { DeliveryHandoff, DeliveryProcessing, IssueListRow, IssueOwnerCount, IssueStore } from "./ports.js";
 import { initializeIssueSchema } from "./schema.js";
-import type { IssueAttachment, IssueDelivery, IssueEntry, IssueListQuery, IssueOperation, IssueQuestion, IssueThread } from "./types.js";
+import type { IssueAttachment, IssueDelivery, IssueEntry, IssueFilter, IssueListQuery, IssueOperation, IssueQuestion, IssueThread } from "./types.js";
 
 const THREAD = `id,owner_lane_id AS ownerLaneId,title,origin_kind AS originKind,status,
   created_at AS createdAt,updated_at AS updatedAt,closed_at AS closedAt,closed_by AS closedBy,read_seq AS readSeq,next_seq AS nextSeq`;
@@ -20,6 +20,16 @@ const DELIVERY = `id,issue_id AS issueId,entry_id AS entryId,owner_lane_id AS ow
   core_message_id AS coreMessageId,attempt_count AS attemptCount,next_attempt_at AS nextAttemptAt,
   last_error AS lastError,last_target_state AS lastTargetState,processed_at AS processedAt,
   processed_by_binding_id AS processedByBindingId,processed_by_generation AS processedByGeneration,created_at AS createdAt`;
+
+// What 待我处理 means, for a thread aliased t: the list and the per-project counts use this one text.
+const WAITING_USER = "(SELECT count(*) FROM issue_question q WHERE q.issue_id=t.id AND q.status='waiting_user')";
+const UNREAD = "(SELECT count(*) FROM issue_entry e WHERE e.issue_id=t.id AND e.author='lane' AND e.kind!='event' AND e.seq>t.read_seq)";
+// An issue the lane ended may end on an answer the user has not read; it waits for that reading.
+const ATTENTION = `((t.status='open' AND (${WAITING_USER}>0 OR ${UNREAD}>0)) OR (t.status='closed' AND t.closed_by='lane' AND ${UNREAD}>0))`;
+/** The condition a filter puts on a thread aliased t; open and closed name the status as @status. */
+function filtered(filter: IssueFilter): string {
+  return filter === "all" ? "1" : filter === "attention" ? ATTENTION : "t.status=@status";
+}
 
 /** Explicit composition boundary: importing this module or constructing the service opens nothing. */
 export function openIssueStore(path: string): SqliteIssueStore {
@@ -56,22 +66,18 @@ export class SqliteIssueStore implements IssueStore {
       read_seq=@readSeq,next_seq=@nextSeq WHERE id=@id`).run(thread);
   }
 
-  listThreads(query: IssueListQuery, ownerLaneId?: string): readonly IssueListRow[] {
-    const waiting = "(SELECT count(*) FROM issue_question q WHERE q.issue_id=t.id AND q.status='waiting_user')";
-    const unread = "(SELECT count(*) FROM issue_entry e WHERE e.issue_id=t.id AND e.author='lane' AND e.kind!='event' AND e.seq>t.read_seq)";
+  listThreads(query: IssueListQuery, ownerLaneId?: string, ownerLaneIds?: readonly string[]): readonly IssueListRow[] {
     const filter = query.filter ?? "attention";
-    // An issue the lane ended may end on an answer the user has not read; it waits for that reading.
-    const attention = `(t.status='open' AND (${waiting}>0 OR ${unread}>0)) OR (t.status='closed' AND t.closed_by='lane' AND ${unread}>0)`;
-    const status = filter === "all" ? "1" : filter === "attention" ? attention : "t.status=@status";
     const columns = THREAD.split(",").map((column) => `t.${column.trim()}`).join(",");
-    return this.database.prepare(`SELECT ${columns},${waiting} AS waitingUserCount,
+    return this.database.prepare(`SELECT ${columns},${WAITING_USER} AS waitingUserCount,
       (SELECT count(*) FROM issue_question q WHERE q.issue_id=t.id AND q.status='waiting_lane') AS waitingLaneCount,
-      ${unread} AS unreadLaneCount FROM issue_thread t
-      WHERE (@owner IS NULL OR t.owner_lane_id=@owner) AND (${status})
+      ${UNREAD} AS unreadLaneCount FROM issue_thread t
+      WHERE (@owner IS NULL OR t.owner_lane_id=@owner) AND (@owners IS NULL OR t.owner_lane_id IN (SELECT value FROM json_each(@owners)))
+      AND (${filtered(filter)})
       AND (@beforeId IS NULL OR t.updated_at<@beforeTime OR (t.updated_at=@beforeTime AND t.id<@beforeId))
       ORDER BY t.updated_at DESC,t.id DESC LIMIT @limit`).all({
-      owner: ownerLaneId ?? null, status: filter, beforeId: query.before?.id ?? null,
-      beforeTime: query.before?.updatedAt ?? null, limit: query.limit ?? 50,
+      owner: ownerLaneId ?? null, owners: ownerLaneIds === undefined ? null : JSON.stringify(ownerLaneIds), status: filter,
+      beforeId: query.before?.id ?? null, beforeTime: query.before?.updatedAt ?? null, limit: query.limit ?? 50,
     }) as IssueListRow[];
   }
 
@@ -81,6 +87,16 @@ export class SqliteIssueStore implements IssueStore {
       (SELECT count(*) FROM issue_question q WHERE q.issue_id=t.id AND q.status='waiting_lane') AS waitingLane
       FROM issue_thread t WHERE t.owner_lane_id=? AND EXISTS (SELECT 1 FROM issue_question q WHERE q.issue_id=t.id AND q.status IN ('waiting_user','waiting_lane'))
       ORDER BY t.id`).all(ownerLaneId) as { id: string; title: string; waitingUser: number; waitingLane: number }[];
+  }
+
+  ownerLaneIds(): readonly string[] {
+    return (this.database.prepare("SELECT DISTINCT owner_lane_id AS id FROM issue_thread ORDER BY owner_lane_id").all() as { id: string }[]).map((row) => row.id);
+  }
+
+  countsByOwner(filter: IssueFilter): readonly IssueOwnerCount[] {
+    return this.database.prepare(`SELECT t.owner_lane_id AS ownerLaneId,
+      sum(CASE WHEN ${filtered(filter)} THEN 1 ELSE 0 END) AS count, sum(CASE WHEN ${ATTENTION} THEN 1 ELSE 0 END) AS attentionCount
+      FROM issue_thread t GROUP BY t.owner_lane_id ORDER BY t.owner_lane_id`).all({ status: filter }) as IssueOwnerCount[];
   }
 
   entry(issueId: string, id: string): IssueEntry | null {

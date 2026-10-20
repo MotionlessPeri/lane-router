@@ -8,6 +8,7 @@ const BROWSER = [
   "tests/modules/issues/lane-close-browser.test.ts",
   "tests/modules/issues/attachments-browser.test.ts",
   "tests/modules/issues/send-shortcut-browser.test.ts",
+  "tests/modules/issues/project-groups-browser.test.ts",
 ];
 
 export default defineConfig({

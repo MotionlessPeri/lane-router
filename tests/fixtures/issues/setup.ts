@@ -23,7 +23,7 @@ export function setupIssues(options: { newId?: () => string; wake?: IssueWakePor
   const addLane = (id: string, address = "project/work") => {
     const identity = { laneId: id, bindingId: `binding:${id}`, generation: 1 };
     identities.set(id, identity);
-    lanes.set(id, { laneId: id, address, archivedAt: null, binding: { ...identity, backend: "codex" }, reach: null });
+    lanes.set(id, { laneId: id, address, project: address.split("/")[0]!, archivedAt: null, binding: { ...identity, backend: "codex" }, reach: null });
     return { backend: "codex", conversationId: id, requestKey: `rpc:${id}` } as CallerContext;
   };
   const caller = addLane("lane-one");

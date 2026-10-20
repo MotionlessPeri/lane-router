@@ -12,6 +12,8 @@ export interface LaneCallerIdentity {
 export interface LaneAccessFacts {
   readonly laneId: string;
   readonly address: string;
+  /** The project the lane record names, kept when the lane is archived. */
+  readonly project: string;
   readonly archivedAt: number | null;
   readonly binding: {
     readonly bindingId: string;

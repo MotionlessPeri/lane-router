@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { json, readPageAction, refusePageUpload } from "../../process/http-json.js";
 import { ATTACHMENT_SIZE_LIMIT, type IssueAttachments } from "./attachments.js";
 import type { IssuesService } from "./service.js";
-import { IssueError, type IssueHistoryQuery, type IssueListQuery } from "./types.js";
+import { IssueError, type IssueFilter, type IssueHistoryQuery, type IssueListQuery } from "./types.js";
 
 /** Presence is assembly; a missing service inside it is a configured module that failed to open. */
 export interface IssuesHttpAssembly {
@@ -32,10 +32,11 @@ export class IssuesHttp {
     const markdownAsset = url.pathname === "/issues/assets/markdown-it.js";
     const detail = /^\/issues\/api\/threads\/([^/]+)$/u.exec(url.pathname);
     const lanes = url.pathname === "/issues/api/lanes";
+    const projects = url.pathname === "/issues/api/projects";
     const exact = request.method === "POST" && request.url === url.pathname;
     const creating = exact && url.pathname === "/issues/api/threads";
     const write = exact ? /^\/issues\/api\/threads\/([^/]+)\/(replies|read|close)$/u.exec(url.pathname) : null;
-    const reading = request.method === "GET" && (url.pathname === "/issues" || markdownAsset || url.pathname === "/issues/api/threads" || detail !== null || lanes);
+    const reading = request.method === "GET" && (url.pathname === "/issues" || markdownAsset || url.pathname === "/issues/api/threads" || detail !== null || lanes || projects);
     if (!reading && !write && !creating) return false;
     const service = this.options.service;
     if (!service) { json(response, 503, { error: "ISSUES_UNAVAILABLE: issue module is unavailable", code: "ISSUES_UNAVAILABLE" }); return true; }
@@ -58,6 +59,8 @@ export class IssuesHttp {
         } else if (lanes) {
           queryFields(url.searchParams, []);
           json(response, 200, { result: service.listLanes(), actionToken: this.options.actionToken });
+        } else if (projects) {
+          json(response, 200, { result: service.projects(projectsQuery(url.searchParams)), actionToken: this.options.actionToken });
         } else {
           const result = detail ? service.detail(decodeURIComponent(detail[1]!), historyQuery(url.searchParams)) : service.list(listQuery(url.searchParams));
           json(response, 200, { result, actionToken: this.options.actionToken });
@@ -160,11 +163,16 @@ function integer(params: URLSearchParams, key: string): number | undefined {
 }
 
 function listQuery(params: URLSearchParams): IssueListQuery {
-  queryFields(params, ["filter", "limit", "beforeUpdatedAt", "beforeId"]);
-  const updatedAt = integer(params, "beforeUpdatedAt"), id = params.get("beforeId");
+  queryFields(params, ["filter", "limit", "beforeUpdatedAt", "beforeId", "project"]);
+  const updatedAt = integer(params, "beforeUpdatedAt"), id = params.get("beforeId"), project = params.get("project");
   if ((updatedAt === undefined) !== (id === null)) throw new IssueError("INVALID_INPUT", "List cursor needs beforeUpdatedAt and beforeId");
   return { filter: (params.get("filter") ?? "attention") as IssueListQuery["filter"], limit: integer(params, "limit"),
-    ...(updatedAt === undefined || id === null ? {} : { before: { updatedAt, id } }) };
+    ...(updatedAt === undefined || id === null ? {} : { before: { updatedAt, id } }), ...(project === null ? {} : { project }) };
+}
+
+function projectsQuery(params: URLSearchParams): { filter: IssueFilter } {
+  queryFields(params, ["filter"]);
+  return { filter: (params.get("filter") ?? "attention") as IssueFilter };
 }
 
 function historyQuery(params: URLSearchParams): IssueHistoryQuery {

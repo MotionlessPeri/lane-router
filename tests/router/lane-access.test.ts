@@ -127,7 +127,7 @@ describe("stable lane facts", () => {
     const x = setup();
     expect(x.core.readLane("unknown-id")).toBeNull();
     expect(x.core.readLane(x.lane.id)).toEqual({
-      laneId: x.lane.id, address: x.lane.address, archivedAt: null, binding: null, reach: null,
+      laneId: x.lane.id, address: x.lane.address, project: "alpha", archivedAt: null, binding: null, reach: null,
     });
   });
 
@@ -137,7 +137,7 @@ describe("stable lane facts", () => {
     const unreachable: ReachSnapshot = { state: "no_channel", connectedAt: null, lastLifecycleAt: 2, lastNotifiedAt: null, believedBusy: null };
     x.reaches.set("conversation-one", unreachable);
     expect(x.core.readLane(x.lane.id)).toEqual({
-      laneId: x.lane.id, address: x.lane.address, archivedAt: null,
+      laneId: x.lane.id, address: x.lane.address, project: "alpha", archivedAt: null,
       binding: { bindingId: binding.id, generation: binding.generation, backend: "codex" }, reach: unreachable,
     });
   });
@@ -159,12 +159,12 @@ describe("stable lane facts", () => {
     const unreachable: ReachSnapshot = { state: "no_channel", connectedAt: null, lastLifecycleAt: null, lastNotifiedAt: null, believedBusy: null };
     x.reaches.set("conversation-one", unreachable);
     expect(x.core.readLane(x.lane.id)).toEqual({
-      laneId: x.lane.id, address: x.lane.address, archivedAt: 3,
+      laneId: x.lane.id, address: x.lane.address, project: "alpha", archivedAt: 3,
       binding: { bindingId: old.id, generation: old.generation, backend: "codex" }, reach: unreachable,
       finishedAt: null, task: null,
     });
     expect(x.core.readLane(replacement.id)).toEqual({
-      laneId: replacement.id, address: replacement.address, archivedAt: null,
+      laneId: replacement.id, address: replacement.address, project: "alpha", archivedAt: null,
       binding: { bindingId: current.id, generation: current.generation, backend: "codex" }, reach: x.live,
     });
   });
@@ -177,7 +177,7 @@ describe("stable lane facts", () => {
     const replacement = x.state.createLane({ address: x.lane.address, project: "alpha", roleDescription: "New.", now: 4 });
     x.bind("replacement-conversation", replacement.address);
     expect(x.core.readLane(x.lane.id)).toEqual({
-      laneId: x.lane.id, address: x.lane.address, archivedAt: 3, binding: null, reach: null, finishedAt: null, task: null,
+      laneId: x.lane.id, address: x.lane.address, project: "alpha", archivedAt: 3, binding: null, reach: null, finishedAt: null, task: null,
     });
   });
 });

@@ -1,10 +1,16 @@
 import type { LaneAccess } from "../../router/lane-access.js";
-import type { IssueAttachment, IssueDelivery, IssueEntry, IssueListQuery, IssueOperation, IssueQuestion, IssueThread, IssueWakeResult } from "./types.js";
+import type { IssueAttachment, IssueDelivery, IssueEntry, IssueFilter, IssueListQuery, IssueOperation, IssueQuestion, IssueThread, IssueWakeResult } from "./types.js";
 
 export interface IssueListRow extends IssueThread {
   readonly waitingUserCount: number;
   readonly waitingLaneCount: number;
   readonly unreadLaneCount: number;
+}
+/** One owner lane's issues: how many a filter lists, and how many are in 待我处理. */
+export interface IssueOwnerCount {
+  readonly ownerLaneId: string;
+  readonly count: number;
+  readonly attentionCount: number;
 }
 
 /** Only handoff facts change here; the saved payload and processing receipt are independent. */
@@ -28,9 +34,13 @@ export interface IssueStore {
   thread(id: string): IssueThread | null;
   insertThread(thread: IssueThread): void;
   updateThread(thread: IssueThread): void;
-  listThreads(query: IssueListQuery, ownerLaneId?: string): readonly IssueListRow[];
+  /** `ownerLaneIds`, when given, keeps only those owners' issues; empty keeps none. */
+  listThreads(query: IssueListQuery, ownerLaneId?: string, ownerLaneIds?: readonly string[]): readonly IssueListRow[];
   /** A lane's issues with any question waiting, on the user or on the lane, with how many of each. */
   waitingThreads(ownerLaneId: string): readonly { readonly id: string; readonly title: string; readonly waitingUser: number; readonly waitingLane: number }[];
+  /** Every lane that owns at least one issue. */
+  ownerLaneIds(): readonly string[];
+  countsByOwner(filter: IssueFilter): readonly IssueOwnerCount[];
   entry(issueId: string, id: string): IssueEntry | null;
   entries(issueId: string, afterSeq: number, limit: number): readonly IssueEntry[];
   insertEntry(entry: IssueEntry): void;

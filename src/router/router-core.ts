@@ -143,7 +143,7 @@ export class RouterCore implements UserMessageDelivery, LaneAccess {
     if (!lane) return null;
     const binding = state.activeBindingForLaneId(laneId);
     return {
-      laneId: lane.id, address: lane.address, archivedAt: lane.archivedAt,
+      laneId: lane.id, address: lane.address, project: lane.project, archivedAt: lane.archivedAt,
       binding: binding ? { bindingId: binding.id, generation: binding.generation, backend: binding.backend } : null,
       reach: binding ? this.dependencies.backends.find(binding.backend)?.reach(binding) ?? null : null,
       ...(lane.finishedAt === null && lane.archivedAt === null ? {} : {
