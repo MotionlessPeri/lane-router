@@ -9,6 +9,7 @@
 
 - [用户议题收件箱（问题看板）](superpowers/specs/2026-10-17-user-issue-inbox-requirements.md)
 - [图资源接入需求](superpowers/specs/2026-10-18-graph-resource-requirements.md)
+- [知识库需求（第一版：LLM wiki + 检索工具 + 录入工具）](superpowers/specs/2026-10-20-knowledge-base-requirements.md)；依据：[知识过期的现状核对与成熟做法调研](superpowers/specs/2026-10-20-knowledge-staleness-research.md)
 
 ## 设计
 
@@ -16,6 +17,7 @@
 - [用户议题收件箱架构草案](superpowers/specs/2026-10-17-user-issue-inbox-design.md)
 - [统一账号切换设计](superpowers/specs/2026-10-18-account-switching.md)
 - [图资源接入技术设计](superpowers/specs/2026-10-18-graph-resource-design.md)
+- [知识库技术设计（由 kb-impl 实施）](superpowers/specs/2026-10-20-knowledge-base-design.md)
 - [Claude 账号：开窗注入已回退，改为按账号查余量（需求与设计，以文末修订为准）](superpowers/specs/2026-10-19-claude-account-at-launch.md)
 - [议题页：两栏在一屏内各自滚动（需求与设计）](superpowers/specs/2026-10-19-issue-inbox-scroll-layout.md)
 - [议题问题状态失真修复（需求与设计）](superpowers/specs/2026-10-19-issue-question-state-fix.md)
