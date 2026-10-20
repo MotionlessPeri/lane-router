@@ -160,6 +160,7 @@ try {
     await page.locator('[data-id="group:mathematics"]').dblclick(); await page.locator('[data-id="group:linear-algebra"]').click(); await auto.check();
     await page.getByRole("button", { name: "全部展开", exact: true }).click();
     await expect(nodes).toHaveCount(136); await expect(auto).not.toBeChecked(); await expect(page.locator(".breadcrumbs button")).toHaveCount(1); await expect(heading).toHaveText("线性代数");
+    await expect(page.locator("[data-outline-id]")).toHaveCount(136);
     await settle(); for (const id of ["group:mathematics", "group:rendering-systems", "bsdf"]) await expect(page.locator(`[data-id="${id}"]`)).toBeInViewport();
   });
   await step("8 collapse all leaves focus and zoom expansion but keeps the camera and the selection", async () => {
@@ -167,7 +168,7 @@ try {
     const locate = async text => { await page.getByLabel("搜索整个知识网络").fill(text); await page.locator(".search-results button").first().click(); };
     await locate("BRDF / BSDF"); await auto.check(); await expect(nodes).toHaveCount(136); await settle();
     const before = await camera(); await page.getByRole("button", { name: "全部收起", exact: true }).click();
-    await expect(nodes).toHaveCount(8); await expect(auto).not.toBeChecked(); await expect(heading).toHaveText("BRDF / BSDF"); await settle();
+    await expect(nodes).toHaveCount(8); await expect(auto).not.toBeChecked(); await expect(heading).toHaveText("BRDF / BSDF"); await expect(page.locator("[data-outline-id]")).toHaveCount(8); await settle();
     assert.deepEqual(await camera(), before, "collapse all must not move the camera");
     // The camera stayed where it was, so reach the group through search rather than the canvas.
     await locate("可见性与查询"); await expect(heading).toHaveText("可见性与查询"); await page.getByRole("button", { name: "聚焦分组", exact: true }).click();
