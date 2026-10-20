@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { ReactFlow, Background, Controls, Handle, Position, MiniMap, applyNodeChanges, type Node, type NodeProps, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { GraphDocument } from "../../modules/graphs/document.js";
-import { allGroups, autoExpanded, outlineRows, projectGraph, revealPath, revealWithin, toggleGroup, type ViewNode } from "./model.js";
+import { allGroups, autoExpanded, focusWithin, outlineRows, projectGraph, revealPath, revealWithin, toggleGroup, type ViewNode } from "./model.js";
 import { arrangeGraph, avoidOverlaps, nodeSize, type Point } from "./layout.js";
 import "./styles.css";
 
@@ -106,7 +106,7 @@ function App() {
   const reveal = (id: string) => { if (!graph) return; setAuto(false); setFocus(null); setExpanded(revealWithin(graph, expanded, id)); setSelected(id); setQuery(""); };
   const expandAll = () => { if (!graph) return; setAuto(false); setFocus(null); setExpanded(allGroups(graph)); fit(value => value + 1); };
   const collapseAll = () => { setAuto(false); setFocus(null); setExpanded(new Set()); };
-  const focusGroup = (id: string) => { if (!graph?.groups.some(group => group.id === id)) return; setFocus(id); setAuto(false); setExpanded(new Set([id])); setSelected(null); fit(value => value + 1); };
+  const focusGroup = (id: string) => { if (!graph?.groups.some(group => group.id === id)) return; setFocus(id); setAuto(false); setExpanded(focusWithin(graph, expanded, id)); setSelected(null); fit(value => value + 1); };
   const item = graph ? [...graph.nodes, ...graph.groups].find(node => node.id === selected) : undefined;
   const group = graph?.groups.find(group => group.id === selected);
   const matches = graph && query.trim() ? [...graph.groups, ...graph.nodes].filter(node => `${node.label} ${node.summary ?? ""} ${node.description ?? ""}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())).slice(0, 30) : [];

@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { applyChanges, emptyDocument } from "../src/modules/graphs/document.js";
-import { allGroups, autoExpanded, outlineRows, projectGraph, revealPath, revealWithin, toggleGroup } from "../src/ui/graphs/model.js";
+import { allGroups, autoExpanded, focusWithin, outlineRows, projectGraph, revealPath, revealWithin, toggleGroup } from "../src/ui/graphs/model.js";
 import { arrangeGraph, avoidOverlaps, nodeSize } from "../src/ui/graphs/layout.js";
 
 const graph = applyChanges(emptyDocument("Rendering"), [
@@ -45,6 +45,11 @@ test("a collapsed group hides everything below it in the outline, even groups th
 test("revealing adds the target's ancestors and keeps every group already expanded", () => {
   expect(revealWithin(graph, new Set(["outside"]), "x")).toEqual(new Set(["outside", "d", "c", "b", "a"]));
   expect(revealWithin(tree, new Set(["top2"]), "deep")).toEqual(new Set(["top2", "mid", "top1"]));
+});
+test("focusing a nested group adds its ancestors and itself, keeps every group already expanded, and shows its outline row", () => {
+  const focused = focusWithin(tree, new Set(["top2"]), "deep");
+  expect(focused).toEqual(new Set(["top2", "mid", "top1", "deep"]));
+  expect(rows(focused)).toEqual(["▾ top1", "  ▾ mid", "    ▾ deep", "      · n1", "    · n4", "  · n2", "▾ top2", "  · n3", "· loose", "· loose2"]);
 });
 test("a manual toggle starts from the set zoom expansion actually showed", () => {
   const shown = autoExpanded(graph, 1, 0.75, 0.5);

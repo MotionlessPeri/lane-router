@@ -181,6 +181,19 @@ try {
     await toggle("group:mathematics").click(); await expect(auto).not.toBeChecked(); await expect(nodes).toHaveCount(36);
     await expect(toggle("group:mathematics")).toHaveAttribute("aria-expanded", "false"); await expect(toggle("group:light-material")).toHaveAttribute("aria-expanded", "true");
   });
+  await step("12 focusing a nested group keeps other groups expanded and shows its row in the outline", async () => {
+    await toggle("group:gpu-api").click(); await toggle("group:mathematics").click(); await expect(nodes).toHaveCount(16);
+    await page.getByRole("button", { name: "适应画布", exact: true }).click(); await settle();
+    await page.locator('[data-id="group:linear-algebra"]').dblclick(); await expect(page.locator(".breadcrumbs button")).toHaveCount(3);
+    await expect(toggle("group:mathematics")).toHaveAttribute("aria-expanded", "true"); await expect(row("group:linear-algebra")).toBeVisible();
+    await expect(toggle("group:linear-algebra")).toHaveAttribute("aria-expanded", "true"); await expect(toggle("group:gpu-api")).toHaveAttribute("aria-expanded", "true");
+    await page.getByRole("button", { name: "/ 数学与数值", exact: true }).click(); await expect(page.locator(".breadcrumbs button")).toHaveCount(2);
+    await expect(toggle("group:gpu-api")).toHaveAttribute("aria-expanded", "true"); await expect(toggle("group:linear-algebra")).toHaveAttribute("aria-expanded", "true");
+    // Leaving focus any way but 全景 keeps what was open before and what focusing opened.
+    await page.getByLabel("搜索整个知识网络").fill("BRDF / BSDF"); await page.locator(".search-results button").first().click();
+    await expect(page.locator(".breadcrumbs button")).toHaveCount(1);
+    for (const id of ["group:execution-model", "group:linear-algebra", "vectors"]) await expect(page.locator(`[data-id="${id}"]`)).toHaveCount(1);
+  });
   assert.deepEqual(outlineFailures, [], "outline checks");
 
   await page.route("**/graphs/api/**", route => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "隔离故障 fixture" }) }));

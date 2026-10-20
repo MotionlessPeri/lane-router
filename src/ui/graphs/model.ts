@@ -13,6 +13,8 @@ export function revealPath(graph: GraphDocument, id: string): Set<string> {
 export function groupDepth(graph: GraphDocument, id: string): number { return revealPath(graph, id).size; }
 /** Locating something only opens its ancestors; groups the user already opened stay open. */
 export function revealWithin(graph: GraphDocument, expanded: ReadonlySet<string>, id: string): Set<string> { return new Set([...expanded, ...revealPath(graph, id)]); }
+/** Focusing opens the group and its ancestors too, so the outline can show the row being focused. */
+export function focusWithin(graph: GraphDocument, expanded: ReadonlySet<string>, id: string): Set<string> { return revealWithin(graph, expanded, id).add(id); }
 export function toggleGroup(expanded: ReadonlySet<string>, id: string): Set<string> {
   const next = new Set(expanded); if (next.has(id)) next.delete(id); else next.add(id); return next;
 }
