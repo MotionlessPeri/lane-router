@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { LaneAccess } from "../../router/lane-access.js";
 import type { CallerContext } from "../../router/types.js";
 import { applyChanges, emptyDocument, text } from "./document.js";
+import { countsOf, neighborhoodOf, outlineOf } from "./projection.js";
 import { graphListSchema, graphToolArgsSchemas } from "./tool-schema.js";
 import type { GraphStore } from "./store.js";
 import { GraphError, type GraphLock } from "./types.js";
@@ -36,7 +37,12 @@ export class GraphsService {
     this.options.lanes.resolveCaller(context);
     const args = graphToolArgsSchemas.lane_graph_read.parse(input);
     if (!("graphId" in args)) throw new GraphError("INVALID_ARGUMENT", "Use listForLane for graph discovery");
-    return this.read(args.graphId);
+    if (!("nodeIds" in args) && args.view !== "outline") return this.read(args.graphId);
+    // Both smaller reads project from the one committed document this read returns.
+    const { graphId, document, updatedAt, lock, viewPath } = this.read(args.graphId);
+    if ("nodeIds" in args) return { view: "neighborhood" as const, graphId, title: document.title, updatedAt, lock, viewPath, ...neighborhoodOf(document, args.nodeIds) };
+    return { view: "outline" as const, graphId, title: document.title, ...(document.description === undefined ? {} : { description: document.description }),
+      updatedAt, lock, viewPath, counts: countsOf(document), ...outlineOf(document) };
   }
   listForLane(context: CallerContext, input: unknown) {
     this.options.lanes.resolveCaller(context); const args = graphListSchema.parse(input);
@@ -63,8 +69,7 @@ export class GraphsService {
   /** The caller already holds its own request, so apply and release reply with current facts only. */
   private summary({ current, metadata, replayed, lockValid }: ReturnType<GraphsService["write"]>, lockId: string) {
     const { document, lock, updatedAt, viewPath } = current;
-    return { ...metadata, lockId, replayed, lockValid, lock, updatedAt,
-      counts: { nodes: document.nodes.length, edges: document.edges.length, groups: document.groups.length }, viewPath };
+    return { ...metadata, lockId, replayed, lockValid, lock, updatedAt, counts: countsOf(document), viewPath };
   }
   create(context: CallerContext, input: unknown) {
     const args = graphToolArgsSchemas.lane_graph_create.parse(input);

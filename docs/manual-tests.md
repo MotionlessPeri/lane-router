@@ -9,9 +9,9 @@
 | 工具 | 用途 |
 |---|---|
 | `lane_graph_create` | `operationKey,title,description?`；原子创建空图并持有写锁，返回 `graphId,lockId,lockValid,document,viewUrl`。 |
-| `lane_graph_read` | `{graphId}` 读当前完整图和锁；`{query?,afterId?,limit?}` 查找共享图，默认 50，最多 200 条，按 ID 稳定分页。 |
-| `lane_graph_lock` | `operationKey,graphId,action:"acquire"` 取锁并读最新图；`action:"release"` 另带 `lockId`。 |
-| `lane_graph_apply` | `operationKey,graphId,lockId,changes` 原子修改。支持 `set_graph,upsert_group,upsert_node,upsert_edge,delete_node,delete_edge`。 |
+| `lane_graph_read` | `{graphId}` 或 `{graphId,view:"full"}` 读当前完整图和锁；`{graphId,view:"outline"}` 只读提纲；`{graphId,nodeIds}` 读指定节点的邻域；`{query?,afterId?,limit?}` 查找共享图，默认 50，最多 200 条，按 ID 稳定分页。 |
+| `lane_graph_lock` | `operationKey,graphId,action:"acquire"` 取锁并读最新图；`action:"release"` 另带 `lockId`，只返回写摘要。 |
+| `lane_graph_apply` | `operationKey,graphId,lockId,changes` 原子修改，只返回写摘要。支持 `set_graph,upsert_group,upsert_node,upsert_edge,delete_node,delete_edge`。 |
 
 图由普通节点、关系和可选嵌套分组组成，不限定领域或层数。新节点需 `id,label`；新边需 `id,source,target,type`；新分组需 `id,label`。更新省略的字段保持原值，`groupId:null` / `parentId:null` 解除所属分组。分组不能成环，边必须连接真实节点，来源 URL 只接受 HTTP(S)。删除节点时须在同批显式删除或改指关联边，遗漏则整批拒绝，原图和锁不变。没有分组/整图删除或历史回滚。
 
@@ -53,6 +53,39 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
 本地复验：`npm run build` 同时构建后端与 React Flow 生产页面；`npm run test:graph-browser` 使用独立临时 core/图库、实际 CLI 可执行文件、真实 HTTP 与 Chromium 验证普通图、渲染知识图、导航/搜索/取消选择、刷新后的增改删和故障展示。截图及 `result.json` 保存在命令输出的仓外目录，可用 `GRAPH_BROWSER_EVIDENCE` 指定位置。该 fixture 的模型 backend 是替身，不能据此声称真实模型客户端已验收。
 
 部署后现场验收仍需：两条真实普通 lane 发现同一图，一条持锁修改、另一条可读且等待；释放后另一条获锁修改；当前模型能使用新增工具，旧会话 CLI 可用；用户浏览返回 URL，确认交互和观感。共享部署/重启由维护者安排，本地实现验证不代替该步骤。
+
+### 分层读取与写摘要
+
+需求与设计见 `docs/superpowers/specs/2026-10-20-graph-agent-reads.md`。
+
+- **写摘要：** apply 和释放锁不再返回图文档，只返回 `graphId,lockId,saved,savedAt`（释放为 `released`）、`replayed,lockValid,lock,updatedAt,counts,viewPath`，经工具另带 `viewUrl`。`counts` 是当前已提交文档的节点、边、分组数，重放时也取当前值。create 和获锁照旧返回整份文档。
+- **提纲（`view:"outline"`）：** 返回 `view,graphId,title,description,updatedAt,lock,viewPath,counts`，节点只含 `id,label,kind,tags,groupId,summary`，边只含 `id,source,target,type`，分组只含 `id,label,parentId,summary`；原文没有的字段不出现。
+- **邻域（`nodeIds`）：** 返回所请求节点的全部字段、至少一端在其中的边（全部字段）、这些边另一端的节点（`neighbors`，提纲字段），以及这些节点所在分组和全部祖先（提纲字段）。只走一跳，`nodeIds` 先去重。任一 ID 不是图中的节点，整次失败，返回 `NODE_NOT_FOUND`，错误文字和服务层 `details.nodeIds` 列出全部缺失 ID。
+- `view` 与 `nodeIds` 不能同时给，`nodeIds` 不能为空。只给 `graphId` 时结果与以前逐字相同；查看页的 `GET /graphs/api/:graphId` 不受影响。
+
+自动测试：`tests/graph-service.test.ts` 与 `tests/graph-adapters.test.ts` 覆盖设计稿第五节第 1–12 条。设计稿第六节的七个变异各自让预定的用例变红：
+
+- 写摘要保留 `document`：两条写摘要用例变红。
+- 重放时 `counts` 用原操作时的值：写摘要用例变红。
+- 提纲漏删节点 `description`：提纲用例变红。邻域用例也会变红，因为 `neighbors` 用的就是提纲字段。
+- 邻域只收出边、把请求节点放进 `neighbors`、分组祖先只取直接父级：邻域用例变红。
+- 不存在的 ID 被静默跳过：服务层与 RPC 两条 `NODE_NOT_FOUND` 用例变红。
+
+#### TC-GRAPH-READS-1：真实 lane 用新读法改一次图（第六节，尚未执行）
+
+**前提：** 共享 Router 已部署到含此改动的版本；Claude lane 已刷新工具清单，Codex lane 是部署后新开或 resume 的。部署和重启归外部维护对话。
+
+1. 在一条真实 lane 里，对样本图 `9ec0d162-e49e-4594-943e-082b50730600` 依次调用：提纲读取、对一个节点做邻域读取、获锁、apply 一处小改动、释放锁。
+2. 记录每次返回的字符数。
+
+**预期：** 提纲和邻域都明显小于整图（2026-10-20 整图约 2.6 万字符）；apply 与释放的返回里没有节点说明，只有计数、锁和更新时间；获锁仍返回整份文档。
+
+#### TC-GRAPH-READS-2：部署前开着的会话照旧能读（第六节，尚未执行）
+
+1. 部署前打开一条 Claude 或 Codex lane，只给 `graphId` 读样本图，保存结果。期间不要改这张图。
+2. 部署后在同一会话里再读一次，不刷新工具清单。
+
+**预期：** 两次结果相同，没有 `view` 字段。
 
 ## 用户议题收件箱：使用与操作
 

@@ -7,6 +7,7 @@ import { GraphsService, openGraphStore } from "../src/modules/graphs/index.js";
 import { runGraphCli } from "../src/modules/graphs/cli.js";
 import { graphToolArgsSchemas } from "../src/modules/graphs/tool-schema.js";
 import { bindBuiltinTools, productToolCatalog } from "../src/application/builtin-tools.js";
+import { codexDynamicTools } from "../src/adapters/codex/dynamic-tools.js";
 import { LocalRouterClient } from "../src/process/local-client.js";
 import { LocalRouterServer } from "../src/process/local-server.js";
 import { ToolService } from "../src/tools/tool-service.js";
@@ -52,6 +53,30 @@ test("real RPC and JSON-file CLI create, discover and atomically edit the same s
   expect((await x.get("/graphs/assets/unknown.js")).status).toBe(404);
   expect((await x.get(`/graphs/api/${created.graphId}`, { method: "POST" })).status).toBe(404);
   expect(await x.client.call("lane_graph_read", {}, x.caller)).toMatchObject({ graphs: [{ id: created.graphId }] });
+});
+test("lane_graph_read is published to MCP and Codex as a flat root with view, nodeIds and three argument combinations", () => {
+  for (const tools of [productToolCatalog.jsonTools(), codexDynamicTools(productToolCatalog)]) {
+    expect(tools.filter(tool => tool.name.startsWith("lane_graph_"))).toHaveLength(4);
+    const read = tools.find(tool => tool.name === "lane_graph_read")!; const schema = read.inputSchema as Record<string, unknown>;
+    expect(schema).toMatchObject({ type: "object", additionalProperties: false,
+      properties: { view: { type: "string", enum: ["full", "outline"] }, nodeIds: { type: "array", minItems: 1, items: { type: "string" } } } });
+    expect(schema).not.toHaveProperty("anyOf"); expect(schema).not.toHaveProperty("oneOf");
+    expect(read.description.split("Argument combinations (use exactly one):\n")[1]!.split("\n")).toEqual(["1. graphId; optional: view", "2. graphId, nodeIds", "3. optional: query, afterId, limit"]);
+  }
+});
+test("JSON-file CLI read takes view and nodeIds like the tool, the page API still serves the full read", async () => {
+  const x = await setup(); const a = x.service.create(x.caller, { operationKey: "create", title: "A" });
+  x.service.apply(x.caller, { operationKey: "data", graphId: a.graphId, lockId: a.lockId!, changes: [{ op: "upsert_node", id: "a", label: "A", description: "long" },
+    { op: "upsert_node", id: "b", label: "B" }, { op: "upsert_edge", id: "ab", source: "a", target: "b", type: "uses" }] });
+  for (const [input, view] of [[{ graphId: a.graphId, view: "outline" }, "outline"], [{ graphId: a.graphId, nodeIds: ["a"] }, "neighborhood"]] as const) {
+    const path = join(x.root, "read.json"); writeFileSync(path, JSON.stringify(input)); let output = "";
+    await runGraphCli(["read", "--json-file", path], { client: x.client, env: { CODEX_THREAD_ID: x.caller.conversationId }, cwd: x.root, write: s => { output = s; } });
+    const tool = await x.client.call("lane_graph_read", input, x.caller);
+    expect(JSON.parse(output)).toEqual(tool); expect(tool).toMatchObject({ view, viewUrl: `${x.origin}/graphs/${a.graphId}` });
+  }
+  await expect(x.client.call("lane_graph_read", { graphId: a.graphId, nodeIds: ["a", "ghost"] }, x.caller)).rejects.toMatchObject({ code: "NODE_NOT_FOUND", message: expect.stringContaining("ghost") });
+  expect(() => productToolCatalog.parse("lane_graph_read", { graphId: a.graphId, view: "outline", nodeIds: ["a"] })).toThrow();
+  expect((await (await x.get(`/graphs/api/${a.graphId}`)).json()).result).toEqual(JSON.parse(JSON.stringify(x.service.read(a.graphId))));
 });
 test("machine-only force unlock checks Origin, content type and exact expected lock", async () => {
   const x = await setup(); const a = x.service.create(x.caller, { operationKey: "create", title: "A" });

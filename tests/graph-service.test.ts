@@ -89,6 +89,64 @@ test("apply and release reply with a write summary of current facts; create and 
   const acquired = x.service.lock(x.caller, { action: "acquire", graphId: a.graphId, operationKey: "acquire" });
   expect(acquired).toMatchObject({ lockValid: true, document: { nodes: [{ id: "a" }, { id: "b" }], edges: [{ id: "ab" }] } });
 });
+// Every optional field is filled, so a projection that leaks one shows up as an extra key.
+const group = (id: string, parentId: string | null) => ({ op: "upsert_group", id, label: id.toUpperCase(), summary: "S", description: "D", parentId, color: "#336699" });
+const node = (id: string, groupId: string | null) => ({ op: "upsert_node", id, label: id, summary: "S", description: "D", kind: "concept", tags: ["t"], sources: [{ title: "Doc", url: "https://example.com/doc" }], groupId });
+const edge = (source: string, target: string) => ({ op: "upsert_edge", id: `${source}-${target}`, source, target, type: "uses", description: "D" });
+function richGraph(x: ReturnType<typeof setupGraph>) {
+  const a = create(x);
+  x.service.apply(x.caller, { graphId: a.graphId, lockId: a.lockId!, operationKey: "rich", changes: [{ op: "set_graph", description: "Read the outline first" },
+    group("g1", null), group("g2", "g1"), group("g3", "g2"), group("other", null), group("other-child", "other"), group("unrelated", null),
+    node("hub", "g3"), node("side", "g3"), node("up", "other-child"), node("down", "other"), node("loose", null), node("far", "unrelated"), { op: "upsert_node", id: "bare", label: "Bare" },
+    edge("up", "hub"), edge("loose", "hub"), edge("hub", "down"), edge("hub", "side"), edge("up", "far")] });
+  return a.graphId;
+}
+const keys = (items: object[]) => items.map(item => Object.keys(item).sort());
+const ids = (items: { id: string }[]) => items.map(item => item.id).sort();
+const OUTLINE = { node: ["groupId", "id", "kind", "label", "summary", "tags"], edge: ["id", "source", "target", "type"], group: ["id", "label", "parentId", "summary"] };
+test("reading with only graphId, or with view full, returns the full read unchanged", () => {
+  const x = setupGraph(); const graphId = richGraph(x); const full = x.service.read(graphId);
+  expect(Object.keys(full).sort()).toEqual(["createdAt", "document", "graphId", "lock", "updatedAt", "viewPath"]);
+  expect(x.service.readForLane(x.other, { graphId })).toStrictEqual(full);
+  expect(x.service.readForLane(x.other, { graphId, view: "full" })).toStrictEqual(full);
+});
+test("outline keeps structure and summaries and leaves out descriptions, sources and colors", () => {
+  const x = setupGraph(); const graphId = richGraph(x); const { document, ...full } = x.service.read(graphId);
+  const outline = x.service.readForLane(x.other, { graphId, view: "outline" }) as any;
+  expect(Object.keys(outline).sort()).toEqual(["counts", "description", "edges", "graphId", "groups", "lock", "nodes", "title", "updatedAt", "view", "viewPath"]);
+  expect(outline).toMatchObject({ view: "outline", graphId, title: "Rendering", description: "Read the outline first", updatedAt: full.updatedAt, lock: full.lock, viewPath: full.viewPath,
+    counts: { nodes: 7, edges: 5, groups: 6 } });
+  expect(outline.nodes.map((item: { id: string }) => item.id)).toEqual(document.nodes.map(item => item.id));
+  expect(keys(outline.nodes.slice(0, 6))).toEqual(Array(6).fill(OUTLINE.node));
+  expect(outline.nodes[0]).toStrictEqual({ id: "hub", label: "hub", kind: "concept", tags: ["t"], groupId: "g3", summary: "S" });
+  expect(outline.nodes[6]).toStrictEqual({ id: "bare", label: "Bare" });
+  expect(keys(outline.edges)).toEqual(Array(5).fill(OUTLINE.edge)); expect(keys(outline.groups)).toEqual(Array(6).fill(OUTLINE.group));
+});
+test("neighborhood is the requested nodes in full, every edge touching them, outline neighbors one hop out and all their ancestor groups", () => {
+  const x = setupGraph(); const graphId = richGraph(x); const { document, ...full } = x.service.read(graphId);
+  const one = x.service.readForLane(x.other, { graphId, nodeIds: ["hub"] }) as any;
+  expect(Object.keys(one).sort()).toEqual(["edges", "graphId", "groups", "lock", "neighbors", "nodes", "title", "updatedAt", "view", "viewPath"]);
+  expect(one).toMatchObject({ view: "neighborhood", graphId, title: "Rendering", updatedAt: full.updatedAt, lock: full.lock, viewPath: full.viewPath });
+  expect(one.nodes).toStrictEqual(document.nodes.filter(item => item.id === "hub"));
+  expect(ids(one.edges)).toEqual(["hub-down", "hub-side", "loose-hub", "up-hub"]);
+  expect(one.edges).toStrictEqual(document.edges.filter(item => ids(one.edges).includes(item.id)));
+  expect(ids(one.neighbors)).toEqual(["down", "loose", "side", "up"]); expect(keys(one.neighbors)).toEqual(Array(4).fill(OUTLINE.node));
+  expect(ids(one.groups)).toEqual(["g1", "g2", "g3", "other", "other-child"]); expect(keys(one.groups)).toEqual(Array(5).fill(OUTLINE.group));
+  const pair = x.service.readForLane(x.other, { graphId, nodeIds: ["side", "hub", "hub"] }) as any;
+  expect(ids(pair.nodes)).toEqual(["hub", "side"]);
+  expect(ids(pair.edges)).toEqual(["hub-down", "hub-side", "loose-hub", "up-hub"]);
+  expect(ids(pair.neighbors)).toEqual(["down", "loose", "up"]);
+});
+test("neighborhood with any unknown node fails as a whole and names every missing ID", () => {
+  const x = setupGraph(); const graphId = richGraph(x);
+  let failure: unknown; try { x.service.readForLane(x.other, { graphId, nodeIds: ["hub", "ghost", "g1", "ghost"] }); } catch (error) { failure = error; }
+  expect(failure).toMatchObject({ code: "NODE_NOT_FOUND", details: { nodeIds: ["ghost", "g1"] }, message: expect.stringMatching(/ghost.*g1/) });
+});
+test("view and nodeIds together, empty nodeIds and unknown fields are rejected", () => {
+  const x = setupGraph(); const graphId = richGraph(x);
+  for (const input of [{ graphId, view: "outline", nodeIds: ["hub"] }, { graphId, view: "full", nodeIds: ["hub"] }, { graphId, nodeIds: [] }, { graphId, depth: 2 },
+    { graphId, nodeIds: ["hub"], depth: 1 }, { graphId, view: "summary" }, { graphId, nodeIds: [" "] }]) expect(() => x.service.readForLane(x.other, input), JSON.stringify(input)).toThrow();
+});
 test("busy acquire does not occupy a key; release and force-unlock invalidate old lock IDs", () => {
   const x = setupGraph(); const a = create(x); const request = { action: "acquire" as const, graphId: a.graphId, operationKey: "acquire" };
   expect(() => x.service.lock(x.other, request)).toThrow(/GRAPH_LOCKED/);
