@@ -29,6 +29,7 @@
 - [问答页回复对象：空着时自动选上新来的问题（补充稿）](superpowers/specs/2026-10-20-issue-reply-target-adopt.md)
 - [问答页：用户写的内容按纯文本显示（需求与设计）](superpowers/specs/2026-10-20-issue-user-text-plain.md)
 - [问答页唤醒 Claude lane：说清要点一下确认（补充稿）](superpowers/specs/2026-10-20-issue-wake-claude-confirm.md)
+- [lane 自主性：开新、唤醒、轮换不再先问用户，新建和恢复的 lane 按有没有已授权的活开工（需求与设计）](superpowers/specs/2026-10-20-lane-autonomy-gates.md)
 - [Codex 宿主独立进程：需求与设计](superpowers/specs/2026-10-19-codex-host-process.md)
 
 ## 界面样稿
