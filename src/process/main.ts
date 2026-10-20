@@ -35,6 +35,7 @@ import type { ApplicationTools } from "../application/tool-catalog.js";
 import { openIssuesModule, type IssueWakePort } from "../modules/issues/index.js";
 import { openGraphs } from "../modules/graphs/index.js";
 import { ClaudeChannelHub, LocalRouterServer } from "./local-server.js";
+import { launchLocal } from "./local-open.js";
 import { RuntimeLock } from "./runtime-lock.js";
 import { buildId } from "./build-id.js";
 import { CodexHostHub } from "./codex-host-hub.js";
@@ -210,6 +211,8 @@ export async function runRouterProcess(options: {
       tools, applicationTools, codexHost: codexHub, claude: claudeHub, instanceId: randomUUID(),
       ...(options.issues === false ? {} : { issues: { service: issues?.service } }),
       ...(options.issues === false ? {} : { graphs: { service: graphs?.service } }),
+      // The opener is a Windows program; elsewhere the entry is not served at all.
+      ...(process.platform === "win32" ? { localOpen: { launch: launchLocal } } : {}),
       nativeHost,
       dsh: { token: dshToken, channel: dshHub, read: (context, messageIds) => core.read(context, { messageIds }),
         handoff: (context, input) => core.handoffDsh(context, input) },

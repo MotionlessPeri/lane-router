@@ -19,6 +19,7 @@ import type { NativeHostService } from "./native-host-service.js";
 import type { DashboardOpenOverride } from "./dashboard-lane-opener.js";
 import { DashboardHttp, type DashboardLaneSetsInput } from "./dashboard-http.js";
 import { json, readJson, refuseWebPage } from "./http-json.js";
+import { LocalOpenHttp, type LocalLaunch } from "./local-open.js";
 
 export type { DashboardLaneSetsInput } from "./dashboard-http.js";
 
@@ -362,6 +363,7 @@ export class LocalRouterServer {
   private readonly dashboard: DashboardHttp;
   private readonly issues: IssuesHttp | undefined;
   private readonly graphs: GraphsHttp | undefined;
+  private readonly localOpen: LocalOpenHttp | undefined;
   readonly claude: ClaudeChannelHub;
 
   constructor(private readonly options: {
@@ -369,6 +371,8 @@ export class LocalRouterServer {
     readonly applicationTools?: ApplicationTools;
     readonly issues?: IssuesHttpAssembly;
     readonly graphs?: GraphsHttpAssembly;
+    /** Opens a local path a page shows when the user clicks it; absent means the entry is not served. */
+    readonly localOpen?: { readonly launch: LocalLaunch };
     /** Where the Codex host's link lands; absent means this Router serves no Codex host. */
     readonly codexHost?: { connect(socket: WebSocket): void; close(): void };
     readonly instanceId: string;
@@ -449,6 +453,9 @@ export class LocalRouterServer {
       ...options.issues, origin: () => this.discovery().url, actionToken: this.dashboardActionToken,
     });
     this.graphs = options.graphs === undefined ? undefined : new GraphsHttp(options.graphs);
+    this.localOpen = options.localOpen === undefined ? undefined : new LocalOpenHttp({
+      launch: options.localOpen.launch, origin: () => this.discovery().url, actionToken: this.dashboardActionToken,
+    });
     this.http.on("upgrade", (request, socket, head) => {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       if (url.pathname === "/native-host/v1/channel" && !url.search && this.options.nativeHost) {
@@ -526,6 +533,7 @@ export class LocalRouterServer {
       if (await this.dashboard.handle(request, response)) return;
       if (await this.issues?.handle(request, response)) return;
       if (await this.graphs?.handle(request, response)) return;
+      if (await this.localOpen?.handle(request, response)) return;
       if (request.method === "GET" && request.url !== undefined) {
         const url = new URL(request.url, "http://127.0.0.1");
         if (url.pathname === "/lanes/archived" && this.options.listArchivedLanes) {

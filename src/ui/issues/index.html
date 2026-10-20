@@ -72,6 +72,10 @@
      right edge cannot be read, and the copy button hands over the exact text anyway. */
   .entry-body pre { position: relative; max-width: 100%; overflow-x: auto; padding: 13px 64px 13px 13px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); white-space: pre-wrap; overflow-wrap: anywhere; }
   .entry-body pre code { padding: 0; background: transparent; }
+  /* A local path the Router opens on a click: it still reads as the path, framed as a control. */
+  .entry-body .local-path { display: inline; min-height: 0; margin: 0; padding: 0 3px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--blue); font: inherit; line-height: inherit; text-align: left; overflow-wrap: anywhere; }
+  .entry-body .local-path:hover { background: var(--hover); }
+  .entry-body .local-path code { color: inherit; }
   .entry-body pre .copy-code { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 2px 8px; }
   .entry-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 12px 0; }
   .entry-body :is(th, td) { border: 1px solid var(--line); padding: 7px 12px; text-align: left; }
@@ -220,10 +224,70 @@
   function entryBody(text) {
     const body = node("div", "entry-body");
     // HTML input stays escaped; only the parser's own markup reaches this sink.
-    if (markdown) body.innerHTML = markdown.render(text);
+    if (markdown) { body.innerHTML = markdown.render(text); linkLocalPaths(body); }
     else { body.classList.add("plain-text"); body.textContent = text; }
     body.querySelectorAll("pre").forEach(addCopyButton);
     return body;
+  }
+  // A whole drive-letter absolute path, X:\… or X:/…; network, device and relative paths never match.
+  const DRIVE_PATH = /^[A-Za-z]:[\\/][^<>:"|?*\u0000-\u001f]*$/;
+  // The same in running text: no spaces, not the tail of a word or a URL, and stopping at a full-width
+  // sentence mark. Punctuation it ends with belongs to the sentence.
+  const TEXT_PATH = /(?<![\w\\/:.%~+-])[A-Za-z]:[\\/][^\s<>:"|?*。，、；：！？]*/g;
+  const SENTENCE_END = /[.,;!?)\]}'’”）」』》】]+$/;
+  /**
+   * Paths in inline code (less any ":line" or ":line:column" after them) and in running text become
+   * links the Router opens. Code blocks are left as text, to be copied.
+   */
+  function linkLocalPaths(body) {
+    for (const code of body.querySelectorAll("code")) {
+      const path = code.textContent.trim().replace(/:\d+(?::\d+)?$/, "");
+      if (code.closest("pre, a") || !DRIVE_PATH.test(path)) continue;
+      const link = pathLink(path); code.replaceWith(link); link.append(code);
+    }
+    const texts = [];
+    for (let walker = document.createTreeWalker(body, document.defaultView.NodeFilter.SHOW_TEXT), text; (text = walker.nextNode());) {
+      if (!text.parentElement.closest("pre, code, a, .local-path")) texts.push(text);
+    }
+    for (const text of texts) {
+      const parts = []; let end = 0;
+      for (const match of text.data.matchAll(TEXT_PATH)) {
+        const path = match[0].replace(SENTENCE_END, "");
+        if (!DRIVE_PATH.test(path)) continue;
+        const link = pathLink(path); link.textContent = path;
+        parts.push(text.data.slice(end, match.index), link); end = match.index + path.length;
+      }
+      if (parts.length) text.replaceWith(...parts, text.data.slice(end));
+    }
+  }
+  function pathLink(path) {
+    const link = node("button", "local-path"); link.type = "button"; link.title = "用本机程序打开";
+    link.addEventListener("click", () => { void openLocalPath(path); });
+    return link;
+  }
+  const openedNotices = {
+    opened: () => ["已打开", false],
+    revealed: () => ["这类文件不直接打开，已在资源管理器里选中它", false],
+    missing: result => ["文件已不在：" + result.path, true],
+    refused: result => ["不能打开这个路径（" + result.reason + "）", true],
+  };
+  /**
+   * What happened goes where the issue's operations report; one of those still sending or of
+   * unknown outcome keeps that line until it resolves, since its text says how to recover.
+   */
+  async function openLocalPath(path) {
+    const id = selectedId;
+    let notice;
+    try {
+      const { result } = await request("/local-files/open", {
+        method: "POST", headers: { "content-type": "application/json", "x-lane-router-action": "open-local-path" },
+        body: JSON.stringify({ actionToken, path }),
+      });
+      notice = (openedNotices[result && result.action] || (() => ["未能确认是否已打开", true]))(result);
+    } catch (error) { notice = ["打开失败：" + error.message, true]; }
+    const view = id ? viewFor(id) : null;
+    if (!view || view.operation) return;
+    [view.notice, view.warning] = notice; renderDetail(id);
   }
   // The window's navigator rather than the bare global, so the page and its tests look at the same
   // clipboard. The label stays on "已复制" until the issue is next opened, when its entries are
