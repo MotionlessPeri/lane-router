@@ -102,8 +102,14 @@ export class CodexHostHub {
       host.appServer = params.state;
       if (!wasReady && host.appServer === "ready") this.announceReady();
     } else if (method === "threadClients" && typeof params.threadId === "string" && typeof params.visibleClients === "number") {
+      const opened = params.visibleClients > 0 && !host.visibleClients.has(params.threadId);
       if (params.visibleClients > 0) host.visibleClients.set(params.threadId, params.visibleClients);
       else host.visibleClients.delete(params.threadId);
+      // A TUI opening a thread loads it, and only a loaded thread can take a turn; nothing says the
+      // App Server reports it going idle as it loads. So the first window is itself the chance to
+      // deliver what waited, for this thread alone: the pump sends only real mail, and a busy
+      // thread defers to its turn's end.
+      if (opened) this.options.opportunity([params.threadId]);
     } else if (method === "observe" && typeof params.method === "string" && isRecord(params.params)) {
       try { this.notificationHandler({ method: params.method, params: params.params }); } catch { /* observers do not own the link */ }
     } else if (method === "opportunity" && Array.isArray(params.threadIds)) {

@@ -108,6 +108,21 @@ test("hello offers every thread the host has and every active codex binding a ch
   expect(x.hub.hasVisibleClient("bound-only")).toBe(false);
 });
 
+// Opening a thread in a TUI loads it, and only a loaded thread can take a turn. Nothing says the
+// App Server reports that thread going idle as it loads it, so the hub offers it itself: that
+// thread alone, and only when its first window opens.
+test("a thread's first visible client offers that thread alone, on the step up from none", async () => {
+  const x = await harness([binding("bound-a"), binding("bound-b")]);
+  const { peer } = await x.host();
+  await vi.waitFor(() => expect(x.opportunities).toEqual([["bound-a", "bound-b"]]));
+  x.opportunities.length = 0;
+  peer.event("threadClients", { threadId: "bound-a", visibleClients: 1 });
+  await vi.waitFor(() => expect(x.opportunities).toEqual([["bound-a"]]));
+  for (const visibleClients of [2, 1, 0, 1]) peer.event("threadClients", { threadId: "bound-a", visibleClients });
+  await vi.waitFor(() => expect(x.opportunities).toEqual([["bound-a"], ["bound-a"]]));
+  expect(x.hub.hasVisibleClient("bound-a")).toBe(true);
+});
+
 // Replacement happens on an accepted hello, not on a bare connection: anything else on loopback
 // could otherwise knock the working host off and fail its tool calls in flight.
 test("a connection that never says hello does not displace the linked host", async () => {

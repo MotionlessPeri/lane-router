@@ -264,6 +264,10 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
   - **现在：** 客户端先留住最新一帧，会话接上时补交一次。
   - **影响范围：** 看板「恢复 lane」、`lane_restore_project` 和问答页的唤醒走的都是这条路，一起修好了。
   - **测试：** `tests/process/local-transport.test.ts`。
+- **同时修的现有缺陷（Codex）：**
+  - **原来的问题：** thread 已从共享 App Server 卸载的 Codex lane，打开窗口并不会触发投递，要等 thread 报告空闲。App Server 加载 thread 时会不会报，仓库里看不出来。
+  - **现在：** 宿主报告某个 thread 的窗口数从 0 变成大于 0 时，Router 对这一个 thread 投递一次。
+  - **测试：** `tests/process/codex-host-hub.test.ts`。
 
 自动测试：
 - `tests/modules/issues/create.test.ts`：建议题的事务、各种拒绝、同键重放，以及唤醒端口抛错时算作唤醒失败。
