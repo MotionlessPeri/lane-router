@@ -79,6 +79,22 @@ test("issue CLI reads an ordinary JSON file and refuses missing or malformed inp
   expect(x.calls).toHaveLength(1);
 });
 
+// Spec 2026-10-21-issue-task-ref.md, acceptance 5: the JSON a Codex session hands the CLI takes the card too.
+test("issue CLI publishes with a card and sets or clears one through update; a card held elsewhere keeps its code", async () => {
+  const x = await fixture();
+  await x.invoke("publish", { operationKey: "with-card", title: "有卡", kind: "question", body: "?", task: "LR-56" });
+  const first = JSON.parse(x.output[0]!);
+  expect(x.x.service.detail(first.issueId).thread.task).toBe("LR-56");
+  await x.invoke("publish", { operationKey: "without", title: "没卡", kind: "question", body: "?" });
+  const second = JSON.parse(x.output[1]!);
+  await expect(x.invoke("update", { operationKey: "take", issueId: second.issueId, action: "set_task", task: "LR-56" })).rejects.toMatchObject({ code: "TASK_TAKEN" });
+  await x.invoke("update", { operationKey: "clear", issueId: first.issueId, action: "set_task", task: null });
+  await x.invoke("update", { operationKey: "take-freed", issueId: second.issueId, action: "set_task", task: "LR-56" });
+  expect(JSON.parse(x.output.at(-1)!)).toEqual({ issueId: second.issueId, task: "LR-56" });
+  await x.invoke("read", { issueId: first.issueId });
+  expect(JSON.parse(x.output.at(-1)!).thread.task).toBeNull();
+});
+
 test("CLI preserves a business failure code and does not print or retry an uncertain result", async () => {
   const x = await fixture();
   const input = { operationKey: "original", title: "Q", kind: "question", body: "Which?" };

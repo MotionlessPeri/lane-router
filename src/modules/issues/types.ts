@@ -8,7 +8,8 @@ export type EntrySource = "agent" | "user_page" | "agent_reported_tui_user";
 export type AttentionReason = "waiting_user" | "unread_lane_content";
 
 export class IssueError extends Error {
-  constructor(readonly code: "INVALID_INPUT" | "INVALID_REFERENCE" | "ISSUE_NOT_FOUND" | "ISSUE_CLOSED" | "LANE_UNAVAILABLE" | "OPERATION_CONFLICT" | "QUESTIONS_WAITING" | "ATTACHMENT_TOO_LARGE", message: string) {
+  constructor(readonly code: "INVALID_INPUT" | "INVALID_REFERENCE" | "ISSUE_NOT_FOUND" | "ISSUE_CLOSED" | "LANE_UNAVAILABLE" | "OPERATION_CONFLICT" | "QUESTIONS_WAITING" | "ATTACHMENT_TOO_LARGE"
+    | "TASK_ALREADY_SET" | "TASK_TAKEN", message: string) {
     super(message);
     this.name = "IssueError";
   }
@@ -27,6 +28,8 @@ export interface IssueThread {
   readonly closedBy: IssueCloser | null;
   readonly readSeq: number;
   readonly nextSeq: number;
+  /** The card this issue's work is on, such as LR-56; no other issue holds it. */
+  readonly task: string | null;
 }
 export type IssueCloser = "user" | "lane";
 
@@ -180,7 +183,7 @@ export interface IssueDetail {
   readonly hasMore: boolean;
 }
 
-export type PublishIssueInput = { readonly operationKey: string; readonly title: string } & (
+export type PublishIssueInput = { readonly operationKey: string; readonly title: string; readonly task?: string } & (
   | { readonly kind: "answer"; readonly originalQuestion: string; readonly body: string }
   | { readonly kind: "question"; readonly body: string }
 );
@@ -225,6 +228,9 @@ export interface ReplyIssueInput {
 export interface CloseIssueInput { readonly operationKey: string; readonly issueId: string; readonly body: string }
 /** A lane ending its own issue; the reason goes into the issue's history. */
 export interface LaneCloseIssueInput { readonly operationKey: string; readonly issueId: string; readonly reason: string }
+/** A lane pairing its issue with a card, or with none when `task` is null. */
+export interface SetIssueTaskInput { readonly operationKey: string; readonly issueId: string; readonly task: string | null }
+export interface IssueTaskResult { readonly issueId: string; readonly task: string | null }
 export interface ReadIssueInput { readonly operationKey: string; readonly issueId: string; readonly throughSeq: number }
 export interface RecordProcessedInput { readonly operationKey: string; readonly issueId: string; readonly deliveryId: string }
 export interface IssueProcessedResult { readonly issueId: string; readonly deliveryId: string; readonly processedAt: number }

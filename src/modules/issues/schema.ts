@@ -136,6 +136,14 @@ CREATE INDEX issue_attachment_unattached_idx ON issue_attachment(created_at) WHE
     structure: "ALTER TABLE issue_attachment ADD COLUMN position INTEGER CHECK(position IS NULL OR (typeof(position)='integer' AND position>=0))",
     data: "",
   },
+  {
+    // The card an issue's work is on, such as LR-56; issues from before have none. An issue holds at
+    // most one card and a card at most one issue: the service says so, and the index holds it anyway.
+    structure: `
+ALTER TABLE issue_thread ADD COLUMN task_ref TEXT;
+CREATE UNIQUE INDEX issue_thread_task_ref_idx ON issue_thread(task_ref) WHERE task_ref IS NOT NULL;`,
+    data: "",
+  },
 ];
 
 export const ISSUE_SCHEMA_VERSION = UPGRADES.length + 1;

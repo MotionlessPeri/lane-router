@@ -34,6 +34,8 @@ export interface IssueStore {
   thread(id: string): IssueThread | null;
   insertThread(thread: IssueThread): void;
   updateThread(thread: IssueThread): void;
+  /** The issue that holds this card, if one does. */
+  threadByTask(task: string): IssueThread | null;
   /** `ownerLaneIds`, when given, keeps only those owners' issues; empty keeps none. */
   listThreads(query: IssueListQuery, ownerLaneId?: string, ownerLaneIds?: readonly string[]): readonly IssueListRow[];
   /** A lane's issues with any question waiting, on the user or on the lane, with how many of each. */

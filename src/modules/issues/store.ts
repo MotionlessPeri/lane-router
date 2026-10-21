@@ -8,7 +8,7 @@ import { initializeIssueSchema } from "./schema.js";
 import type { IssueAttachment, IssueDelivery, IssueEntry, IssueFilter, IssueListQuery, IssueOperation, IssueQuestion, IssueThread } from "./types.js";
 
 const THREAD = `id,owner_lane_id AS ownerLaneId,title,origin_kind AS originKind,status,
-  created_at AS createdAt,updated_at AS updatedAt,closed_at AS closedAt,closed_by AS closedBy,read_seq AS readSeq,next_seq AS nextSeq`;
+  created_at AS createdAt,updated_at AS updatedAt,closed_at AS closedAt,closed_by AS closedBy,read_seq AS readSeq,next_seq AS nextSeq,task_ref AS task`;
 const ENTRY = `id,issue_id AS issueId,seq,kind,author,source,body,related_entry_id AS relatedEntryId,
   recorded_by_binding_id AS recordedByBindingId,recorded_by_generation AS recordedByGeneration,created_at AS createdAt`;
 const QUESTION = `id,issue_id AS issueId,prompt_entry_id AS promptEntryId,asked_to AS askedTo,status,
@@ -57,13 +57,17 @@ export class SqliteIssueStore implements IssueStore {
   }
 
   insertThread(thread: IssueThread): void {
-    this.database.prepare(`INSERT INTO issue_thread(id,owner_lane_id,title,origin_kind,status,created_at,updated_at,closed_at,closed_by,read_seq,next_seq)
-      VALUES(@id,@ownerLaneId,@title,@originKind,@status,@createdAt,@updatedAt,@closedAt,@closedBy,@readSeq,@nextSeq)`).run(thread);
+    this.database.prepare(`INSERT INTO issue_thread(id,owner_lane_id,title,origin_kind,status,created_at,updated_at,closed_at,closed_by,read_seq,next_seq,task_ref)
+      VALUES(@id,@ownerLaneId,@title,@originKind,@status,@createdAt,@updatedAt,@closedAt,@closedBy,@readSeq,@nextSeq,@task)`).run(thread);
   }
 
   updateThread(thread: IssueThread): void {
     this.database.prepare(`UPDATE issue_thread SET status=@status,updated_at=@updatedAt,closed_at=@closedAt,closed_by=@closedBy,
-      read_seq=@readSeq,next_seq=@nextSeq WHERE id=@id`).run(thread);
+      read_seq=@readSeq,next_seq=@nextSeq,task_ref=@task WHERE id=@id`).run(thread);
+  }
+
+  threadByTask(task: string): IssueThread | null {
+    return this.database.prepare(`SELECT ${THREAD} FROM issue_thread WHERE task_ref=?`).get(task) as IssueThread | undefined ?? null;
   }
 
   listThreads(query: IssueListQuery, ownerLaneId?: string, ownerLaneIds?: readonly string[]): readonly IssueListRow[] {

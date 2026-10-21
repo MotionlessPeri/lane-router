@@ -19,6 +19,7 @@ export function callIssueTool(service: IssuesService | undefined, name: IssueToo
         case "record_processed": return service.recordProcessed(context, input as Parameters<IssuesService["recordProcessed"]>[1]);
         case "record_tui_close": return service.recordTuiClose(context, input as Parameters<IssuesService["recordTuiClose"]>[1]);
         case "close": return service.closeByLane(context, input as Parameters<IssuesService["closeByLane"]>[1]);
+        case "set_task": return service.setTask(context, input as Parameters<IssuesService["setTask"]>[1]);
       }
     }
   }

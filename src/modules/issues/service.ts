@@ -11,8 +11,8 @@ import {
   type IssueEntry, type IssueEntryResult, type IssueHistoryQuery, type IssueList,
   type IssueCloser, type IssueFilter, type IssueListQuery, type IssueOwner, type IssuePresence, type IssueProcessedResult, type IssueProjectCount,
   type IssueProjects, type IssueQuestion, type IssueRefs, type IssueThread,
-  type IssueWakeResult, type LaneCloseIssueInput, type PublishIssueInput, type ReadIssueInput, type RecordProcessedInput, type ReplyIssueInput,
-  type UpdateIssueQuestionInput,
+  type IssueTaskResult, type IssueWakeResult, type LaneCloseIssueInput, type PublishIssueInput, type ReadIssueInput, type RecordProcessedInput, type ReplyIssueInput,
+  type SetIssueTaskInput, type UpdateIssueQuestionInput,
 } from "./types.js";
 
 /** Business authority is here; clients display saved facts and never infer completion from delivery. */
@@ -28,18 +28,22 @@ export class IssuesService {
   }
 
   publish(context: CallerContext, input: PublishIssueInput): IssueEntryResult {
-    fields(input, ["operationKey", "title", "kind", "body", "originalQuestion"]);
+    fields(input, ["operationKey", "title", "kind", "body", "originalQuestion", "task"]);
     const operationKey = text(input.operationKey, "operationKey");
     const title = text(input.title, "title").trim();
     const body = text(input.body, "body");
     if (input.kind !== "answer" && input.kind !== "question") invalid("Only answer and question issues may be published");
     if (input.kind === "question" && "originalQuestion" in input) invalid("A proactive question has no originalQuestion");
     const originalQuestion = input.kind === "answer" ? text(input.originalQuestion, "originalQuestion") : null;
-    return this.agentWrite(context, "publish", operationKey, { title, kind: input.kind, body, originalQuestion }, undefined, (actor) => {
+    const task = input.task === undefined ? null : taskRef(input.task);
+    // A card counts toward the operation only when given, so publishes saved before cards replay as they were.
+    const payload = { title, kind: input.kind, body, originalQuestion, ...(task === null ? {} : { task }) };
+    return this.agentWrite(context, "publish", operationKey, payload, undefined, (actor) => {
+      if (task !== null) this.requireFreeTask(task);
       const now = this.now();
       const issueId = this.newId();
       this.store.insertThread({ id: issueId, ownerLaneId: actor.laneId, title, originKind: input.kind,
-        status: "open", createdAt: now, updatedAt: now, closedAt: null, closedBy: null, readSeq: 0, nextSeq: 1 });
+        status: "open", createdAt: now, updatedAt: now, closedAt: null, closedBy: null, readSeq: 0, nextSeq: 1, task });
       if (originalQuestion !== null) {
         const prompt = this.addEntry(issueId, "question", "user", "agent_reported_tui_user", originalQuestion, null, actor);
         const answer = this.addEntry(issueId, "answer", "lane", "agent", body, prompt.id, actor);
@@ -119,6 +123,30 @@ export class IssuesService {
           + "Answer each with lane_issue_append (kind answer, with its questionId), or mark it not_needed with lane_issue_update resolve_question, then close.");
       }
       return this.end(issueId, `lane 结束：${reason}`, "lane", "agent", actor);
+    });
+  }
+
+  /**
+   * Pairs the lane's issue with the card its work is on, or with none. An issue holds one card at a
+   * time and a card one issue, so changing cards goes through null; the card it already has is no
+   * change and writes nothing. Like other additions, it waits while the issue is ended.
+   */
+  setTask(context: CallerContext, input: SetIssueTaskInput): IssueTaskResult {
+    fields(input, ["operationKey", "issueId", "task"]);
+    const operationKey = text(input.operationKey, "operationKey");
+    const issueId = text(input.issueId, "issueId");
+    if (!("task" in input)) invalid("task must be a card such as LR-56, or null");
+    const task = input.task === null ? null : taskRef(input.task);
+    return this.agentWrite(context, "set_task", operationKey, { issueId, task }, issueId, (actor) => {
+      const thread = this.requireThread(issueId);
+      if (thread.task === task) return { issueId, task };
+      if (task !== null && thread.task !== null) {
+        throw new IssueError("TASK_ALREADY_SET", `This issue already has card ${thread.task}; set task to null first, then to ${task}.`);
+      }
+      if (task !== null) this.requireFreeTask(task);
+      this.store.updateThread({ ...thread, task });
+      this.addEntry(issueId, "event", "lane", "agent", task === null ? `lane 去掉卡 ${thread.task}` : `lane 配上卡 ${task}`, null, actor);
+      return { issueId, task };
     });
   }
 
@@ -249,7 +277,7 @@ export class IssuesService {
       }
       const now = this.now();
       const thread: IssueThread = { id: this.newId(), ownerLaneId: laneId, title, originKind: "question",
-        status: "open", createdAt: now, updatedAt: now, closedAt: null, closedBy: null, readSeq: 0, nextSeq: 1 };
+        status: "open", createdAt: now, updatedAt: now, closedAt: null, closedBy: null, readSeq: 0, nextSeq: 1, task: null };
       this.store.insertThread(thread);
       const entry = this.addEntry(thread.id, "question", "user", "user_page", body, null, null);
       const files = this.claim(entry, attachmentIds);
@@ -427,6 +455,11 @@ export class IssuesService {
     if (thread.status === "closed") throw new IssueError("ISSUE_CLOSED", "This issue has been explicitly ended");
   }
 
+  private requireFreeTask(task: string): void {
+    const holder = this.store.threadByTask(task);
+    if (holder) throw new IssueError("TASK_TAKEN", `Card ${task} already goes with issue ${holder.id}; a card goes with one issue only.`);
+  }
+
   private requireActiveLane(laneId: string): void {
     const lane = this.options.lanes.readLane(laneId);
     if (lane === null || lane.archivedAt !== null) throw new IssueError("LANE_UNAVAILABLE", "The original owner lane is missing or archived");
@@ -546,6 +579,14 @@ function listFilter(value: unknown): IssueFilter {
   return value as IssueFilter;
 }
 
+const TASK_REF = /^[A-Z][A-Z0-9]*-\d+$/u;
+/** A card as its board numbers it: an upper-case project, a dash and a number, such as LR-56. */
+function taskRef(value: unknown): string {
+  if (typeof value !== "string" || value.length > 32 || !TASK_REF.test(value)) {
+    invalid("task must be a card such as LR-56: an upper-case project, a dash and a number, at most 32 characters");
+  }
+  return value;
+}
 function optionalId(value: unknown): string | null { return value === undefined ? null : text(value, "questionId"); }
 function attachmentIdsOf(value: unknown): readonly string[] | null {
   if (value === undefined) return null;

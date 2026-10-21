@@ -19,6 +19,8 @@ const V1 = fixture("v1-schema.sql");
 const V2_FROM_V1 = fixture("v2-from-v1.sql");
 // Spec 2026-10-21-issue-attachment-order.md, acceptance 1: v3's statements as they shipped.
 const V3_FROM_V2 = fixture("v3-from-v2.sql");
+// Spec 2026-10-21-issue-task-ref.md, acceptance 1: v4's statements as they shipped.
+const V4_FROM_V3 = fixture("v4-from-v3.sql");
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const hash = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -36,6 +38,14 @@ function v3Database(alter?: string) {
     INSERT INTO issue_attachment VALUES('file-waiting',NULL,NULL,'shot.png','image/png',9,'${"b".repeat(64)}','C:/files/shot.png',8);
     ${alter ?? ""}`);
   return { ...v1, backup: `${v1.path}.v3.bak` };
+}
+
+/** A v4 database as the Router left it: the v3 one, with the file the reply took first among its files. */
+function v4Database(alter?: string) {
+  const v3 = v3Database(`${V4_FROM_V3}
+    UPDATE issue_attachment SET position=0 WHERE id='file-taken';
+    ${alter ?? ""}`);
+  return { ...v3, backup: `${v3.path}.v4.bak` };
 }
 /** Every attachment row, with or without the column v4 adds. */
 function attachmentRows(path: string) {
@@ -67,12 +77,15 @@ function v1Database(alter?: string) {
 }
 
 const TABLES = ["issue_delivery", "issue_entry", "issue_operation", "issue_question", "issue_thread"];
-/** Every row of the tables v1 had; without the column v2 adds unless asked, so v1 rows compare directly. */
+/**
+ * Every row of the tables v1 had; without the column v2 adds unless asked, so v1 rows compare
+ * directly, and never with the one v5 adds, which `facts` reads on its own.
+ */
 function rows(path: string, closedBy = false) {
   const database = new Database(path, { readonly: true });
   try {
     return Object.fromEntries(TABLES.map(table => [table, (database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all() as Record<string, unknown>[])
-      .map(({ closed_by, ...row }) => closedBy && table === "issue_thread" ? { ...row, closed_by } : row)]));
+      .map(({ closed_by, task_ref: _task, ...row }) => closedBy && table === "issue_thread" ? { ...row, closed_by } : row)]));
   } finally { database.close(); }
 }
 function facts(path: string) {
@@ -85,14 +98,42 @@ function facts(path: string) {
       version: (database.prepare("SELECT version FROM issue_schema_version").get() as { version: number }).version,
       closedBy: has("issue_thread", "closed_by") ? database.prepare("SELECT id,status,closed_by AS closedBy FROM issue_thread ORDER BY id").all() : null,
       attachments: has("issue_attachment") ? database.prepare("SELECT count(*) AS count FROM issue_attachment").get() : null,
+      tasks: has("issue_thread", "task_ref") ? database.prepare("SELECT id,task_ref AS task FROM issue_thread ORDER BY id").all() : null,
       foreignKeys: database.pragma("foreign_key_check"),
       schema: database.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all(),
     };
   } finally { database.close(); }
 }
 
-test("the current version is 4", () => {
-  expect(ISSUE_SCHEMA_VERSION).toBe(4);
+test("the current version is 5", () => {
+  expect(ISSUE_SCHEMA_VERSION).toBe(5);
+});
+
+test("a v4 database is backed up as v4 alone, then upgraded in place with every row kept and no card on its issues", () => {
+  const { path, backup } = v4Database();
+  const before = rows(path, true), files = attachmentRows(path);
+  expect(facts(path)).toMatchObject({ version: 4, attachments: { count: 2 }, tasks: null });
+  openIssueStore(path).close();
+  expect(facts(path)).toMatchObject({ version: ISSUE_SCHEMA_VERSION, attachments: { count: 2 }, foreignKeys: [],
+    tasks: [{ id: "closed-1", task: null }, { id: "open-1", task: null }] });
+  expect(rows(path, true)).toEqual(before);
+  expect(attachmentRows(path)).toEqual(files);
+  expect(facts(backup)).toMatchObject({ version: 4, attachments: { count: 2 }, tasks: null });
+  expect(rows(backup, true)).toEqual(before);
+  for (const other of [1, 2, 3]) expect(existsSync(`${path}.v${other}.bak`), `v${other}`).toBe(false);
+});
+
+test("the database itself holds a card on one issue only, and any number of issues on none", () => {
+  const { path } = v4Database();
+  openIssueStore(path).close();
+  const database = new Database(path);
+  try {
+    database.prepare("UPDATE issue_thread SET task_ref='LR-56' WHERE id='open-1'").run();
+    expect(() => database.prepare("UPDATE issue_thread SET task_ref='LR-56' WHERE id='closed-1'").run()).toThrow(/UNIQUE/u);
+    database.prepare("UPDATE issue_thread SET task_ref='MCN-56' WHERE id='closed-1'").run();
+    database.prepare("UPDATE issue_thread SET task_ref=NULL").run();
+    expect(database.prepare("SELECT count(*) AS count FROM issue_thread WHERE task_ref IS NULL").get()).toEqual({ count: 2 });
+  } finally { database.close(); }
 });
 
 test("a v3 database is backed up as v3 alone, then upgraded in place with every row kept and no position on its files", () => {
@@ -105,7 +146,7 @@ test("a v3 database is backed up as v3 alone, then upgraded in place with every 
   expect(attachmentRows(path)).toEqual(files.map(row => ({ ...row, position: null })));
   expect(facts(backup)).toMatchObject({ version: 3, attachments: { count: 2 } });
   expect(attachmentRows(backup)).toEqual(files);
-  for (const other of [1, 2]) expect(existsSync(`${path}.v${other}.bak`), `v${other}`).toBe(false);
+  for (const other of [1, 2, 4]) expect(existsSync(`${path}.v${other}.bak`), `v${other}`).toBe(false);
 });
 
 test("a v1 database is backed up, then upgraded in place to the current version with every row kept and its ended issues ended by the user", () => {
@@ -121,6 +162,7 @@ test("a v1 database is backed up, then upgraded in place to the current version 
   expect(upgraded.version).toBe(ISSUE_SCHEMA_VERSION);
   expect(upgraded.closedBy).toEqual([{ id: "closed-1", status: "closed", closedBy: "user" }, { id: "open-1", status: "open", closedBy: null }]);
   expect(upgraded.attachments).toEqual({ count: 0 });
+  expect(upgraded.tasks).toEqual([{ id: "closed-1", task: null }, { id: "open-1", task: null }]);
   expect(upgraded.foreignKeys).toEqual([]);
   expect(rows(path)).toEqual(before);
 
@@ -131,7 +173,7 @@ test("a v1 database is backed up, then upgraded in place to the current version 
   expect(kept.attachments).toBeNull();
   expect(rows(backup)).toEqual(before);
   // One step to the current version, so one backup: none for the versions passed through.
-  for (const other of [2, 3]) expect(existsSync(`${path}.v${other}.bak`), `v${other}`).toBe(false);
+  for (const other of [2, 3, 4]) expect(existsSync(`${path}.v${other}.bak`), `v${other}`).toBe(false);
 });
 
 test("a v2 database is backed up as v2, then upgraded in place to the current version with every row kept", () => {
@@ -147,7 +189,7 @@ test("a v2 database is backed up as v2, then upgraded in place to the current ve
 });
 
 test("an upgraded database opened again is not upgraded again, and its backup is neither replaced nor made anew", () => {
-  for (const made of [v1Database, v2Database, v3Database]) {
+  for (const made of [v1Database, v2Database, v3Database, v4Database]) {
     const { path, backup } = made();
     openIssueStore(path).close();
     const kept = hash(backup), upgraded = facts(path);
@@ -160,11 +202,11 @@ test("an upgraded database opened again is not upgraded again, and its backup is
   }
 });
 
-test("a fresh database is the current version and has exactly the structure an upgraded one has, from v1, v2 or v3", () => {
+test("a fresh database is the current version and has exactly the structure an upgraded one has, from v1, v2, v3 or v4", () => {
   const fresh = join(v1Database().root, "fresh.sqlite");
   openIssueStore(fresh).close();
   expect(facts(fresh).version).toBe(ISSUE_SCHEMA_VERSION);
-  for (const made of [v1Database, v2Database, v3Database]) {
+  for (const made of [v1Database, v2Database, v3Database, v4Database]) {
     const { path } = made();
     openIssueStore(path).close();
     expect(facts(fresh).schema, made.name).toEqual(facts(path).schema);
@@ -176,16 +218,18 @@ test("an altered older database and an unknown version are refused untouched, wi
     [v1Database, "DROP INDEX issue_question_status_idx"], [v1Database, "UPDATE issue_schema_version SET version=99"],
     [v2Database, "DROP INDEX issue_question_status_idx"], [v2Database, "UPDATE issue_schema_version SET version=99"],
     [v3Database, "DROP INDEX issue_attachment_unattached_idx"], [v3Database, "UPDATE issue_schema_version SET version=99"],
-    // v1's structure claiming to be v2 is not v2, and v2's claiming to be v3 is not v3.
+    [v4Database, "DROP INDEX issue_attachment_entry_idx"], [v4Database, "UPDATE issue_schema_version SET version=99"],
+    // v1's structure claiming to be v2 is not v2, v2's claiming to be v3 is not v3, and so on.
     [v1Database, "UPDATE issue_schema_version SET version=2"],
     [v2Database, "UPDATE issue_schema_version SET version=3"],
+    [v3Database, "UPDATE issue_schema_version SET version=4"],
   ] as const) {
     const { path, backup } = made(alter);
     const original = hash(path);
     expect(() => openIssueStore(path).close(), `${made.name} ${alter}`).toThrow();
     expect(hash(path), alter).toBe(original);
     expect(existsSync(backup), alter).toBe(false);
-    for (const other of [1, 2, 3]) expect(existsSync(`${path}.v${other}.bak`), `${alter} v${other}`).toBe(false);
+    for (const other of [1, 2, 3, 4]) expect(existsSync(`${path}.v${other}.bak`), `${alter} v${other}`).toBe(false);
   }
 });
 

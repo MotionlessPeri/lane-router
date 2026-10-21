@@ -31,7 +31,7 @@ test("a field that tells the branches apart lists every value any branch allows"
   for (const target of TARGETS) {
     const tools = published(target);
     const property = (name: string, field: string) => (tools.get(name)!.inputSchema as Schema).properties[field];
-    expect(property("lane_issue_update", "action")).toEqual({ type: "string", enum: ["resolve_question", "record_processed", "record_tui_close", "close"] });
+    expect(property("lane_issue_update", "action")).toEqual({ type: "string", enum: ["resolve_question", "record_processed", "record_tui_close", "close", "set_task"] });
     expect(property("lane_issue_update", "status")).toEqual({ type: "string", enum: ["answered", "not_needed"] });
     expect(property("lane_issue_publish", "kind")).toEqual({ type: "string", enum: ["answer", "question"] });
     expect(property("lane_graph_lock", "action")).toEqual({ type: "string", enum: ["acquire", "release"] });
@@ -118,6 +118,9 @@ test("arguments are still checked branch by branch", () => {
     ["lane_issue_update", { operationKey: "u", issueId: "i", action: "record_processed", deliveryId: "d" }],
     ["lane_issue_update", { operationKey: "u", issueId: "i", action: "record_tui_close", body: "b" }],
     ["lane_issue_update", { operationKey: "u", issueId: "i", action: "close", reason: "r" }],
+    ["lane_issue_update", { operationKey: "u", issueId: "i", action: "set_task", task: "LR-56" }],
+    ["lane_issue_update", { operationKey: "u", issueId: "i", action: "set_task", task: null }],
+    ["lane_issue_publish", { operationKey: "p", title: "T", kind: "question", body: "B", task: "LR-56" }],
     ["lane_issue_read", { issueId: "i", afterSeq: 0 }],
     ["lane_issue_read", { filter: "all" }],
     ["lane_graph_lock", { operationKey: "l", graphId: "g", action: "acquire" }],
@@ -127,6 +130,8 @@ test("arguments are still checked branch by branch", () => {
     ["lane_issue_publish", { operationKey: "p", title: "T", kind: "question", body: "B", originalQuestion: "x" }],
     ["lane_issue_update", { operationKey: "u", issueId: "i", action: "record_processed", deliveryId: "d", status: "answered" }],
     ["lane_issue_update", { operationKey: "u", issueId: "i", action: "resolve_question", questionId: "q", status: "answered", reason: "r" }],
+    ["lane_issue_update", { operationKey: "u", issueId: "i", action: "set_task" }],
+    ["lane_issue_update", { operationKey: "u", issueId: "i", action: "close", reason: "r", task: "LR-56" }],
     ["lane_issue_read", { issueId: "i", filter: "all" }],
     ["lane_graph_lock", { operationKey: "l", graphId: "g", action: "acquire", lockId: "k" }],
   ];
