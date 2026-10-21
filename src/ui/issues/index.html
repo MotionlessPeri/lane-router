@@ -103,6 +103,14 @@
   .entry-body .local-path code { color: inherit; }
   /* Another issue named in an entry: the reference as written, then that issue's title, quieter. */
   .issue-ref-title { margin-left: 2px; color: var(--muted); font-size: .85em; }
+  /* A lane's diagram: fitted to the column, opened at its own size on a click; its source folded below. */
+  .mermaid-diagram { margin: 12px 0 4px; overflow-x: auto; cursor: zoom-in; }
+  .mermaid-diagram svg { max-width: 100%; height: auto; }
+  .mermaid-source { margin-bottom: 12px; }
+  .mermaid-source summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  .mermaid-error { margin: 12px 0 4px; font-size: 12px; }
+  .diagram-zoom { max-width: 95vw; max-height: 90vh; overflow: auto; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); }
+  .diagram-zoom::backdrop { background: rgb(0 0 0 / .45); }
   .copy-id { padding: 0 6px; font-size: 11px; line-height: 1.6; }
   /* Files under an entry: images as thumbnails that open full size, others by name. */
   .entry-files { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 8px; }
@@ -298,6 +306,12 @@
       tokens[index].attrSet("rel", "noopener noreferrer");
       return renderer.renderToken(tokens, index, options);
     };
+    // A fenced block whose info is exactly "mermaid", whatever its case, is marked to be drawn.
+    const fence = markdown.renderer.rules.fence;
+    markdown.renderer.rules.fence = (tokens, index, options, env, renderer) => {
+      if (tokens[index].info.trim().toLowerCase() === "mermaid") tokens[index].attrSet("data-mermaid", "");
+      return fence(tokens, index, options, env, renderer);
+    };
   } else byId("markdown-status").hidden = false;
   /**
    * The user's own words are shown as typed: what they write is not Markdown to them. Local paths
@@ -311,7 +325,56 @@
     if (markdown) linkLocalPaths(body);
     markIssueRefs(body);
     body.querySelectorAll("pre").forEach(addCopyButton);
+    if (markdown && !plain) drawDiagrams(body);
     return body;
+  }
+  /**
+   * A lane's mermaid blocks drawn as diagrams (spec 2026-10-21-issue-page-usability.md, section four).
+   * The library comes from the Router the first time a page has a diagram, never otherwise, and runs
+   * with securityLevel "strict". A block it cannot draw stays as code, under a line saying why.
+   */
+  let mermaidLoading = null, diagrams = 0;
+  function loadMermaid() {
+    mermaidLoading ??= new Promise((resolve, reject) => {
+      const script = document.createElement("script"); script.src = "/issues/assets/mermaid.js";
+      script.addEventListener("load", () => {
+        const mermaid = document.defaultView.mermaid;
+        if (!mermaid) { reject(new Error("图表组件没能加载")); return; }
+        const dark = document.defaultView.matchMedia?.("(prefers-color-scheme: dark)").matches;
+        mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "default" });
+        resolve(mermaid);
+      });
+      script.addEventListener("error", () => reject(new Error("图表组件没能加载")));
+      document.head.append(script);
+    });
+    return mermaidLoading;
+  }
+  function drawDiagrams(body) {
+    for (const code of body.querySelectorAll("pre > code[data-mermaid]")) {
+      const pre = code.parentElement, source = code.textContent.replace(/\n$/, "");
+      loadMermaid().then(async mermaid => {
+        const { svg } = await mermaid.render("mermaid-diagram-" + (++diagrams), source);
+        // The library's own output, sanitized by it under securityLevel "strict".
+        const diagram = node("div", "mermaid-diagram"); diagram.innerHTML = svg; diagram.title = "点开放大";
+        diagram.addEventListener("click", () => zoomDiagram(diagram));
+        const details = node("details", "mermaid-source"); details.append(node("summary", null, "源码"));
+        pre.replaceWith(diagram, details); details.append(pre);
+      }).catch(error => { pre.before(node("p", "warning mermaid-error", "图没画出来：" + (error?.message || String(error)))); });
+    }
+  }
+  /** A diagram at its own size, over the page, scrolling if larger; Esc or a click outside closes it. */
+  function zoomDiagram(diagram) {
+    let dialog = byId("diagram-zoom");
+    if (!dialog) {
+      dialog = node("dialog", "diagram-zoom"); dialog.id = "diagram-zoom";
+      dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
+      document.body.append(dialog);
+    }
+    const svg = diagram.querySelector("svg").cloneNode(true), box = svg.viewBox?.baseVal;
+    svg.removeAttribute("id"); svg.style.maxWidth = "none";
+    if (box && box.width) { svg.setAttribute("width", String(box.width)); svg.setAttribute("height", String(box.height)); }
+    dialog.replaceChildren(svg);
+    dialog.showModal();
   }
   // An issue's whole ID, or eight hex digits standing alone as a word; only the Router says whether
   // one names an issue (spec 2026-10-21-issue-page-usability.md, section one).

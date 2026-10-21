@@ -12,6 +12,7 @@ const BROWSER = [
   "tests/modules/issues/continue-after-switch-browser.test.ts",
   "tests/modules/issues/progress-tab-browser.test.ts",
   "tests/modules/issues/usability-browser.test.ts",
+  "tests/modules/issues/mermaid-browser.test.ts",
 ];
 
 export default defineConfig({
