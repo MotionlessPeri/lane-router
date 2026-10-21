@@ -110,6 +110,27 @@ test("new opens a terminal whose first prompt creates the lane", async () => {
   expect(environment.LANE_ROUTER_CHILD_WINDOW).toBe("alpha");
 });
 
+// A task lane is opened with its work already in its role (spec 2026-10-21-task-lane.md 4.2: its
+// parent opens it and moves on). On 2026-10-21 design's probe attached, reported ready and stopped,
+// because the "wait for direction" line outweighed the task its own role spelled out.
+test("new starts a task lane on the task its role describes, and a role lane still waits", async () => {
+  const deps = fakes();
+  await launchLane(["new", "alpha/readme", "--role", "任务 lane：为问答 25c76c8a 开，归属 alpha/design，完成条件：README 加三行，完成即归档。"], deps);
+  const [request] = deps.spawnTerminal.mock.calls[0]! as [TerminalChildRequest];
+  if (request.mode !== "prompt") throw new Error("expected a prompt request");
+  expect(request.prompt).not.toContain("You have no assigned task yet");
+  expect(request.prompt).not.toContain("wait for direction");
+  expect(request.prompt).toContain("The task this role describes is your assigned task: start on it now");
+  expect(request.prompt).toContain("lane_finish");
+
+  const role = fakes();
+  await launchLane(["new", "alpha/worker", "--role", "Owns the worker seam; reports to alpha/design."], role);
+  const [roleRequest] = role.spawnTerminal.mock.calls[0]! as [TerminalChildRequest];
+  if (roleRequest.mode !== "prompt") throw new Error("expected a prompt request");
+  expect(roleRequest.prompt).toContain("You have no assigned task yet");
+  expect(roleRequest.prompt).not.toContain("lane_finish");
+});
+
 test("new refuses an address that already exists and an oversized role", async () => {
   const deps = fakes({ queryDirectory: vi.fn(async () => [{ address: "alpha/worker" }]) });
   await expect(launchLane(["new", "alpha/worker", "--role", "r"], deps))
