@@ -367,6 +367,51 @@ design 答应用户的口径：
 - 远端不是 GitHub 不链；
 - 一批只起一个 git 进程。
 
+**派单时的更正（2026-10-21 inbox，以此为准）：git 只在进程层跑。** impl 的原则是问答模块只拿结果、不碰 git，所以核实提交号不在问答服务里跑 `git cat-file`，而是给 `LaneRepoPort` 加一个方法：
+- 签名：`commitsForLane(laneId, refs: string[]) → Promise<{ ref, sha, url }[]>`；
+- 实现放在 `src/process/lane-repo.ts` 的 `LaneRepoLocator` 里：先 `repoForLane` 拿到 `root` 和 `webUrl`，`webUrl` 是 null 就直接返回空；
+- 然后在 `root` 下跑一次 `git cat-file --batch-check`，stdin 每行写 `<ref>^{commit}`；
+- 只收 `commit` 类型的行，`missing` 和 `ambiguous` 都不要；
+- `url` 是 `<webUrl>/commit/<完整 sha>`；
+- 写法照 impl 的 `runGit`：5 秒超时，`windowsHide`。
+
+**resolve 接口：** 加 `commits=<逗号分隔>&issue=<id>`。
+- `commits` 每项是 7 到 40 位十六进制，最多 100 项；带了 `commits` 必须带 `issue`，不合规则返回 400。
+- 返回加一项 `commits: [{ ref, sha, url }]`；没装 `repos` 时返回空。
+
+**页面：**
+- 认 7 到 40 位、独立成词的十六进制，范围和问答 id 一样，代码块里的不认；
+- 8 位的串同时放进 `refs` 和 `commits`，问答 id 优先：既是问答又是提交时，按问答链接处理；
+- 一次渲染只发一次 resolve 请求，和 `refs`、`lanes` 合在一起，结果缓存起来；
+- 链接在新标签页打开，`title` 写完整 sha。
+
+## 第三批验收标准
+
+第 1、2 条是 node 组用例，第 3 条是 happy-dom，第 4 条是全量。
+
+1. **node 组，用真 git：** 临时建一个仓库，提一个提交，再加一个 GitHub 形式的 `origin`。
+   - 提交号的完整形式和 7 位前缀都能链上；
+   - 树、blob 的 id 不链；不存在的不链；有歧义的前缀不链；
+   - 远端不是 GitHub 时什么都不链；没有 `repos` 时也不链；
+   - 一次请求只起一个 git 进程（用注入的 runner 计数）。
+2. **HTTP：**
+   - `commits` 不带 `issue`、格式不对、超过 100 项，都返回 400；
+   - 返回带 `actionToken`；
+   - lane 工具的 schema 不变。
+3. **happy-dom：**
+   - 正文和行内代码里的提交号变成链接，代码块里的不变；
+   - 8 位既是问答又是提交时，按问答链接处理；
+   - 一次渲染一次请求，结果缓存起来，链接在新标签页打开。
+4. 全量和 typecheck 通过。
+
+## 第三批变异检验
+
+- blob 也算提交 → 1 红
+- `webUrl` 为 null 也链 → 1 红
+- 每个 ref 起一个 git 进程 → 1 红
+- 问答 id 不优先 → 3 红
+- 代码块里的也认 → 3 红
+
 ---
 
 ## 九、范围审计
