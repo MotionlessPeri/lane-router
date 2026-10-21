@@ -1,6 +1,6 @@
 # 问答页「进度」标签页：把 Vikunja 的进度看板放进问答页 —— 需求与设计
 
-**状态：** 需求与设计合一稿，2026-10-21 由 `lane-router/design` 起草；用户在问答 `c5c595d9` 定口径（10:47 答四问：一卡一件活按负责 lane 分组、五列不加「等提交」、两步都做、加「负责 lane」字段）。Vikunja LR-32。第一步（Vikunja 看板五列 + `owner_lane` 字段 + 挪卡规矩）由 `vikunja/main` 配置、design 归位卡片，不在本稿；本稿是第二步：问答页的「进度」标签页。实现归 `lane-router/inbox-impl`（inbox 派），Router 侧一处配置读取归 `lane-router/impl`。
+**状态：** 已上线（易用性第二批 `08d3e61`）。**2026-10-21 14:37 用户纠正：要的不是嵌 Vikunja，是按 lane 分组的待办表**——iframe 只是过渡，后续见 `2026-10-21-progress-list.md`（LR-56），本稿 4.1 的配置文件沿用。原稿：需求与设计合一稿，2026-10-21 由 `lane-router/design` 起草；用户在问答 `c5c595d9` 定口径（10:47 答四问：一卡一件活按负责 lane 分组、五列不加「等提交」、两步都做、加「负责 lane」字段）。Vikunja LR-32。第一步（Vikunja 看板五列 + `owner_lane` 字段 + 挪卡规矩）由 `vikunja/main` 配置、design 归位卡片，不在本稿；本稿是第二步：问答页的「进度」标签页。实现归 `lane-router/inbox-impl`（inbox 派），Router 侧一处配置读取归 `lane-router/impl`。
 
 ## 一、问题与结论
 
