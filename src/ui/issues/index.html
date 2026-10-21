@@ -324,6 +324,7 @@
     else { body.classList.add("plain-text"); body.textContent = text; }
     if (markdown) linkLocalPaths(body);
     markIssueRefs(body);
+    markCardRefs(body); upgradeCardRefs(body);
     body.querySelectorAll("pre").forEach(addCopyButton);
     if (markdown && !plain) drawDiagrams(body);
     return body;
@@ -402,6 +403,43 @@
         parts.push(text.data.slice(end, match.index), span); end = match.index + match[0].length;
       }
       if (parts.length) text.replaceWith(...parts, text.data.slice(end));
+    }
+  }
+  // A card on the Vikunja board: LR- and its number, standing alone. Not UTF-8 or SHA-256, nor XLR-3
+  // or LR-39a (spec 2026-10-21-issue-page-usability.md, section five).
+  const CARD_REF = /(?<![\w-])LR-(\d+)(?![\w-])/g, WHOLE_CARD = /^LR-(\d+)$/;
+  /** Marks card numbers where issue references are looked for: running text and inline code alone. */
+  function markCardRefs(body) {
+    const candidate = number => { const span = node("span", "card-ref-candidate"); span.dataset.card = number; return span; };
+    for (const code of body.querySelectorAll("code")) {
+      const match = WHOLE_CARD.exec(code.textContent.trim());
+      if (code.closest("pre, a, .local-path, .issue-ref-candidate") || !match) continue;
+      const span = candidate(match[1]); code.replaceWith(span); span.append(code);
+    }
+    const texts = [];
+    for (let walker = document.createTreeWalker(body, document.defaultView.NodeFilter.SHOW_TEXT), text; (text = walker.nextNode());) {
+      if (!text.parentElement.closest("pre, code, a, .local-path, .issue-ref-candidate, .card-ref-candidate")) texts.push(text);
+    }
+    for (const text of texts) {
+      const parts = []; let end = 0;
+      for (const match of text.data.matchAll(CARD_REF)) {
+        const span = candidate(match[1]); span.textContent = match[0];
+        parts.push(text.data.slice(end, match.index), span); end = match.index + match[0].length;
+      }
+      if (parts.length) text.replaceWith(...parts, text.data.slice(end));
+    }
+  }
+  /**
+   * Card numbers become links into the Vikunja the progress board names, by the card's own number;
+   * until a board is known they stay text, and the read that finds one comes back for them.
+   */
+  function upgradeCardRefs(root) {
+    if (!board) return;
+    const origin = new URL(board).origin;
+    for (const span of root.querySelectorAll(".card-ref-candidate")) {
+      const link = node("a", "card-ref"); link.setAttribute("href", origin + "/projects/LR/tasks/by-index/" + span.dataset.card);
+      link.target = "_blank"; link.rel = "noopener noreferrer"; link.title = "在 Vikunja 里打开 LR-" + span.dataset.card;
+      link.append(...span.childNodes); span.replaceWith(link);
     }
   }
   /**
@@ -1587,18 +1625,34 @@
 
   /**
    * 进度 shows the Vikunja board where an issue would be (spec 2026-10-21-progress-tab.md). Its address
-   * comes from the Router on the first visit, and on every visit after until there is one; the iframe,
-   * once built, is only ever hidden, so the board keeps its scroll and filters. The read is a fetch of
-   * its own: request() would take that answer's actionToken, or its lack of one, for the page's writes.
+   * is read from the Router as the page starts, serving LR-n links too (spec
+   * 2026-10-21-issue-page-usability.md, section five), and again on each visit to 进度 until there is
+   * one; the iframe, once built, is only ever hidden, so the board keeps its scroll and filters. The
+   * read is a fetch of its own: request() would take that answer's actionToken, or its lack of one,
+   * for the page's writes.
    */
-  let board = null, boardReading = false;
+  let board = null, boardRead = null;
+  function readBoard() {
+    boardRead ??= (async () => {
+      try {
+        const response = await fetch("/dashboard/state", { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error((data.error || "请求失败") + "（" + response.status + "）");
+        const url = data.progressBoard?.url;
+        if (typeof url === "string" && localBoard(url)) { board = url; upgradeCardRefs(document); }
+        return {};
+      } catch (error) { return { error }; }
+      finally { boardRead = null; }
+    })();
+    return boardRead;
+  }
   function showView(name) {
     shownView = name;
     byId("tab-issues").setAttribute("aria-selected", String(name === "issues"));
     byId("tab-progress").setAttribute("aria-selected", String(name === "progress"));
     byId("progress-view").hidden = name !== "progress";
     renderNew();
-    if (name === "progress" && !board) void loadBoard();
+    if (name === "progress") void loadBoard();
     // A narrow window puts the content under the list, out of sight of the tab just pressed.
     if (name === "progress" && document.defaultView.matchMedia?.("(max-width: 680px)").matches) byId("progress-view").scrollIntoView?.({ block: "start" });
   }
@@ -1606,27 +1660,19 @@
   function localBoard(url) {
     try { const parsed = new URL(url); return parsed.protocol === "http:" && ["localhost", "127.0.0.1"].includes(parsed.hostname); } catch { return false; }
   }
+  /** The board in 进度: built once its address is known, read again while it is not. */
   async function loadBoard() {
-    if (boardReading) return;
-    boardReading = true;
     const text = byId("progress-text"), open = byId("progress-open");
-    text.textContent = "正在读取进度板的配置…"; open.hidden = true;
-    try {
-      const response = await fetch("/dashboard/state", { cache: "no-store" });
-      const data = await response.json();
-      if (!response.ok) throw new Error((data.error || "请求失败") + "（" + response.status + "）");
-      const url = data.progressBoard?.url;
-      if (typeof url !== "string" || !localBoard(url)) {
-        text.textContent = "进度板还没配置：在 ~/.lane-router/progress-board.json 写 { \"url\": \"<Vikunja 看板地址>\" }，写好后再点一次「进度」。";
-        return;
-      }
-      board = url;
-      const frame = node("iframe"); frame.src = url; frame.title = "进度看板（Vikunja）";
-      byId("progress-view").append(frame);
-      text.textContent = "这是 Vikunja 看板，拖动卡片、点开卡片都在里面做；"; open.setAttribute("href", url); open.hidden = false;
-    } catch (error) {
-      text.textContent = "读不到进度板的配置：" + error.message + "。再点一次「进度」会重读。";
-    } finally { boardReading = false; }
+    const result = board ? {} : (text.textContent = "正在读取进度板的配置…", open.hidden = true, await readBoard());
+    if (!board) {
+      text.textContent = result.error ? "读不到进度板的配置：" + result.error.message + "。再点一次「进度」会重读。"
+        : "进度板还没配置：在 ~/.lane-router/progress-board.json 写 { \"url\": \"<Vikunja 看板地址>\" }，写好后再点一次「进度」。";
+      return;
+    }
+    if (byId("progress-view").querySelector("iframe")) return;
+    const frame = node("iframe"); frame.src = board; frame.title = "进度看板（Vikunja）";
+    byId("progress-view").append(frame);
+    text.textContent = "这是 Vikunja 看板，拖动卡片、点开卡片都在里面做；"; open.setAttribute("href", board); open.hidden = false;
   }
 
   function showFilter(name) {
@@ -1670,6 +1716,7 @@
   document.defaultView.addEventListener("beforeunload", event => { if (fresh.operation || [...views.values()].some(view => view.operation)) event.preventDefault(); });
   document.defaultView.addEventListener("popstate", () => { void openFromAddress(false); });
   void loadList();
+  void readBoard();
   void openFromAddress(true);
   setInterval(() => { if (document.visibilityState !== "hidden") refresh(); }, 5000);
 })();

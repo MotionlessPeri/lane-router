@@ -57,10 +57,13 @@ async function open(states: Answer[]) {
   return { x, issue, query, shown, toProgress, settle, stateReads, posts, errors, token: () => token };
 }
 
-test("2: the page reads the board's address only on the first visit to 进度, shows it in an iframe, and keeps that iframe when hidden", async () => {
+// The page reads the board's address once as it starts, for 进度 and for LR-n links alike (spec
+// 2026-10-21-issue-page-usability.md, section five), where it once read it on the first visit to 进度.
+test("2: the board's address read as the page starts serves 进度 with no further read; its iframe is kept when hidden", async () => {
   const p = await open([{ status: 200, body: { progressBoard: { url: BOARD }, actionToken: "dashboard" } }]);
   expect(p.shown()).toEqual({ issues: "true", progress: "false", progressView: false, detail: true, compose: false });
-  expect(p.stateReads).toEqual([]);
+  await vi.waitFor(() => expect(p.stateReads).toHaveLength(1));
+  expect(p.query("#progress-view iframe")).toBeNull();
   await p.toProgress(1);
   expect(p.shown()).toEqual({ issues: "false", progress: "true", progressView: true, detail: false, compose: false });
   const frame = p.query("#progress-view iframe");
@@ -81,35 +84,38 @@ test("2: the page reads the board's address only on the first visit to 进度, s
 test("2: with no board configured there is no iframe but a note, and each visit to 进度 reads again until there is one", async () => {
   const p = await open([
     { status: 200, body: { progressBoard: null } },
+    { status: 200, body: { progressBoard: null } },
     { status: 500, body: { error: "router busy" } },
     { status: 200, body: { progressBoard: { url: BOARD } } },
   ]);
-  await p.toProgress(1);
+  await vi.waitFor(() => expect(p.stateReads).toHaveLength(1));
+  await p.toProgress(2);
   expect(p.query("#progress-view iframe")).toBeNull();
   expect(p.query("#progress-note").textContent).toContain("~/.lane-router/progress-board.json");
   expect(p.query("#progress-open").hidden).toBe(true);
   p.query("#tab-issues").click();
-  await p.toProgress(2);
+  await p.toProgress(3);
   expect(p.query("#progress-view iframe")).toBeNull();
   expect(p.query("#progress-note").textContent).toContain("router busy");
   p.query("#tab-issues").click();
-  await p.toProgress(3);
+  await p.toProgress(4);
   expect(p.query("#progress-view iframe").getAttribute("src")).toBe(BOARD);
   expect(p.query("#progress-open").hidden).toBe(false);
   p.query("#tab-issues").click(); p.query("#tab-progress").click(); await p.settle();
-  expect(p.stateReads).toHaveLength(3);
+  expect(p.stateReads).toHaveLength(4);
   expect(p.errors).toEqual([]);
 });
 
 test("2: reading the board's address leaves the page's own token alone, so a later write still goes through", async () => {
-  const p = await open([{ status: 200, body: { progressBoard: { url: BOARD } } }]);
+  // No board as the page starts, so the visit to 进度 reads again, after every read of the issues.
+  const p = await open([{ status: 200, body: { progressBoard: null } }, { status: 200, body: { progressBoard: { url: BOARD } } }]);
   await vi.waitFor(() => expect(p.token()).toEqual(expect.any(String)));
   // The issue is open before the visit, so coming back by the tab reads nothing that would hand the
   // page a token again: the reply goes with whatever the page holds after 进度.
   p.query(`[data-issue-id="${p.issue.issueId}"]`).click();
   await vi.waitFor(() => expect(p.query("#issue-detail").getAttribute("data-issue-id")).toBe(p.issue.issueId));
   await vi.waitFor(() => expect(p.query("#reply-body")).not.toBeNull());
-  await p.toProgress(1);
+  await p.toProgress(2);
   p.query("#tab-issues").click();
   const reply = p.query("#reply-body"); reply.value = "看过进度了"; reply.dispatchEvent(new (reply.ownerDocument.defaultView.Event)("input", { bubbles: true }));
   p.query("#send-reply").click();
