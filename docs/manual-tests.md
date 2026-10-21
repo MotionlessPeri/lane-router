@@ -1724,7 +1724,27 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 6. 再开一条任务 lane，故意不让它 finish，由父 lane 跑 `lane-router-lane close <项目>/<名字>`：窗口关掉、lane 归档。对一条常驻 lane 跑同样的命令，应报 `LANE_NOT_A_TASK_LANE`，什么都不动。
 
 **预期：** 六步都成立。第 4 步若标签停在提示符上，先看该窗口是不是部署前开的；是新窗口仍不关，查 `close-requests` 下的标记有没有被 terminal-child 消费。
-**最后验证：** 尚未执行（等部署）。
+**最后验证：** 2026-10-21，design 用两条探针跑，六步全过。Router pid 98936，master 先 `ec582cf`、后 `8d651bb`。
+1. 12:54 `lane-router-lane new lane-router/readme-index --role "任务 lane：为问答 25c76c8a 开，归属 lane-router/design，…"`。
+   - 启动器等了 30 秒，到点报「The terminal child did not start」，但状态文件 12:54:37 就写了 `ok`，窗口也在。这个问题记在 Vikunja LR-52。
+   - 窗口停在开发通道框上等用户点，14:00:16 挂上。
+2. 它挂上后报了「就绪、等指示」就停了，是 design 14:01:32 补了一封开工信才开始干（见下面「发现」A）。之后：
+   - 14:02:05 提交并推送 `8d651bb`；
+   - 14:02:28 开了问答 `02dbeea2`，14:02:34 自己关掉；
+   - 14:02:36 ack 了信；
+   - 14:02:41 调 `lane_finish`，之后没再调工具。
+3. 14:02:49 Router 收到它的 `Stop`。14:02:51 归档，记录是 `finishedAt=14:02:41`、`archivedAt=14:02:51`。claude.exe 53244 在 14:02:56 前退出，窗口自己关了，`close-requests/` 是空的（标记已消费），没有残留的窗口或进程。
+4. `lane-router-lane list-archived lane-router` 列出 `lane-router/readme-index  archived 2026-10-21T06:02:51.103Z`。
+5. 14:03 给它 `lane_send`，拒收：「Lane lane-router/readme-index is a finished task lane and takes no more mail. 该任务 lane 已完成。」少了「追问请到…」那半句（见「发现」B）。
+6. 父 lane 兜底：
+   - 14:04:55 开 `lane-router/close-probe`，14:06:25 挂上，14:06:55 停下；
+   - 14:07:08 `lane-router-lane close lane-router/close-probe` 返回 `{"action":"closing"}`，14:07:39 进程没了，lane 已归档（`finishedAt=14:07:08`、`archivedAt=14:07:39`）；
+   - 14:05 对常驻 lane 跑 `lane-router-lane close lane-router/impl`，退出码 1，报「not a task lane」，impl 照常在线。
+
+**发现，已在后续提交里修：**
+- **A. 任务 lane 挂上后不开工。** 新建 lane 的提示末尾是「没有分到任务，等指示」，这句压过了角色里写明的任务。现在角色首句是「任务 lane：」时，提示改成「角色说明里的任务就是你的任务，现在就开始，按角色说明收尾，最后调 `lane_finish`」。常驻 lane 的提示不变。
+- **B. 首句解析只认反引号。** 两条探针的角色是手写的，没加反引号，结果归档记录里 `parentIssueId` 和 `parentLane` 都是 null，拒收信息也少了去向。现在不带反引号也能读出来：问答 id 认 8 位十六进制或完整 UUID，父 lane 按 Router 自己的地址规则校验。带反引号的写法照旧。是不是任务 lane 仍只看确切的首句「任务 lane：」。
+- 自动测试：`tests/router/task-lane-origin.test.ts` 5 条，`tests/process/lane-launcher.test.ts` 加 1 条，7 项变异全杀。
 
 ## 产品工具的参数 schema：union 工具发平表根
 
@@ -1938,6 +1958,16 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 9. **虚拟机桥在这次之前就已经不在了**（`start-vm-bridge.ps1` 的窗口没了，只剩 10-12 起的静态文件服务还在），不是这次重启造成的；已重新在独立窗口里拉起。
 
 **没有做、留给现场验收的：** 议题收件箱、图资源、账号切换三项的真实 lane / 浏览器验收仍按上面各节「尚未执行」。看板顶部的「账号切换」链接指向 `http://127.0.0.1:47839/`，本机没有部署 `lane-router-accounts` 后台，点了打不开；账号切换需要 Company 侧一起接入，不在这次上线范围。
+
+### TC-RESTART-SCRIPT：要停的 App Server 已经跟着父进程退了，重启脚本不再半路中止
+
+**依据：** Vikunja LR-29。2026-10-21 03:17 部署 `1fae7e9` 时，`restart-router.ps1` 停掉 Codex 宿主后中止了。原因是宿主的 App Server 子进程在「检查还在不在」和 `Stop-Process` 之间已经跟着父进程退了，而脚本跑在 `Stop` 错误模式下。结果 Router 停着、新的没起来，直到某条 lane 的 `ensureRouter` 把它拉起。
+
+**行为：**
+- App Server 子进程只在同一个 pid 上还是同名、同启动时间的进程时才停，pid 被复用就不碰；已经退了的算停好了。Router 和宿主本身也一样，已经退了的不报错。
+- 从停 Router 到新 Router 应答之间要是还出错，脚本会说「Lane Router is not running: the restart stopped partway. Run this script again to start it.」。
+
+**最后验证：** 2026-10-21 12:46–12:50 design 部署 master `33e5ff3`（`restart-router.ps1 -CodexHost`），脚本一路走完：新 Router pid 97656、端口 60690，Codex 宿主 47716 与核心同构建。这次没有遇到子进程先退的情形，所以只核了「受控重启能走完」，竞态那条路径由当初的 6 个场景演练覆盖。同一次部署里，账号后台的监督者第一次拉起子进程报了一次 `STORAGE_UNAVAILABLE`，第二次成功，和本脚本无关，记在 Vikunja LR-51。
 
 ## 当前记录
 
