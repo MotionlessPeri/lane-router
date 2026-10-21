@@ -324,7 +324,7 @@ design 答应用户的口径：
 
 - 用户写的正文也画图 → 2 红
 - 每张图都插一次脚本 → 2 红
-- `securityLevel` 改成 `loose` → 3 红
+- `securityLevel` 改成 `loose` → 2 红（实现时改：mermaid 12.1 不论哪个级别都先用 DOMPurify 清洗标签文字，页面也从不调 `bindFunctions`，所以第 3 条在 `loose` 下照样通过；级别由第 2 条核对 `initialize` 的参数来守）
 - 认 `[A-Z]+-\d+` → 4 红
 - 自己把 `LR` 换成 12 去拼链接 → 4 红
 - 列表忽略 `lane` 参数 → 5 红
