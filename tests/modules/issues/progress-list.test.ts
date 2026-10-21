@@ -161,7 +161,10 @@ test("2: a card's title opens the issue it came from on the 问答 tab, and back
   expect(p.query('#progress-list li[data-card="51"] a.todo-title').title).toBe("打开来源问答");
 
   const before = p.window.history.length;
-  title.click();
+  // The page opens it itself: the link's own navigation, a whole new page, is held back.
+  const click = new p.window.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+  title.dispatchEvent(click);
+  expect(click.defaultPrevented).toBe(true);
   await vi.waitFor(() => expect(p.query("#issue-detail").getAttribute("data-issue-id")).toBe(p.issue.issueId));
   expect(p.query("#tab-issues").getAttribute("aria-selected")).toBe("true");
   expect(p.query("#progress-view").hidden).toBe(true);

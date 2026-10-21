@@ -87,8 +87,11 @@ test.skipIf(!browser)("10: 进度 shows the todo list; a card opens a new window
   expect(tops.title).toBe(tops.card);
   expect(tops.lines).toBeGreaterThan(1);
 
+  // A mark on this window survives only if the click did not load the page anew.
+  await page.evaluate(() => { (window as unknown as { stayed?: boolean }).stayed = true; });
   await page.click('#progress-list li[data-card="57"] a.todo-title');
   await page.waitForSelector(`#issue-detail[data-issue-id="${issueId}"]`);
+  expect(await page.evaluate(() => (window as unknown as { stayed?: boolean }).stayed)).toBe(true);
   expect(await page.getAttribute("#tab-issues", "aria-selected")).toBe("true");
   await page.goBack();
   await page.waitForFunction(() => document.getElementById("tab-progress")!.getAttribute("aria-selected") === "true");

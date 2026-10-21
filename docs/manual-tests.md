@@ -597,6 +597,7 @@ lane-router-lane kb record --json-file record.json
 - `tests/modules/issues/progress-list.test.ts` 第 2 条改写了：「去问答」按钮换成了点标题，并加上悬停文字（认得的问答写标题，认不得写「打开来源问答」）、没有来源问答的标题不可点；第 9 条加了一句「能点的标题也按文字写入」。
 - `tests/modules/issues/progress-tab.test.ts`：只针对 iframe 的三条改写了（看板链接代替 iframe），「去问答」那条去掉了 iframe 的断言；`progress-tab-browser.test.ts` 删掉，由上面那条浏览器用例代替。
 - 页面补充稿第五节的十一个变异都让 happy-dom 用例变红；「出错时丢掉快照」两条路（看板出错、整个请求失败）各试了一次。「未配置时也渲染表」：没配置时 `boards` 本来就是空的，表画不出东西，所以试的是把配置说明换成「数据来自 Vikunja」那行。另外「卡号不开新窗口」「后退不回进度」两个变异也让浏览器组那条变红。
+- 点标题时页面自己切过去，不让链接整页刷新：happy-dom 第 2 条断言点击事件 `defaultPrevented`；浏览器组点之前在 `window` 上放一个标记，点完它还在。这是 inbox 验收 LR-59 时补变异发现的缺口：去掉 `preventDefault`，原来的两条照样通过。现在这个变异让两条都变红。
 - 标题可点和长标题这一批：「标题不可点」让 happy-dom 第 2、9 条和浏览器组那条变红；「点标题不进历史」「悬停不写问答标题」「能点的标题按 HTML 写入」各让一条 happy-dom 用例变红；「去掉 `.todo-title` 的 `flex: 1 1 16em`」让浏览器组那条变红。
 
 #### TC-ISSUES-TODO-1：在真实问答页上看待办表（第 1 步 inbox 在线核对过；标题可点和长标题折行等这一批上线；第 2–4 步留给用户）
@@ -703,7 +704,7 @@ master `33e5ff3` 部署后，Router 在 `http://127.0.0.1:60690`。接口用 Pow
 
 #### TC-ISSUES-TASK-1：真 lane 给问答配卡（尚未执行）
 
-**前提：** 含此改动的版本已部署：build、备份问答库后 `restart-router.ps1 -CodexHost`，问答库升到 v5、留下 `.v4.bak`。Claude lane 要开新会话或恢复，才看得到新参数。
+**前提：** 含此改动的版本已部署：build、备份问答库后 `restart-router.ps1 -CodexHost`，问答库升到 v5、留下 `.v4.bak`。Claude lane 要关窗口重开（`lane-router-lane open`），才看得到新参数。
 
 1. 让一条 lane 用 `lane_issue_publish` 发一条问答，带上它这件活的卡号。
 2. 打开问答页，看左栏这一条和它的详情。

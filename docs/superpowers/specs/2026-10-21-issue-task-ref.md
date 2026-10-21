@@ -104,5 +104,5 @@
 - 上线：
   - 部署前备份问答库，升级时会自动留 `.v4.bak`；
   - 工具参数变了，要 build 并 `restart-router.ps1 -CodexHost`；
-  - Claude lane 要开新会话、恢复或 `/mcp` 重连，才看得到新参数。
+  - Claude lane 要关窗口重开（`lane-router-lane open`），才看得到新参数。
 - 上线以后，design 改规范：开卡时填 `source_issue`，开问答时带 `task`。
