@@ -73,19 +73,32 @@ test("builds the child command for each mode and backend", () => {
   });
   expect(childCommand(promptRequest, { CLAUDE_EXE: "C:/claude.exe" }, here)).toEqual({
     executable: "C:/claude.exe",
-    args: ["--dangerously-load-development-channels", "server:lane", "--", "hello"],
+    args: ["--channels", "plugin:lane@lane-local", "--", "hello"],
   });
   // Resume reopens the very conversation the binding names, with the channel flag the lane
   // needs to stay wakeable; there is deliberately no prompt to start an artificial turn.
   expect(childCommand(resumeRequest, {}, here)).toEqual({
     executable: "claude",
-    args: ["--resume", "4b50f153-0932-4442-840b-98a4b7593a51", "--dangerously-load-development-channels", "server:lane"],
+    args: ["--resume", "4b50f153-0932-4442-840b-98a4b7593a51", "--channels", "plugin:lane@lane-local"],
   });
   // The codex side resumes through its launcher, which owns Router discovery and TUI wiring.
   expect(childCommand({ mode: "resume", backend: "codex", cwd: "D:\\p", conversationId: "thread-1", statusPath: "D:\\s.txt" }, {}, here)).toEqual({
     executable: process.execPath,
     args: [join(here, "codex-launcher.js"), "resume", "thread-1"],
   });
+});
+
+// LR-24 (spec 2026-10-21-channel-plugin-migration.md, 4.3): the development flag makes Claude Code
+// ask for a click on every launch, which kept every automatic open, wake and rotation waiting on the
+// user. The plugin channel on the managed allow-list asks nothing.
+test("a Claude lane opens on the lane plugin's channel and never on the development flag", () => {
+  const here = join("C:", "dist", "process");
+  for (const request of [promptRequest, resumeRequest, { ...promptRequest, model: "sonnet" }]) {
+    const args = childCommand(request, { LANE_ROUTER_CHILD_TITLE: "alpha/worker" }, here).args;
+    expect(args.join(" ")).toContain("--channels plugin:lane@lane-local");
+    expect(args).not.toContain("--dangerously-load-development-channels");
+    expect(args).not.toContain("server:lane");
+  }
 });
 
 test("passes a declared model to Claude, and changes nothing at all without one", () => {
@@ -95,14 +108,14 @@ test("passes a declared model to Claude, and changes nothing at all without one"
   // project shipped before models existed - byte for byte, not merely "close enough". Without
   // this, an implementation that always appends `--model undefined` passes everything else.
   expect(childCommand(promptRequest, { CLAUDE_EXE: "C:/claude.exe" }, here).args)
-    .toEqual(["--dangerously-load-development-channels", "server:lane", "--", "hello"]);
+    .toEqual(["--channels", "plugin:lane@lane-local", "--", "hello"]);
   expect(childCommand(resumeRequest, {}, here).args)
-    .toEqual(["--resume", "4b50f153-0932-4442-840b-98a4b7593a51", "--dangerously-load-development-channels", "server:lane"]);
+    .toEqual(["--resume", "4b50f153-0932-4442-840b-98a4b7593a51", "--channels", "plugin:lane@lane-local"]);
 
   expect(childCommand({ ...promptRequest, model: "claude-opus-5" }, { CLAUDE_EXE: "C:/claude.exe" }, here).args)
-    .toEqual(["--model", "claude-opus-5", "--dangerously-load-development-channels", "server:lane", "--", "hello"]);
+    .toEqual(["--model", "claude-opus-5", "--channels", "plugin:lane@lane-local", "--", "hello"]);
   expect(childCommand({ ...resumeRequest, model: "sonnet" }, {}, here).args)
-    .toEqual(["--model", "sonnet", "--resume", "4b50f153-0932-4442-840b-98a4b7593a51", "--dangerously-load-development-channels", "server:lane"]);
+    .toEqual(["--model", "sonnet", "--resume", "4b50f153-0932-4442-840b-98a4b7593a51", "--channels", "plugin:lane@lane-local"]);
 
   // Codex receives its own model names through the shared declaration. The intermediate launcher
   // owns the stock CLI syntax, so the terminal child passes the declaration to that launcher.
@@ -129,11 +142,11 @@ test("names the Claude session after the lane so every window and picker entry s
   // for new conversations and reopened ones alike (--name on --resume renames the session).
   expect(childCommand(promptRequest, { ...titled, CLAUDE_EXE: "C:/claude.exe" }, here)).toEqual({
     executable: "C:/claude.exe",
-    args: ["--name", "alpha/worker gen3", "--dangerously-load-development-channels", "server:lane", "--", "hello"],
+    args: ["--name", "alpha/worker gen3", "--channels", "plugin:lane@lane-local", "--", "hello"],
   });
   expect(childCommand(resumeRequest, titled, here)).toEqual({
     executable: "claude",
-    args: ["--name", "alpha/worker gen3", "--resume", "4b50f153-0932-4442-840b-98a4b7593a51", "--dangerously-load-development-channels", "server:lane"],
+    args: ["--name", "alpha/worker gen3", "--resume", "4b50f153-0932-4442-840b-98a4b7593a51", "--channels", "plugin:lane@lane-local"],
   });
   // codex has no display-name flag; its branches must stay untouched by the title.
   expect(childCommand({ ...promptRequest, backend: "codex" }, titled, here)).toEqual({

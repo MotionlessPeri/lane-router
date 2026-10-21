@@ -2,7 +2,7 @@
   "mcpServers": {
     "lane": {
       "command": "node",
-      "args": ["E:/xd_projects/lane-router/dist/mcp/lane-mcp-server.js"]
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server.mjs"]
     }
   }
 }

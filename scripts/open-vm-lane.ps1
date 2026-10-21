@@ -128,6 +128,10 @@ $slug = $Lane -replace "[^A-Za-z0-9_-]", "-"
 # command argument it is truncated past a few KB and the remote shell then chokes on the broken
 # quoting. /tmp always exists, and an absolute path works whether or not switchUser is set.
 $vmPrompt = "/tmp/lane-router-prompt-$slug.txt"
+# Still the development flag, unlike the Windows launcher, which moved to the lane plugin's channel
+# (LR-24): the VM's own Claude Code has no lane plugin installed, no Linux managed allow-list
+# (/etc/claude-code/managed-settings.json), and maybe no build for the plugin's server.mjs to start.
+# Moving the VM over is a separate card (LR-58).
 $claude = "claude --dangerously-load-development-channels server:lane"
 if ($Model) { $claude += " --model '$Model'" }
 

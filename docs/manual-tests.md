@@ -1603,7 +1603,7 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 1. 在目标项目目录运行 `lane-router-lane new smoke/probe --role "Scratch lane for verifying lane-router-lane."`。
 2. 观察新窗口出现（默认 Windows Terminal）；命令应等 terminal child 报告 CLI 启动后才退出 0。
-3. 新窗口会弹 development channel 确认（「WARNING: Loading development channels」），需人工点「I am using this for local development」。2026-10-20 在 Claude Code 2.1.304 的代码里查实：只要通道可用，每次启动都弹，接受不会被记住。
+3. 新窗口**不再**弹 development channel 确认：自 LR-24 起 lane 用 `--channels plugin:lane@lane-local` 启动，插件在托管白名单里（见 TC-CHANNEL-PLUGIN）。从没开过的目录仍会弹一次目录信任框。改之前用的是开发标志，2026-10-20 在 Claude Code 2.1.304 的代码里查实：开发标志每次启动都弹，接受不会被记住。虚拟机上的 lane（`scripts/open-vm-lane.ps1`）仍用开发标志，仍会弹（LR-58）。
 4. attach 完成后 `lane_directory` 应显示 `smoke/probe` gen1；该 turn 的 `Stop` 之后 `/lanes/resume-info` 的 `cwd` 应等于第 1 步的目录。
 
 **预期：** 窗口可见且 CLI 真启动；新对话按 bootstrap 接入并报告就绪、不自行推进工作；cwd 已被记录。
@@ -1648,6 +1648,44 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 **预期：** 离线 lane 打开、在线 lane 跳过、逐 lane 失败互不影响；脚本退出码只取决于 failed 是否为空。测试前后生产 Router PID 与 lane/binding/message 数量不变。
 
 **最后验证：** 2026-08-27 用真实离线 Codex thread 和隔离 Router 验证离线分支：`resume-info` 为 `reach=unconfirmed`、`restorePresence=offline`，批量脚本报告 `1 opened, 0 skipped, 0 failed`；开出的真实 Codex 进程使用隔离 endpoint，ownership 建立后同一接口变为 `restorePresence=online`。所有 child 都保留同一 `LANE_ROUTER_DATA_ROOT`。在线跳过、backend unavailable 与逐 lane 失败隔离仍由自动测试覆盖；本次真机 fixture 没有额外构造这三种分支。
+
+### TC-CHANNEL-PLUGIN：Claude lane 的通道改由插件提供，开窗不再弹「开发通道」确认
+
+**依据：** 设计稿 `docs/superpowers/specs/2026-10-21-channel-plugin-migration.md`（Vikunja LR-24）。用户在问答 9ee7440d 说「这个每个开发通道要点一下感觉很吃力啊？能不能有什么办法不点这个啊？」，在 3ade2628 回「没问题，出稿并推进吧」。
+
+**改了什么：**
+- `tools/channel-plugin/plugins/lane/.mcp.json` 不再写死路径，改成 `node ${CLAUDE_PLUGIN_ROOT}/server.mjs`。
+- 新增 `server.mjs`：从自己所在的位置找到 `dist/mcp/lane-mcp-server.js`，并调用 `runLaneMcpStdio()`。只 import 不调用是不行的：那个模块只在自己是 node 直接运行的脚本时才启动，被别的文件 import 时什么都不做，服务器也就起不来。稿子原来写的是只 import 的一行，冒烟用例实测会「没应答就退出 0」。
+- `terminal-child.ts`：`new` 和 `--resume` 两条命令行都从 `--dangerously-load-development-channels server:lane` 换成 `--channels plugin:lane@lane-local`。
+- `scripts/open-vm-lane.ps1` 不动，仍用开发标志：虚拟机那份 Claude Code 没装插件，也没有 Linux 托管白名单（LR-58）。
+- 新增 `scripts/install-channel-plugin.ps1`，每台机器跑一次，可以重复跑。顺序固定：
+  1. `claude plugin validate`；
+  2. 加 `lane-local` 市场，装 `lane@lane-local`（user scope）；
+  3. 核对托管白名单。这一步只读不写：缺了就打印整份该写的 JSON，退出码 2，后面的步骤不做；
+  4. 撤掉用户级 `lane` 注册。
+
+  白名单没生效之前不撤，否则新 lane 就一条通道都没有了。
+
+**自动测试：**
+- `tests/process/terminal-spawn.test.ts`：新参数，并断言不再有开发标志。
+- `tests/process/channel-plugin.test.ts`：市场、插件、通道的名字；`.mcp.json` 不含机器路径；`server.mjs` 的 import 解析到仓库的 `dist`。另有一条冒烟用例：用 stdio 起 `server.mjs`，发 `initialize`，回的是 `lane-router`，并带 `claude/channel` 能力。这条要先构建，没有 `dist` 时跳过。
+- `tests/process/install-channel-plugin.test.ts`：用一个替身 `claude` 跑真的脚本，5 种情形：新机器按顺序装、已装好的全部跳过、没有白名单、托管文件还不存在、`lane-local` 指向别处。
+- `claude plugin validate tools/channel-plugin` 通过。
+
+**上线顺序（每台机器）：**
+1. 合并 master，build，重启核心。从这一刻起新开的 Claude lane 用插件通道，所以**合并、部署和第 2 步要一口气做完**，中间不要开新 lane。
+2. 跑 `scripts/install-channel-plugin.ps1`。
+3. 开着的旧会话逐条关掉再 `lane-router-lane open`。旧会话不重开也能继续用。
+
+**步骤：**（部署和安装后做）
+1. 跑完安装脚本后再跑一遍：每一步都显示已存在、跳过，退出 0；`claude mcp get lane` 报不存在。
+2. `lane-router-lane new lane-router/<probe>`：在已信任的目录里不弹任何框；MCP 日志 `mcp-logs-plugin-lane-lane` 里有 `Channel notifications registered`，`mcp-logs-lane` 下没有新文件；attach 成功；给它发信，没人打字也会起回合，信的标签是 `source="plugin:lane:lane"`。
+3. 关掉一条旧会话的 lane，再 `lane-router-lane open`：命令行是新参数，不弹框，重连后处理积压的信。
+4. `lane-router-rotate` 换代一次：成功，不弹框。
+5. Router 日志里，这三条会话各只有一条 `join.channel_connected`，没有 `duplicate_refused`，也没有重连循环。
+6. 核对插件确实是在仓库原地加载的：`${CLAUDE_PLUGIN_ROOT}` 指向仓库里的插件目录，而不是 `~/.claude/plugins/cache` 下的副本。`plugin list` 显示的 `installPath` 是缓存目录、`readFromFolder` 是仓库，要是实际用的是缓存，`server.mjs` 的相对 import 就会找不到 `dist`。第 2 步的 lane 能起来，就说明是原地加载。
+
+**最后验证：** 尚未执行（等合并和安装）。
 
 ### TC-LANE-AUTONOMY：开新、唤醒、轮换不再先问用户；只有接替和改角色说明要确认
 

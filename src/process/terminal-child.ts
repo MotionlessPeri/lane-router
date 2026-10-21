@@ -54,9 +54,13 @@ export function childCommand(
   // behaviour it has today rather than on a default this code would be choosing for it.
   const model = request.model ? ["--model", request.model] : [];
   const claude = environment.CLAUDE_EXE ?? "claude";
+  // The lane's channel comes from the lane plugin (tools/channel-plugin), which the managed
+  // allow-list lets in without a dialog; the development flag asked for a click on every launch
+  // (spec docs/superpowers/specs/2026-10-21-channel-plugin-migration.md, LR-24).
+  const channel = ["--channels", "plugin:lane@lane-local"];
   return request.mode === "prompt"
-    ? { executable: claude, args: [...name, ...model, "--dangerously-load-development-channels", "server:lane", "--", request.prompt] }
-    : { executable: claude, args: [...name, ...model, "--resume", request.conversationId, "--dangerously-load-development-channels", "server:lane"] };
+    ? { executable: claude, args: [...name, ...model, ...channel, "--", request.prompt] }
+    : { executable: claude, args: [...name, ...model, "--resume", request.conversationId, ...channel] };
 }
 
 export interface TerminalChildDependencies {
