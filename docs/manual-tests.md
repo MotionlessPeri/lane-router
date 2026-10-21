@@ -792,6 +792,46 @@ master `33e5ff3` 部署后，Router 在 `http://127.0.0.1:60690`。接口用 Pow
 - 第 2 步：新标签页打开 Vikunja 里的那张卡。
 - 第 3 步：左栏出现「只看 <地址> ✕」，只剩这个 lane 的问答，项目下拉框跟着变；点 ✕ 后恢复。
 
+### 问答页易用性（第三批）：提交号链到 GitHub
+
+需求与设计见 `docs/superpowers/specs/2026-10-21-issue-page-usability.md` 第七节，以及其后的第三批验收与变异。哪个仓库、哪个远端由 impl 的 `repoForLane` 找（`src/process/lane-repo.ts`）。按 inbox 派单时的口径，git 只在进程层跑：问答模块只拿结果。
+
+- **哪些算候选：** 正文和行内代码里独立成词的 7 到 40 位十六进制，范围和问答 id 一样，代码块和链接里的不认。我另外加了一条：紧挨着 `/` 的不认，免得把路径或网址里的一段（如 `docs/abc1234`、`…/commit/<sha>`）拆开。
+- **8 位的串：** 同时当问答 id 和提交号去问。问答 id 优先：既是问答又是提交的，按问答链接处理；不是问答、是提交的，链到提交。
+- **怎么问：** 只问当前打开那条问答的，`commits` 和 `issue=<它的 id>` 跟 `refs`、`lanes` 合在一次 resolve 请求里。结果按「问答 id + 提交号」缓存，因为不同 lane 的仓库不同；换到别的问答再回来，不再重问。
+- **Router 侧：**
+  - `LaneRepoLocator.commitsForLane`：没有 GitHub 远端就不跑 git；有的话在仓库根目录跑一次 `git cat-file --batch-check`，每行输入 `<id>^{commit}`，只收 `commit` 行；
+  - 树、blob、不存在的 id、有歧义的前缀，git 一律回 `missing`（实测：带 `^{commit}` 时歧义也报 `missing`，原因走 stderr）；
+  - 链接是 `<webUrl>/commit/<完整 sha>`，新标签页打开，悬停是完整 sha；
+  - resolve 接口每次都返回 `commits` 一项，没问就是空；`commits` 和 `issue` 必须一起给。
+- **不链的情况：** 远端不是 GitHub（公司 GitLab）、没有远端、lane 没报过工作目录、别的仓库的提交号。
+
+自动测试：
+- `tests/modules/issues/commit-refs.test.ts`（node 组，真 git，第三批验收第 1、2 条）：
+  - 每条现建一个只有一个提交的仓库。有歧义的前缀用两个前 7 位都是 `8080cab` 的提交对象：它们是离线按提交信息试出来的，测试里用 `git hash-object -t commit -w` 写进仓库，并核对 id；
+  - 一次请求只起一个 `cat-file`，用注入的 runner 计数（包着真的 `runGit`）；
+  - HTTP：参数的 400、`actionToken`、lane 工具不认 `commits`。
+- `tests/modules/issues/commit-links.test.ts`（happy-dom，仓库用替身，第 3 条）：
+  - 正文和行内代码变链接，代码块、路径里的、不是提交的不变；
+  - 8 位问答优先；
+  - 一次渲染一个请求，结果缓存；
+  - 新标签页打开，悬停是完整 sha。
+- `tests/modules/issues/resolve.test.ts`、`lane-filter.test.ts` 的期望结果加了空的 `commits`；`issue-links.test.ts` 记 resolve 请求的写法改成按参数解析，因为同一个请求里现在多了 `commits` 和 `issue`。
+- 变异：
+  - 稿子第三批的五个都红：blob 也算提交、`webUrl` 为 null 也链、每个 id 起一个 git 进程（node 组）；问答 id 不优先、代码块里的也认（happy-dom）；
+  - 另外三个也红：不缓存、每次渲染重问；链接不在新标签页；问提交号时不带 `issue`。
+
+#### TC-ISSUES-USABILITY-3：在真实问答页上点提交号（尚未执行）
+
+**前提：** 含此改动的版本已部署（只重启核心）。
+
+1. 打开一条 lane-router 的 lane 写了提交号的问答，比如 inbox-impl 交付信转进问答的那种，点一个 7 位的提交号。
+2. 打开一条公司项目（远端是公司 GitLab）的问答，看里面的提交号。
+
+**预期：**
+- 第 1 步：提交号是链接，悬停是完整 sha，新标签页打开 GitHub 上那个提交。
+- 第 2 步：提交号仍是文字。
+
 ### 归档横幅：所属 lane 已归档的问答说清追问去哪
 
 需求与设计见 `docs/superpowers/specs/2026-10-21-task-lane.md`（4.3 第 5 条、验收 9）。核心那一半（`lane_finish` 时解析父议题和父 lane、`LaneAccessFacts` 的 `finishedAt` 和 `task`）归 impl。

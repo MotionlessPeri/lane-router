@@ -39,7 +39,7 @@ async function open(options: { search?: string; failResolve?: number } = {}) {
   window.addEventListener("error", event => errors.push((event as ErrorEvent).error));
   const browserFetch = async (path: string, init?: RequestInit) => {
     if (path.startsWith("/issues/api/resolve")) {
-      resolves.push(decodeURIComponent(path.split("refs=")[1] ?? ""));
+      resolves.push(new URLSearchParams(path.split("?")[1]).get("refs") ?? "");
       if (failures > 0) { failures--; return new Response(JSON.stringify({ error: "busy" }), { status: 503 }); }
     }
     return fetch(new URL(path, url), { ...init, headers: { ...init?.headers, ...(init?.method === "POST" ? { origin: url } : {}) } });

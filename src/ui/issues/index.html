@@ -356,6 +356,7 @@
     else { body.classList.add("plain-text"); body.textContent = text; }
     if (markdown) linkLocalPaths(body);
     markIssueRefs(body);
+    markCommitRefs(body);
     markCardRefs(body); upgradeCardRefs(body);
     markLaneRefs(body);
     body.querySelectorAll("pre").forEach(addCopyButton);
@@ -438,6 +439,31 @@
       if (parts.length) text.replaceWith(...parts, text.data.slice(end));
     }
   }
+  // A commit id: seven to forty hex digits standing alone, not inside a path; only the Router says
+  // whether one is a commit of the shown issue's lane's repository (spec
+  // 2026-10-21-issue-page-usability.md, section seven). Eight digits are issue references first.
+  const COMMIT_REF = /(?<![0-9a-zA-Z\/-])[0-9a-f]{7,40}(?![0-9a-zA-Z\/-])/gi, WHOLE_COMMIT = /^[0-9a-f]{7,40}$/i;
+  /** Marks commit ids where issue references are looked for: running text and inline code alone. */
+  function markCommitRefs(body) {
+    const candidate = commit => { const span = node("span", "commit-ref-candidate"); span.dataset.commit = commit.toLowerCase(); return span; };
+    for (const code of body.querySelectorAll("code")) {
+      const commit = code.textContent.trim();
+      if (code.closest("pre, a, .local-path, .issue-ref-candidate") || !WHOLE_COMMIT.test(commit)) continue;
+      const span = candidate(commit); code.replaceWith(span); span.append(code);
+    }
+    const texts = [];
+    for (let walker = document.createTreeWalker(body, document.defaultView.NodeFilter.SHOW_TEXT), text; (text = walker.nextNode());) {
+      if (!text.parentElement.closest("pre, code, a, .local-path, .issue-ref-candidate, .commit-ref-candidate")) texts.push(text);
+    }
+    for (const text of texts) {
+      const parts = []; let end = 0;
+      for (const match of text.data.matchAll(COMMIT_REF)) {
+        const span = candidate(match[0]); span.textContent = match[0];
+        parts.push(text.data.slice(end, match.index), span); end = match.index + match[0].length;
+      }
+      if (parts.length) text.replaceWith(...parts, text.data.slice(end));
+    }
+  }
   // A card on the Vikunja board: LR- and its number, standing alone. Not UTF-8 or SHA-256, nor XLR-3
   // or LR-39a (spec 2026-10-21-issue-page-usability.md, section five).
   const CARD_REF = /(?<![\w-])LR-(\d+)(?![\w-])/g, WHOLE_CARD = /^LR-(\d+)$/;
@@ -446,12 +472,12 @@
     const candidate = number => { const span = node("span", "card-ref-candidate"); span.dataset.card = number; return span; };
     for (const code of body.querySelectorAll("code")) {
       const match = WHOLE_CARD.exec(code.textContent.trim());
-      if (code.closest("pre, a, .local-path, .issue-ref-candidate") || !match) continue;
+      if (code.closest("pre, a, .local-path, .issue-ref-candidate, .commit-ref-candidate") || !match) continue;
       const span = candidate(match[1]); code.replaceWith(span); span.append(code);
     }
     const texts = [];
     for (let walker = document.createTreeWalker(body, document.defaultView.NodeFilter.SHOW_TEXT), text; (text = walker.nextNode());) {
-      if (!text.parentElement.closest("pre, code, a, .local-path, .issue-ref-candidate, .card-ref-candidate")) texts.push(text);
+      if (!text.parentElement.closest("pre, code, a, .local-path, .issue-ref-candidate, .commit-ref-candidate, .card-ref-candidate")) texts.push(text);
     }
     for (const text of texts) {
       const parts = []; let end = 0;
@@ -502,12 +528,12 @@
     const candidate = address => { const span = node("span", "lane-ref-candidate"); span.dataset.lane = address; return span; };
     for (const code of body.querySelectorAll("code")) {
       const address = code.textContent.trim();
-      if (code.closest("pre, a, .local-path, .issue-ref-candidate, .card-ref-candidate") || !WHOLE_LANE.test(address)) continue;
+      if (code.closest("pre, a, .local-path, .issue-ref-candidate, .commit-ref-candidate, .card-ref-candidate") || !WHOLE_LANE.test(address)) continue;
       const span = candidate(address); code.replaceWith(span); span.append(code);
     }
     const texts = [];
     for (let walker = document.createTreeWalker(body, document.defaultView.NodeFilter.SHOW_TEXT), text; (text = walker.nextNode());) {
-      if (!text.parentElement.closest("pre, code, a, .local-path, .issue-ref-candidate, .card-ref-candidate, .lane-ref-candidate")) texts.push(text);
+      if (!text.parentElement.closest("pre, code, a, .local-path, .issue-ref-candidate, .commit-ref-candidate, .card-ref-candidate, .lane-ref-candidate")) texts.push(text);
     }
     for (const text of texts) {
       const parts = []; let end = 0;
@@ -521,33 +547,61 @@
     }
   }
   /**
-   * What each reference named, once asked: the issue, or null for none; and for each lane address, its
-   * project, or null where no lane has had it. A failed lookup remembers nothing, so the next render
-   * asks again. Each render asks once, for what it has not asked before, issues and addresses together.
+   * What each reference named, once asked: the issue, or null for none; for each lane address, its
+   * project, or null where no lane has had it; and for each hex id in the shown issue, the commit it is
+   * in that issue's lane's repository, or null, kept per issue. A failed lookup remembers nothing, so
+   * the next render asks again. Each render asks once, for what it has not asked before, all together.
    */
-  const issueRefs = new Map(), laneRefs = new Map(), refsAsking = new Set(), lanesAsking = new Set();
+  const issueRefs = new Map(), laneRefs = new Map(), commitRefs = new Map(), refsAsking = new Set(), lanesAsking = new Set(), commitsAsking = new Set();
   async function resolveIssueRefs() {
-    upgradeIssueRefs(); upgradeLaneRefs();
-    const unasked = (selector, key, known, asking) => [...new Set([...document.querySelectorAll(selector)].map(span => span.dataset[key]))]
-      .filter(value => !known.has(value) && !asking.has(value));
-    const refsLeft = unasked(".issue-ref-candidate", "ref", issueRefs, refsAsking), lanesLeft = unasked(".lane-ref-candidate", "lane", laneRefs, lanesAsking);
-    for (let start = 0; start < Math.max(refsLeft.length, lanesLeft.length); start += 100) {
-      const refs = refsLeft.slice(start, start + 100), lanes = lanesLeft.slice(start, start + 100);
+    upgradeIssueRefs(); upgradeLaneRefs(); upgradeCommitRefs();
+    const unasked = (values, known, asking) => [...new Set(values)].filter(value => !known.has(value) && !asking.has(value));
+    const marked = (selector, key) => [...document.querySelectorAll(selector)].map(span => span.dataset[key]);
+    const refsLeft = unasked(marked(".issue-ref-candidate", "ref"), issueRefs, refsAsking), lanesLeft = unasked(marked(".lane-ref-candidate", "lane"), laneRefs, lanesAsking);
+    // Commit ids are the shown issue's, looked for in its lane's repository; eight digits are asked both ways.
+    const issue = historyFor, commitKey = commit => issue + ":" + commit;
+    const commitsLeft = !issue ? [] : [...new Set([...marked("#history .commit-ref-candidate", "commit"), ...marked("#history .issue-ref-candidate", "ref").filter(ref => WHOLE_COMMIT.test(ref))])]
+      .filter(commit => !commitRefs.has(commitKey(commit)) && !commitsAsking.has(commitKey(commit)));
+    for (let start = 0; start < Math.max(refsLeft.length, lanesLeft.length, commitsLeft.length); start += 100) {
+      const refs = refsLeft.slice(start, start + 100), lanes = lanesLeft.slice(start, start + 100), commits = commitsLeft.slice(start, start + 100);
       for (const ref of refs) refsAsking.add(ref);
       for (const lane of lanes) lanesAsking.add(lane);
+      for (const commit of commits) commitsAsking.add(commitKey(commit));
       try {
         const query = new URLSearchParams();
         if (refs.length) query.set("refs", refs.join(","));
         if (lanes.length) query.set("lanes", lanes.join(","));
+        if (commits.length) { query.set("commits", commits.join(",")); query.set("issue", issue); }
         const { result } = await request("/issues/api/resolve?" + query);
         for (const ref of refs) issueRefs.set(ref, null);
         for (const item of result.items) issueRefs.set(item.ref.toLowerCase(), item);
         for (const lane of lanes) laneRefs.set(lane, null);
         for (const lane of result.lanes ?? []) laneRefs.set(lane.address, lane.project);
+        for (const commit of commits) commitRefs.set(commitKey(commit), null);
+        for (const commit of result.commits ?? []) commitRefs.set(commitKey(commit.ref.toLowerCase()), commit);
       } catch { /* left as text until a later render asks again */ }
-      finally { for (const ref of refs) refsAsking.delete(ref); for (const lane of lanes) lanesAsking.delete(lane); }
+      finally {
+        for (const ref of refs) refsAsking.delete(ref);
+        for (const lane of lanes) lanesAsking.delete(lane);
+        for (const commit of commits) commitsAsking.delete(commitKey(commit));
+      }
     }
-    upgradeIssueRefs(); upgradeLaneRefs();
+    upgradeIssueRefs(); upgradeLaneRefs(); upgradeCommitRefs();
+  }
+  /**
+   * A commit of the shown issue's lane's repository becomes a link to it on GitHub, in a new tab, its
+   * whole id on hover. Eight digits wait until the Router has said they name no issue: an issue wins.
+   */
+  function upgradeCommitRefs() {
+    const issue = historyFor;
+    if (!issue) return;
+    for (const span of document.querySelectorAll("#history .commit-ref-candidate, #history .issue-ref-candidate")) {
+      const written = span.dataset.commit ?? span.dataset.ref, commit = commitRefs.get(issue + ":" + written);
+      if (!commit || (span.dataset.ref !== undefined && issueRefs.get(written) !== null)) continue;
+      const link = node("a", "commit-ref"); link.setAttribute("href", commit.url);
+      link.target = "_blank"; link.rel = "noopener noreferrer"; link.title = commit.sha;
+      link.append(...span.childNodes); span.replaceWith(link);
+    }
   }
   /** An address the Router knows becomes a control that narrows the list to it. */
   function upgradeLaneRefs() {

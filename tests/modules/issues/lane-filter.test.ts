@@ -74,8 +74,9 @@ test("5: the page's entries take lane and lanes; anything else is refused, and t
   expect((await get("/issues/api/threads?filter=all&lane=project%2Flead&lane=studio%2Fsolve")).status).toBe(400);
   const resolved = await get(`/issues/api/resolve?refs=${newLead.slice(0, 8)}&lanes=project/lead,project/ghost`);
   expect(resolved.status).toBe(200);
-  expect(resolved.body).toEqual({ result: x.service.resolveRefs([newLead.slice(0, 8)], ["project/lead", "project/ghost"]), actionToken: expect.any(String) });
-  expect((await get("/issues/api/resolve?lanes=project/lead")).body.result).toEqual({ items: [], lanes: [{ address: "project/lead", project: "project" }] });
+  // Commit ids are another batch's (commit-refs.test.ts): none asked, none answered.
+  expect(resolved.body).toEqual({ result: { ...x.service.resolveRefs([newLead.slice(0, 8)], ["project/lead", "project/ghost"]), commits: [] }, actionToken: expect.any(String) });
+  expect((await get("/issues/api/resolve?lanes=project/lead")).body.result).toEqual({ items: [], lanes: [{ address: "project/lead", project: "project" }], commits: [] });
   for (const path of ["/issues/api/resolve", "/issues/api/resolve?lanes=bad", "/issues/api/resolve?lanes=", "/issues/api/resolve?lanes=a/b&lanes=c/d"]) {
     expect((await get(path)).status, path).toBe(400);
   }
