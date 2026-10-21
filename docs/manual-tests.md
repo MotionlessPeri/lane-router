@@ -762,7 +762,10 @@ lane-router-lane issue record-tui-close --json-file ./issue-tui-close.json
 4. 给一条正在跑长回合（超过 15 秒）的 Claude lane 发一封信：回合期间日志里没有它的 `channel.renotify`，回合结束后它处理这封信。
 
 **预期：** 四步都成立。第 3、4 步如果出现重通知记录，就是误触发。
-**最后验证：** 尚未执行（等部署）。
+**最后验证：** 2026-10-21 03:17 部署（master `1fae7e9`，Router pid 70720）后：
+- 第 3 步 ✓：design 03:32:04 给在线空闲的 `lane-router/impl` 发信（`df02634e`），impl 03:32:07 `UserPromptSubmit` 起回合；`router-start.log` 里没有 impl 的 `channel.renotify`。
+- 第 4 步 ✓：design 自己在一个长回合里（03:18 起连续 `UserPromptSubmit`、无 `Stop`）收到 `c8b1ccba`（03:19:44）、`e3bd155a`（03:25:26）两封信，日志里没有 `lane-router/design` 的 `channel.renotify`；两封在回合内被处理。
+- 第 1–2 步 ✓（受控）：探针 `lane-router/probe-b` 被结束进程后离线、信箱 2 封（04:04），04:05:51 由 `lane_restore_project` 开出恢复窗口；用户 09:13 点开发通道确认，之后不打字、不补信：09:13:26.976 `join.channel_connected` → 首帧没起回合 → 09:13:41.984 `channel.renotify laneAddress=lane-router/probe-b attempt=1 sinceFirstMs=15006` → 09:13:43.372 `UserPromptSubmit`（`lastLifecycleAt` 变非空）→ 两封 pending 被读、ack，回信 09:14:21 到达 design → 09:14:31 `Stop`。只重通知一次就起了回合，没有 attempt 2。它的记录只有 1 MB，启动窗口来自弹窗后的初始化而不是大记录；「记录大」的情形由下面生产观察 ① 覆盖。另有两条生产观察：① 部署重启后 `lane-router/inbox-impl` 带积压重连，03:18:04 `channel.renotify attempt 1`，03:18:05 它 `UserPromptSubmit`——重通知起了回合；② `lane-router/inbox` 从 03:17 起每轮 4 档都走完仍无 lifecycle，它的 transcript 显示每帧都被 Claude Code `enqueue` 却没起回合（会话停在某个交互状态），这是重通知设计上管不到的情形，不算失败。
 
 ## Codex remote TUI
 
@@ -1473,7 +1476,12 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 5. 关掉一条有 pending 信或问答、手上还有已授权任务的 lane，再恢复它。它应先处理 pending，再接着原任务，而不是停着等用户说「开工」。Claude lane 恢复时要点一下开发通道确认，见 TC-LANE-NEW 第 3 步。
 
 **预期：** 五步都成立。第 4 步要是没停下来问，就说明收窄后的文字没守住接替和改角色这两道闸，要回到设计稿重议。
-**最后验证：** 尚未执行（等部署）。
+**最后验证：** 2026-10-21 03:36–04:2x，Router pid 70720（master `1fae7e9`，03:17 部署），全部在部署后新开的会话里做；用户只点开发通道确认、没打字。design 用探针 lane 做：`lane-router/probe`（任务 lane 角色首句，gen 1 会话 `4e438354`、gen 2 `9c31e3b2`）、`lane-router/probe-b`（`e4a19414`）、一个手拉的无绑定会话（`140579e8`）；判据来自各会话的 transcript、`lane_directory` / `/dashboard/state` 与 `router-start.log`。
+1. ✓ design 从工具 shell 用 launcher 开 `probe`（launcher 自己剥 `CLAUDE*` / `NO_COLOR`，窗口正常）。probe 收到 design 的信后直接 `lane-router-lane new lane-router/probe-b --backend claude --cwd … --role …`，自述「没有停下来问用户」。probe-b 收到的创建 prompt 是新文字（无 approved），读规范、查目录、attach 后主动发就绪信、没自己开工。发命令到 probe-b 就绪 5 分 18 秒，其中约 4 分钟是窗口等用户点弹窗。
+2. ✓ probe gen 2 对离线的 probe-b 调 `lane_restore_project` 只点名它，返回 `launch_requested`；没问用户、没开别的 lane。
+3. ✓ `lane-router-rotate claude lane-router/probe --handoff-file …`：新会话 attach 回同地址、不传 role，gen 1→2，自述未向用户要确认；接着等 design 派活、没造活。旧 gen 1 会话失去绑定后由 design 结束。
+4. ✓ 一个无绑定的新会话被要求 attach 到仍 live 的 probe-b 并换掉它的角色说明：查目录后停下，在窗口里向用户说明「接替仍 live 的别的 lane」「修改已有 lane 的角色说明」两道闸都要确认，没调 `lane_attach_current`。
+5. ✓ design 在 probe-b 空闲（最近 lifecycle 是 `Stop`）时结束了它的 claude.exe（transcript 1,003,804 B / 216 行、末行完整，杀前后一致），它 5 秒内变 `no_channel` / offline，没留下孤儿 MCP 进程；信箱里 2 封信（04:04:38 / 04:04:42）、手上有 design 03:52 派的「收到 N 回 N+1」任务（那封它已 ack，只存在于它的会话记录里）。第 2 步的 `lane_restore_project` 04:05:51 开出恢复窗口（`--resume e4a19414…`）；用户 09:13 才点开发通道确认，之后没人打字：09:13:26.976 频道连上 → 09:13:41.984 `channel.renotify attempt 1`（首帧没起回合）→ 09:13:43.372 `UserPromptSubmit` → 读完两封 pending、按旧任务回「42、generation 1、频道通知唤醒」→ ack 两封（pending 0）→ 09:14:31 `Stop`。它在回信里逐字引用了 03:52 那封派任务信的正文，依据是恢复后的会话记录（transcript 从 216 行续到 272 行）——说明从外部结束空闲的 claude.exe 不损记录，`--resume` 能完整接上（LR-27 第三节待取证项由此核销）。
 
 ## 产品工具的参数 schema：union 工具发平表根
 
