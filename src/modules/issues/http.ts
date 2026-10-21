@@ -30,6 +30,7 @@ export class IssuesHttp {
       return true;
     }
     const markdownAsset = url.pathname === "/issues/assets/markdown-it.js";
+    const mermaidAsset = url.pathname === "/issues/assets/mermaid.js";
     const detail = /^\/issues\/api\/threads\/([^/]+)$/u.exec(url.pathname);
     const lanes = url.pathname === "/issues/api/lanes";
     const projects = url.pathname === "/issues/api/projects";
@@ -37,7 +38,7 @@ export class IssuesHttp {
     const exact = request.method === "POST" && request.url === url.pathname;
     const creating = exact && url.pathname === "/issues/api/threads";
     const write = exact ? /^\/issues\/api\/threads\/([^/]+)\/(replies|read|close)$/u.exec(url.pathname) : null;
-    const reading = request.method === "GET" && (url.pathname === "/issues" || markdownAsset || url.pathname === "/issues/api/threads" || detail !== null || lanes || projects || resolving);
+    const reading = request.method === "GET" && (url.pathname === "/issues" || markdownAsset || mermaidAsset || url.pathname === "/issues/api/threads" || detail !== null || lanes || projects || resolving);
     if (!reading && !write && !creating) return false;
     const service = this.options.service;
     if (!service) { json(response, 503, { error: "ISSUES_UNAVAILABLE: issue module is unavailable", code: "ISSUES_UNAVAILABLE" }); return true; }
@@ -50,9 +51,10 @@ export class IssuesHttp {
     if (action && body === undefined) return true;
     try {
       if (reading) {
-        if (markdownAsset) {
-          // A fixed, installed browser asset, not a filesystem path supplied by the request.
-          const script = readFileSync(createRequire(import.meta.url).resolve("markdown-it/browser"), "utf8");
+        if (markdownAsset || mermaidAsset) {
+          // A fixed, installed browser asset, not a filesystem path supplied by the request. Mermaid is
+          // asked for only by a page that has a diagram to draw.
+          const script = readFileSync(createRequire(import.meta.url).resolve(markdownAsset ? "markdown-it/browser" : "mermaid/dist/mermaid.min.js"), "utf8");
           response.writeHead(200, { "content-type": "application/javascript; charset=utf-8", "x-content-type-options": "nosniff", "cache-control": "no-store" }); response.end(script);
         } else if (url.pathname === "/issues") {
           const page = (this.options.readPage ?? (() => readFileSync(new URL("../../ui/issues/index.html", import.meta.url), "utf8")))();
