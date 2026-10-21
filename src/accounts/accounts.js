@@ -164,7 +164,7 @@
      something wakes it. The Router mails every lane of the backend, and this says what became of
      each: woken, left in a closed lane's mailbox for when it opens, or skipped and why. */
   const backendNames = { claude: "Claude", codex: "Codex" };
-  const skipReasons = { archived: "已归档", unbound: "没有对话", missing: "不存在", delivery_failed: "没能写进信箱" };
+  const skipReasons = { archived: "已归档", finished: "已完成", unbound: "没有对话", missing: "不存在", delivery_failed: "没能写进信箱" };
   function continueSummary(result) {
     const skipped = result.skipped || [];
     if (!result.notified.length && !result.queued.length && skipped.length && skipped.every(item => item.reason === "sent_within_60s")) return "60 秒内刚发过一轮，这次没有再发。";

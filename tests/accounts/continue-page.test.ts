@@ -59,6 +59,16 @@ test("the answer is shown as woken, waiting in a closed lane's mailbox, and skip
   expect(shown(p.document, "codex-continue-result").hidden).toBe(true);
 });
 
+// A task lane between lane_finish and its window closing is still in service, and is skipped as
+// finished (LR-27). The 问答 page says 已完成 for it; this page says the same.
+test("a finished task lane is skipped as 已完成", async () => {
+  const p = await page(answered({ backend: "claude", notified: [], queued: [], skipped: [{ address: "alpha/task", reason: "finished" }] }));
+  shown(p.document, "claude-continue").click();
+  const result = shown(p.document, "claude-continue-result");
+  await vi.waitFor(() => expect(result.hidden).toBe(false));
+  expect(result.textContent).toBe("跳过 1 条：alpha/task（已完成）。");
+});
+
 test("a second press within the minute says nothing was sent again, and a backend with no lanes says so", async () => {
   let answer: unknown = { backend: "codex", notified: [], queued: [], skipped: [{ address: "alpha/x", reason: "sent_within_60s" }] };
   const p = await page(() => ({ ok: true, value: { result: answer } }));
