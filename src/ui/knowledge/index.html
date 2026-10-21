@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>知识库 · Lane Router</title>
+<style>
+  :root { color-scheme: light dark; --bg: light-dark(#f7f8fa, #15181e); --panel: light-dark(#fff, #1c2028); --text: light-dark(#202938, #edf0f6); --muted: light-dark(#667083, #aab3c3); --line: light-dark(#e2e6ed, #353c49); --hover: light-dark(#edf1f7, #29313e); --blue: light-dark(#355ca8, #aac6ff); --warm: light-dark(#875b14, #efc478); --code: light-dark(#f1f3f7, #262b35); }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.65 system-ui, "Microsoft YaHei", sans-serif; overflow-wrap: anywhere; }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; border: 1px solid var(--line); border-radius: 7px; padding: 5px 11px; background: var(--panel); }
+  button:hover { background: var(--hover); }
+  :focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+  a { color: var(--blue); }
+  header { display: flex; align-items: baseline; gap: 14px; padding: 14px 24px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header .home { font-size: 19px; font-weight: 600; color: var(--text); text-decoration: none; }
+  main { max-width: 920px; margin: 0 auto; padding: 18px 24px 48px; }
+  h1 { font-size: 22px; font-weight: 600; margin: 4px 0 6px; }
+  h2 { font-size: 15px; font-weight: 600; margin: 28px 0 8px; }
+  p { margin: 6px 0; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .warning { color: var(--warm); }
+  #filter { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
+  #filter input[type=search] { flex: 1 1 260px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+  ol { list-style: none; margin: 0; padding: 0; }
+  .page { padding: 12px 14px; margin-bottom: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; }
+  .page-head { display: flex; align-items: baseline; gap: 10px; }
+  .page-head a { font-weight: 550; }
+  .badge { font-size: 12px; padding: 0 7px; border: 1px solid var(--warm); border-radius: 10px; color: var(--warm); }
+  .superseded .page-head a { color: var(--muted); }
+  .snippet { white-space: pre-wrap; }
+  .summary { color: var(--muted); }
+  article .summary { font-size: 15px; }
+  #notice { padding: 8px 12px; border: 1px solid var(--warm); border-radius: 8px; }
+  #body { margin-top: 14px; padding: 4px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; }
+  #body.plain-text { white-space: pre-wrap; padding: 14px 18px; }
+  #body pre, #body code { background: var(--code); border-radius: 5px; font-family: Consolas, "Cascadia Mono", monospace; }
+  #body code { padding: 0 4px; }
+  #body pre { padding: 10px 12px; overflow-x: auto; }
+  #body pre code { padding: 0; }
+  #body table { border-collapse: collapse; }
+  #body th, #body td { border: 1px solid var(--line); padding: 4px 9px; }
+  #body blockquote { margin: 8px 0; padding-left: 12px; border-left: 3px solid var(--line); color: var(--muted); }
+  #versions li { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+  #versions li.shown { font-weight: 600; }
+</style>
+</head>
+<body>
+<header><a class="home" href="/knowledge">知识库</a><span class="meta">只读。lane 用 lane_kb_record 录入，用 lane_kb_search 查找。</span></header>
+<main data-state="loading">
+  <p id="markdown-status" class="warning" role="status" hidden>Markdown 组件未能加载，正文暂时显示原文。可刷新页面重试。</p>
+  <p id="status" role="status">正在读取…</p>
+  <section id="index-view" hidden>
+    <form id="filter" method="get" action="/knowledge">
+      <input type="search" name="q" placeholder="按关键词筛选（标题、摘要、正文）">
+      <label class="meta"><input type="checkbox" name="includeSuperseded" value="1"> 含已被取代的页</label>
+      <button type="submit">筛选</button>
+      <a id="clear" href="/knowledge" hidden>看全部目录</a>
+    </form>
+    <p id="count" class="meta"></p>
+    <ol id="pages"></ol>
+    <p><button type="button" id="more" hidden>加载更多</button></p>
+  </section>
+  <article id="page-view" hidden>
+    <p class="meta"><a href="/knowledge">← 目录</a></p>
+    <h1 id="title"></h1>
+    <p id="notice" hidden></p>
+    <p id="summary" class="summary"></p>
+    <p id="page-meta" class="meta"></p>
+    <div id="body"></div>
+    <h2>版本</h2>
+    <ol id="versions"></ol>
+  </article>
+</main>
+<script src="/knowledge/assets/markdown-it.js"></script>
+<script>
+(() => {
+  "use strict";
+  const byId = id => document.getElementById(id);
+  const node = (tag, className, text) => {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
+  };
+  const link = (href, text) => { const element = node("a", "", text); element.setAttribute("href", href); return element; };
+  const main = document.querySelector("main");
+  // The same safe display as the issue page: HTML in a page stays text and images are not fetched.
+  const markdown = typeof document.defaultView.markdownit === "function"
+    ? new document.defaultView.markdownit({ html: false, breaks: true, linkify: false }).disable("image") : null;
+  if (markdown) {
+    markdown.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
+      tokens[index].attrSet("target", "_blank");
+      tokens[index].attrSet("rel", "noopener noreferrer");
+      return renderer.renderToken(tokens, index, options);
+    };
+  } else byId("markdown-status").hidden = false;
+  const ACTIONS = { create: "新建", update: "修改", supersede: "标为已被取代" };
+  const pageHref = (pageId, version) => "/knowledge/" + encodeURIComponent(pageId) + (version === undefined ? "" : "?version=" + version);
+  const time = milliseconds => {
+    const date = new Date(milliseconds);
+    const element = node("time", "", date.toLocaleString("zh-CN", { hour12: false }));
+    element.setAttribute("datetime", date.toISOString());
+    return element;
+  };
+  async function load(path) {
+    const response = await fetch(path, { cache: "no-store" });
+    let body = {};
+    try { body = await response.json(); } catch { /* the status line says enough */ }
+    if (!response.ok) throw new Error(body.error || "HTTP " + response.status);
+    return body.result;
+  }
+  function finish(state, message) {
+    main.setAttribute("data-state", state);
+    byId("status").textContent = message || "";
+    byId("status").hidden = !message;
+    byId("status").classList.toggle("warning", state === "error");
+  }
+
+  /** One index entry or search hit; superseded pages stay listed, marked. */
+  function row(item) {
+    const entry = node("li", item.status === "superseded" ? "page superseded" : "page");
+    entry.setAttribute("data-page-id", item.pageId);
+    const head = node("div", "page-head");
+    head.append(link(pageHref(item.pageId), item.title));
+    if (item.status === "superseded") head.append(node("span", "badge", "已被取代"));
+    entry.append(head, node("p", "summary", item.summary));
+    if (item.snippet) entry.append(node("p", "snippet meta", item.snippet));
+    const meta = node("p", "meta", "更新于 ");
+    meta.append(time(item.updatedAt));
+    entry.append(meta);
+    return entry;
+  }
+
+  async function showIndex(params) {
+    const query = (params.get("q") || "").trim(), includeSuperseded = params.get("includeSuperseded") === "1";
+    const form = byId("filter");
+    form.querySelector("input[name=q]").value = query;
+    form.querySelector("input[name=includeSuperseded]").checked = includeSuperseded;
+    byId("index-view").hidden = false;
+    if (query) {
+      const search = new URLSearchParams({ q: query });
+      if (includeSuperseded) search.set("includeSuperseded", "1");
+      const result = await load("/knowledge/api/search?" + search);
+      byId("pages").replaceChildren(...result.hits.map(row));
+      byId("count").textContent = result.hits.length === 0 ? "没有页面命中「" + query + "」。"
+        : "关键词命中 " + result.hits.length + " 页。命中只说明字面出现过，是否相关看摘要。";
+      byId("clear").hidden = false;
+      document.title = query + " · 知识库";
+      return finish("ready");
+    }
+    let afterId = null, shown = 0;
+    const more = async () => {
+      const result = await load("/knowledge/api/pages" + (afterId ? "?" + new URLSearchParams({ afterId }) : ""));
+      byId("pages").append(...result.pages.map(row));
+      shown += result.pages.length; afterId = result.nextAfterId;
+      byId("more").hidden = afterId === null;
+      byId("count").textContent = shown === 0 ? "知识库还是空的。lane 用 lane_kb_record 录入后，页面会出现在这里。"
+        : "按标题排列，已列出 " + shown + " 页" + (afterId === null ? "。" : "，还有更多。");
+    };
+    byId("more").addEventListener("click", () => {
+      byId("more").disabled = true;
+      more().catch(error => finish("error", "读取失败：" + error.message)).finally(() => { byId("more").disabled = false; });
+    });
+    await more();
+    finish("ready");
+  }
+
+  async function showPage(pageId, version) {
+    const page = await load("/knowledge/api/pages/" + encodeURIComponent(pageId) + (version ? "?version=" + encodeURIComponent(version) : ""));
+    document.title = page.title + " · 知识库";
+    byId("title").textContent = page.title;
+    byId("summary").textContent = page.summary;
+    const meta = byId("page-meta");
+    meta.append("第 " + page.version + " 版，写于 ", time(page.updatedAt));
+    const notice = byId("notice");
+    if (page.version !== page.currentVersion) {
+      notice.append("正在看第 " + page.version + " 版，当前是第 " + page.currentVersion + " 版。", link(pageHref(page.pageId), "看当前版"));
+    }
+    if (page.status === "superseded" && page.supersededBy) {
+      let title = page.supersededBy;
+      try { title = (await load("/knowledge/api/pages/" + encodeURIComponent(page.supersededBy))).title; } catch { /* the link still leads there */ }
+      notice.append(notice.childNodes.length ? " " : "", "这一页已被取代，新的内容见：", link(pageHref(page.supersededBy), title));
+    }
+    notice.hidden = notice.childNodes.length === 0;
+    notice.className = "warning";
+    const body = byId("body");
+    // HTML input stays escaped; only the parser's own markup reaches this sink.
+    if (markdown) body.innerHTML = markdown.render(page.body);
+    else { body.classList.add("plain-text"); body.textContent = page.body; }
+    byId("versions").replaceChildren(...page.versions.map(item => {
+      const entry = node("li", item.version === page.version ? "shown" : "");
+      entry.setAttribute("data-version", String(item.version));
+      entry.append(link(pageHref(page.pageId, item.version), "第 " + item.version + " 版"), node("span", "", ACTIONS[item.action] || item.action),
+        node("span", "meta", item.laneAddress || "（lane 已不存在）"), time(item.createdAt));
+      return entry;
+    }));
+    byId("page-view").hidden = false;
+    finish("ready");
+  }
+
+  const params = new URLSearchParams(document.location.search);
+  const match = /^\/knowledge\/([^/]+)$/.exec(document.location.pathname);
+  (match ? showPage(decodeURIComponent(match[1]), params.get("version")) : showIndex(params))
+    .catch(error => finish("error", "读取失败：" + error.message));
+})();
+</script>
+</body>
+</html>

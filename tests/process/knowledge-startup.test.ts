@@ -48,13 +48,15 @@ test("the standalone Router opens knowledge.sqlite and serves both knowledge too
   const created = await x.call("lane_kb_record", { step: "commit", checkId: checked.checkId, operationKey: "create", decision: { kind: "create", ...page } });
   expect(created.viewUrl).toBe(`${x.url}/knowledge/${created.pageId}`);
   expect(await x.call("lane_kb_search", { query: "cc" })).toMatchObject({ hits: [{ pageId: created.pageId }] });
-});
+  expect((await fetch(created.viewUrl)).status).toBe(200);
+}, 20_000);
 
 test("core-only assembly never creates the knowledge database", async () => {
   const path = root(); const x = await boot(path, false);
   await expect(x.call("lane_kb_search", {})).rejects.toThrow(/unknown method/);
   expect(existsSync(join(path, "knowledge.sqlite"))).toBe(false);
-});
+  expect((await fetch(`${x.url}/knowledge`)).status).toBe(404);
+}, 20_000);
 
 test.each(["corrupt", "future"])("12. a %s knowledge database leaves communication, issues and graphs working and is not replaced", async kind => {
   const path = root(); const databasePath = join(path, "knowledge.sqlite");
@@ -73,5 +75,7 @@ test.each(["corrupt", "future"])("12. a %s knowledge database leaves communicati
   await expect(x.call("lane_ack", { message_ids: [sent.id] }, other)).resolves.toMatchObject({ resolved: [sent.id] });
   await expect(x.call("lane_issue_read", {})).resolves.toBeDefined();
   await expect(x.call("lane_graph_create", { operationKey: "graph", title: "Graph" })).resolves.toMatchObject({ lockValid: true });
+  const viewer = await fetch(`${x.url}/knowledge/api/pages`);
+  expect(viewer.status).toBe(503); expect(await viewer.json()).toMatchObject({ code: "KB_UNAVAILABLE" });
   expect(readFileSync(databasePath)).toEqual(before);
-});
+}, 20_000);

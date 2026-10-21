@@ -12,6 +12,7 @@ import { ensureRouter } from "./ensure-router.js";
 import { LocalRouterClient } from "./local-client.js";
 import { runIssueCli, type IssueCliDependencies } from "../modules/issues/cli.js";
 import { runGraphCli, type GraphCliDependencies } from "../modules/graphs/cli.js";
+import { runKnowledgeCli, type KnowledgeCliDependencies } from "../modules/knowledge/cli.js";
 import {
   awaitChildStart, childEnvironment, newStatusPath, parseTerminalChoice, resolveTerminal,
   spawnTerminal, terminalLaunchScript, wtOnPath, type TerminalChildRequest, type TerminalChoice,
@@ -27,6 +28,7 @@ const USAGE = [
   "  lane-router-lane issue <publish|read|append|update|record-tui-close> --json-file <path>",
   "  lane-router-lane graph <create|read|lock|apply> --json-file <path>",
   "  lane-router-lane graph force-unlock --id <id> --expected-lock <lockId>",
+  "  lane-router-lane kb <search|record> --json-file <path>",
 ].join("\n");
 
 export interface LaneLaunchDependencies {
@@ -37,6 +39,8 @@ export interface LaneLaunchDependencies {
   readonly readIssueJsonFile?: IssueCliDependencies["readJsonFile"];
   readonly graphClient?: GraphCliDependencies["client"];
   readonly readGraphJsonFile?: GraphCliDependencies["readJsonFile"];
+  readonly knowledgeClient?: KnowledgeCliDependencies["client"];
+  readonly readKnowledgeJsonFile?: KnowledgeCliDependencies["readJsonFile"];
   readonly spawnTerminal?: (request: TerminalChildRequest, environment: NodeJS.ProcessEnv) => Promise<void>;
   readonly startTimeoutMs?: number;
   readonly wtAvailable?: boolean;
@@ -76,6 +80,10 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
   if (args[0] === "graph") return runGraphCli(args.slice(1), {
     client: dependencies.graphClient ?? new LocalRouterClient(() => routerUrl(dataRoot)), resolveUrl: () => routerUrl(dataRoot),
     env: dependencies.env, cwd: dependencies.cwd, readJsonFile: dependencies.readGraphJsonFile, write: dependencies.write,
+  });
+  if (args[0] === "kb") return runKnowledgeCli(args.slice(1), {
+    client: dependencies.knowledgeClient ?? new LocalRouterClient(() => routerUrl(dataRoot)),
+    env: dependencies.env, cwd: dependencies.cwd, readJsonFile: dependencies.readKnowledgeJsonFile, write: dependencies.write,
   });
 
   // Step 1: Parse the invocation before touching Router or terminal state.

@@ -15,6 +15,7 @@ import type { ToolService } from "../tools/tool-service.js";
 import type { ApplicationTools } from "../application/tool-catalog.js";
 import { IssuesHttp, type IssuesHttpAssembly } from "../modules/issues/http.js";
 import { GraphsHttp, type GraphsHttpAssembly } from "../modules/graphs/http.js";
+import { KnowledgeHttp, type KnowledgeHttpAssembly } from "../modules/knowledge/http.js";
 import type { NativeHostService } from "./native-host-service.js";
 import type { DashboardOpenOverride } from "./dashboard-lane-opener.js";
 import { DashboardHttp, type DashboardLaneSetsInput } from "./dashboard-http.js";
@@ -460,6 +461,7 @@ export class LocalRouterServer {
   private readonly dashboard: DashboardHttp;
   private readonly issues: IssuesHttp | undefined;
   private readonly graphs: GraphsHttp | undefined;
+  private readonly knowledge: KnowledgeHttp | undefined;
   private readonly localOpen: LocalOpenHttp | undefined;
   readonly claude: ClaudeChannelHub;
 
@@ -468,6 +470,7 @@ export class LocalRouterServer {
     readonly applicationTools?: ApplicationTools;
     readonly issues?: IssuesHttpAssembly;
     readonly graphs?: GraphsHttpAssembly;
+    readonly knowledge?: KnowledgeHttpAssembly;
     /** Opens a local path a page shows when the user clicks it; absent means the entry is not served. */
     readonly localOpen?: { readonly launch: LocalLaunch };
     /** Where the Codex host's link lands; absent means this Router serves no Codex host. */
@@ -550,6 +553,7 @@ export class LocalRouterServer {
       ...options.issues, origin: () => this.discovery().url, actionToken: this.dashboardActionToken,
     });
     this.graphs = options.graphs === undefined ? undefined : new GraphsHttp(options.graphs);
+    this.knowledge = options.knowledge === undefined ? undefined : new KnowledgeHttp(options.knowledge);
     this.localOpen = options.localOpen === undefined ? undefined : new LocalOpenHttp({
       launch: options.localOpen.launch, origin: () => this.discovery().url, actionToken: this.dashboardActionToken,
     });
@@ -630,6 +634,7 @@ export class LocalRouterServer {
       if (await this.dashboard.handle(request, response)) return;
       if (await this.issues?.handle(request, response)) return;
       if (await this.graphs?.handle(request, response)) return;
+      if (await this.knowledge?.handle(request, response)) return;
       if (await this.localOpen?.handle(request, response)) return;
       if (request.method === "GET" && request.url !== undefined) {
         const url = new URL(request.url, "http://127.0.0.1");

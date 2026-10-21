@@ -1,6 +1,6 @@
 # Lane Router V1 手工验证
 
-自动测试覆盖通信、议题与图工具、HTTP/CLI、文件 mailbox、SQLite 对账、Claude Channel transport、Codex App Server 协议、按需启动与 launcher 参数。通信目录保留原五项工具；默认独立产品显式组合十三项（五项通信、四项议题、四项图工具）。Claude/ZCode stdio MCP 入口也选择十三项产品目录，`createLaneMcpServer` 工厂本身默认五项通信目录。Router 的 `issues:false` 保留通信-only装配，不启用议题或图模块，也不会动态改变已启动 stdio MCP 的工具列表。下面的现场用例验证真实 CLI、模型 provider、浏览器和交互式 TUI 的边界，不能用 fake backend 或 HappyDOM 结果代替。既有“最后验证”保留当时版本与事实，不表示新增功能已在生产现场通过。
+自动测试覆盖通信、议题、图与知识库工具、HTTP/CLI、文件 mailbox、SQLite 对账、Claude Channel transport、Codex App Server 协议、按需启动与 launcher 参数。通信目录保留原五项工具；默认独立产品显式组合十五项（五项通信、四项议题、四项图工具、两项知识库工具）。Claude/ZCode stdio MCP 入口也选择十五项产品目录，`createLaneMcpServer` 工厂本身默认五项通信目录。Router 的 `issues:false` 保留通信-only装配，不启用议题、图或知识库模块，也不会动态改变已启动 stdio MCP 的工具列表。下面的现场用例验证真实 CLI、模型 provider、浏览器和交互式 TUI 的边界，不能用 fake backend 或 HappyDOM 结果代替。既有“最后验证”保留当时版本与事实，不表示新增功能已在生产现场通过。
 
 ## 图资源：lane 更新，网页查看
 
@@ -111,6 +111,54 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
 5. 展开一个分组 A，再展开另一个顶层分组，双击它下面的子分组聚焦；看大纲，再点一个搜索结果退出聚焦（第 12 条）。
 
 **预期：** 大纲和画布的展开状态始终一致；点名字后先前展开的分组仍展开；全部展开后所有节点可见、画布适应；全部收起后只剩顶层、镜头不动、选中项还在；聚焦子分组时大纲里能直接看到它那一行，退出聚焦后 A 仍展开。请用户确认手感。
+
+## 知识库：lane 录入与检索，网页查看
+
+需求与设计见 `docs/superpowers/specs/2026-10-20-knowledge-base-requirements.md` 与 `2026-10-20-knowledge-base-design.md`。知识库是一个独立的 LLM wiki：一个主题一页，每页有标题、一行摘要和 Markdown 正文。它存在 Router 数据目录的 `knowledge.sqlite`，由 Router 同进程的知识库模块独占，不归任何 lane，所有已绑定 lane 都能读写。wiki 从空的开始，不导入规范仓、记忆或角色说明。
+
+| 工具 | 用途 |
+|---|---|
+| `lane_kb_search` | `{query, terms?, includeSuperseded?, limit?}` 关键词检索，默认 20 条、最多 100 条；`{pageId, version?}` 读一页全文和版本列表，带 `version` 读旧版本；不带参数读目录（标题和摘要），按标题排列，`afterId` 翻页，默认 200 条、最多 500 条。每种读法都带查看地址 `viewUrl`。 |
+| `lane_kb_record` | 写 wiki 的唯一入口，分两步。`step:"check"` 带要录的 `title,summary,body` 和相关 `terms`，返回 `checkId`、候选页（含已被取代的页，带标记），活跃页不超过 300 页时附整份目录，超过时只给 `indexTruncated:true`。`step:"commit"` 带 `checkId,operationKey,decision`，`decision.kind` 三选一：`update`（`pageId,baseVersion,summary,body`，可选 `title`）、`supersede`（`pageId,baseVersion,newPage`）、`create`（`title,summary,body`）。 |
+
+- **检索：** 三个字符及以上的词用 SQLite FTS5 `trigram` 做子串匹配；更短的词（如 `cc`、「拒收」）在标题、摘要、正文里做子串扫描。命中按命中词数、标题命中、更新时间排序。命中只是字面出现，是否相关由调用的 agent 看摘要和目录判断。默认不列已被取代的页。
+- **录入规则：** 一次检查只属于做检查的那条 lane，只换一次提交；没有检查、检查属于别的 lane 或已用过，返回 `CHECK_REQUIRED`，什么都不写。`baseVersion` 不是当前版本返回 `PAGE_CHANGED`（错误文字里有当前版本号），重读后重新检查。已被取代的页不能再改或再取代，返回 `PAGE_SUPERSEDED` 和取代它的页。标题去首尾空白、合并空白、忽略大小写后唯一，撞了返回 `TITLE_EXISTS` 和那一页。摘要必填，一行，不超过 200 字符。每次提交写一行版本记录；取代时新页记「新建」，旧页记「标为已被取代」并指向新页。同一 `operationKey` 同内容重试返回原结果并标 `replayed`，同键异内容返回 `OPERATION_CONFLICT`，只有成功的提交占用键。
+- **库打不开：** 库文件损坏或版本不认识时，Router 照常启动，stderr 写一行 `KB_UNAVAILABLE`，两项知识库工具和查看页返回 `KB_UNAVAILABLE`（HTTP 503）；库文件保持原样，不覆盖、不重建；通信、问答和图照常。
+
+### 旧 Codex 会话
+
+```powershell
+lane-router-lane kb search --json-file search.json
+lane-router-lane kb record --json-file record.json
+```
+
+身份来自 `CODEX_THREAD_ID`，参数与工具相同。例如检查文件 `{"step":"check","title":"lane_send 群发","summary":"一次发给多条 lane 的做法","body":"……","terms":["cc"]}`，提交文件 `{"step":"commit","checkId":"复制返回的ID","operationKey":"kb-create-1","decision":{"kind":"create","title":"lane_send 群发","summary":"一次发给多条 lane 的做法","body":"……"}}`。受限的 DSH / Native Host 工具白名单没有加知识库工具。
+
+### 查看页
+
+`/knowledge` 是目录：标题、摘要、状态、更新时间，可按关键词筛选，可勾选「含已被取代的页」；筛选走同一个检索服务（`/knowledge?q=…`）。`/knowledge/<pageId>` 是单页：正文、状态、取代指向和版本列表，点版本号看旧版本（`?version=N`）。正文用与问答页相同的方式显示 Markdown：HTML 原样显示为文字，不加载图片，不执行脚本。查看页只读，对写方法返回 405，读接口 `/knowledge/api/pages`、`/knowledge/api/pages/<pageId>`、`/knowledge/api/search` 都带 `Cache-Control: no-store`。
+
+自动测试：`tests/modules/knowledge/` 与 `tests/process/knowledge-startup.test.ts` 覆盖设计稿第五节第 1–15 条。设计稿第六节的变异各自只让预定的用例变红，其中「把 FTS 维护移到事务外」分提交前、提交后两种各做一次；另做了三个补充变异（页面把正文当 HTML 渲染、查看页接受写方法、服务导入 HTTP），分别让第 13、13、15 条变红。
+
+本地真实浏览器检查：先在自己的工作树 `npm run build`，再运行 `node tests/knowledge-browser.mjs`。它用独立临时 core 与知识库、实际的 `lane-router-lane kb` 可执行文件、真实 HTTP 和 Edge（`LANE_ROUTER_TEST_BROWSER` 可改），走一遍目录、筛选、单页、旧版本和不安全正文。截图和 `result.json` 保存在命令输出的仓外目录，可用 `KNOWLEDGE_BROWSER_EVIDENCE` 指定。模型 backend 是替身，不能据此声称真实模型客户端已验收。
+
+#### TC-KB-1：两条真实 lane 录入同一主题（第六节，尚未执行）
+
+**前提：** 共享 Router 已部署到含知识库的版本；Claude lane 已刷新工具清单，Codex lane 是部署后新开或 resume 的。部署和重启归外部维护对话。
+
+1. lane A 用 `lane_kb_record` 检查并新建一页「Router 拒收 `cc`」。
+2. lane B 录入「`cc` 已通」：先检查，确认候选里有 A 写的那页，再选 `update` 改原页。
+3. lane A 用 `lane_kb_search` 按意思找「怎么一次发给多条 lane」：先看关键词命中，命中不到再读目录。
+4. 旧 Codex 会话用 `lane-router-lane kb search --json-file` 读同一页。
+
+**预期：** 第 2 步候选里有 A 的页；更新后版本为 2，旧版本可读；第 3 步 agent 能从目录的摘要找到那页；第 4 步读到的内容与工具相同。
+
+#### TC-KB-2：用户在浏览器里看 wiki（第六节，尚未执行）
+
+1. 打开 TC-KB-1 返回的 `viewUrl` 和 `/knowledge` 目录。
+2. 点版本列表里的第 1 版，再点「看当前版」。
+
+**预期：** 目录、单页、旧版本都能看；正文排版正常；页面上没有编辑入口。请用户确认观感。
 
 ## 用户议题收件箱：使用与操作
 

@@ -16,7 +16,7 @@ export function openKnowledgeStore(path: string): KnowledgeStore {
 
 const PAGE = "id,title,summary,body,status,superseded_by AS supersededBy,version,created_at AS createdAt,updated_at AS updatedAt";
 const VERSION = "page_id AS pageId,version,title,summary,body,status,superseded_by AS supersededBy,action,lane_id AS laneId,check_id AS checkId,created_at AS createdAt";
-export interface DirectoryEntry { pageId: string; title: string; summary: string; status: PageStatus }
+export interface DirectoryEntry { pageId: string; title: string; summary: string; status: PageStatus; updatedAt: number }
 
 export class KnowledgeStore {
   constructor(private readonly db: Database.Database) {}
@@ -56,7 +56,7 @@ export class KnowledgeStore {
   }
   directory(query: { afterId?: string; limit?: number }): DirectoryEntry[] {
     const after = query.afterId === undefined ? "" : "WHERE (title_key,id)>((SELECT title_key FROM kb_page WHERE id=@afterId),@afterId)";
-    return this.db.prepare(`SELECT id AS pageId,title,summary,status FROM kb_page ${after} ORDER BY title_key,id ${query.limit === undefined ? "" : "LIMIT @limit"}`)
+    return this.db.prepare(`SELECT id AS pageId,title,summary,status,updated_at AS updatedAt FROM kb_page ${after} ORDER BY title_key,id ${query.limit === undefined ? "" : "LIMIT @limit"}`)
       .all({ ...(query.afterId === undefined ? {} : { afterId: query.afterId }), ...(query.limit === undefined ? {} : { limit: query.limit }) }) as DirectoryEntry[];
   }
   countActive(): number { return (this.db.prepare("SELECT count(*) AS n FROM kb_page WHERE status='active'").get() as { n: number }).n; }

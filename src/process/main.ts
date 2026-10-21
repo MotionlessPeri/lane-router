@@ -216,6 +216,7 @@ export async function runRouterProcess(options: {
       tools, applicationTools, codexHost: codexHub, claude: claudeHub, instanceId: randomUUID(),
       ...(options.issues === false ? {} : { issues: { service: issues?.service, attachments: issues?.attachments } }),
       ...(options.issues === false ? {} : { graphs: { service: graphs?.service } }),
+      ...(options.issues === false ? {} : { knowledge: { service: knowledge?.service } }),
       // The opener is a Windows program; elsewhere the entry is not served at all.
       ...(process.platform === "win32" ? { localOpen: { launch: launchLocal } } : {}),
       nativeHost,

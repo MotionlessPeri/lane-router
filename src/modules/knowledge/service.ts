@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { LaneAccess } from "../../router/lane-access.js";
 import type { CallerContext } from "../../router/types.js";
 import { knowledgeIndexSchema, knowledgeToolArgsSchemas, text, type RecordArgs } from "./tool-schema.js";
-import type { KnowledgeStore } from "./store.js";
+import type { DirectoryEntry, KnowledgeStore } from "./store.js";
 import { KnowledgeError, type KnowledgePage, type PageAction, type PageContent } from "./types.js";
 
 interface Options { store: KnowledgeStore; lanes: LaneAccess; now?: () => number; newId?: () => string }
@@ -26,6 +26,7 @@ function parse<T>(schema: z.ZodType<T>, input: unknown): T {
   if (!parsed.success) throw new KnowledgeError("INVALID_ARGUMENT", `INVALID_ARGUMENT: ${z.prettifyError(parsed.error)}`);
   return parsed.data;
 }
+const entry = ({ pageId, title, summary, status }: DirectoryEntry) => ({ pageId, title, summary, status });
 function snippet(page: PageContent, terms: readonly string[]): string {
   for (const field of [page.body, page.summary, page.title]) {
     const lower = field.toLowerCase();
@@ -69,10 +70,11 @@ export class KnowledgeService {
       versions: versions.map(row => ({ version: row.version, createdAt: row.createdAt, action: row.action, laneAddress: this.options.lanes.readLane(row.laneId)?.address ?? null })),
       viewPath: viewPath(page.id, version) };
   }
-  index(input: unknown) {
+  /** Agents get title, summary and status per page; the viewer also lists when each changed. */
+  index(input: unknown, withTimes = false) {
     const args = parse(knowledgeIndexSchema, input); const limit = args.limit ?? 200;
     const rows = this.store.directory({ ...args, limit: limit + 1 }); const pages = rows.slice(0, limit);
-    return { pages, nextAfterId: rows.length > pages.length ? pages.at(-1)!.pageId : null, viewPath: viewPath() };
+    return { pages: withTimes ? pages : pages.map(entry), nextAfterId: rows.length > pages.length ? pages.at(-1)!.pageId : null, viewPath: viewPath() };
   }
   private hits(terms: readonly string[], includeSuperseded: boolean, limit: number) {
     const counts = new Map<string, number>();
@@ -95,7 +97,7 @@ export class KnowledgeService {
     return this.store.transaction(() => {
       const candidates = this.hits([args.title, args.summary, ...args.terms ?? []], true, CANDIDATES); const checkId = this.newId();
       this.store.insertCheck({ checkId, laneId: identity.laneId, createdAt: this.now(), consumedAt: null, candidates: candidates.map(({ pageId, version }) => ({ pageId, version })) });
-      const index = this.store.countActive() <= INDEX_IN_CHECK ? { index: this.store.directory({}) } : { indexTruncated: true as const };
+      const index = this.store.countActive() <= INDEX_IN_CHECK ? { index: this.store.directory({}).map(entry) } : { indexTruncated: true as const };
       return { checkId, candidates, ...index, hint: HINT };
     });
   }
