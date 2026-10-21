@@ -5,6 +5,7 @@ import type { ClaudeChannelNotification, ClaudeChannelSink } from "../adapters/c
 import type { NotificationMessage } from "../router/backend.js";
 import { notificationPayload } from "../router/notification-payload.js";
 import type { CallerContext } from "../router/types.js";
+import { DUPLICATE_CHANNEL_CLOSE_CODE } from "./channel-close-codes.js";
 import type { RouterDiscovery } from "./local-server.js";
 
 /**
@@ -72,7 +73,32 @@ function requestWasNeverDelivered(error: unknown): boolean {
   return (error as { cause?: { code?: unknown } } | null | undefined)?.cause?.code === "ECONNREFUSED";
 }
 
-const RECONNECT_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 5_000];
+const RECONNECT_FIRST_MS = 500;
+const RECONNECT_MAX_MS = 30_000;
+
+/**
+ * How long a channel waits before its next attempt: doubling from half a second to half a minute.
+ * Only a connection that stayed up as long as the longest wait counts as a working one whose loss
+ * starts the waits over. Counting every successful open, as this used to, kept a channel that a
+ * Router accepts and drops at once on its first wait forever: that is the ~110 ms loop of LR-30.
+ */
+export class ReconnectBackoff {
+  private failures = 0;
+  private openedAt: number | undefined;
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  opened(): void { this.openedAt = this.now(); }
+
+  /** The wait before the next attempt; asking for it counts that attempt. */
+  next(): number {
+    if (this.openedAt !== undefined && this.now() - this.openedAt >= RECONNECT_MAX_MS) this.failures = 0;
+    this.openedAt = undefined;
+    const delay = Math.min(RECONNECT_FIRST_MS * 2 ** this.failures, RECONNECT_MAX_MS);
+    this.failures += 1;
+    return delay;
+  }
+}
 
 export async function connectClaudeChannel(resolveRouterUrl: () => Promise<string>, conversationId: string, joinKey?: string): Promise<ClaudeChannelConnection> {
   let sink: ClaudeChannelSink | undefined;
@@ -82,7 +108,7 @@ export async function connectClaudeChannel(resolveRouterUrl: () => Promise<strin
   let held: ClaudeChannelNotification | undefined;
   let socket: WebSocket | undefined;
   let retry: NodeJS.Timeout | undefined;
-  let failures = 0;
+  const backoff = new ReconnectBackoff();
   let closed = false;
 
   const open = async (): Promise<void> => {
@@ -91,7 +117,7 @@ export async function connectClaudeChannel(resolveRouterUrl: () => Promise<strin
     catch (error) { next.terminate(); throw error; }
     if (closed) { next.close(); return; }
     socket = next;
-    failures = 0;
+    backoff.opened();
     next.on("message", (raw) => {
       try {
         const frame = JSON.parse(raw.toString()) as { type?: unknown; notification?: unknown };
@@ -106,14 +132,21 @@ export async function connectClaudeChannel(resolveRouterUrl: () => Promise<strin
     // without it the channel would hold a socket that never carries another notification. The RPC
     // path resolves the same way, for the same reason — it used to take a fixed address instead,
     // which left every lane tool in this session dead after a restart the channel recovered from.
-    next.on("close", () => { if (!closed && socket === next) scheduleReconnect(); });
+    next.on("close", (code) => {
+      if (closed || socket !== next) return;
+      // Another lane MCP server of this session holds the channel. Coming back would only turn the
+      // Router's refusal into a loop, and the notifications reach the other server either way.
+      if (code === DUPLICATE_CHANNEL_CLOSE_CODE) {
+        process.stderr.write(`Lane Router refused this channel (${DUPLICATE_CHANNEL_CLOSE_CODE}): another lane MCP server in this Claude session already holds it. Not reconnecting.\n`);
+        return;
+      }
+      scheduleReconnect();
+    });
   };
 
   const scheduleReconnect = (): void => {
     if (closed || retry) return;
-    const delay = RECONNECT_DELAYS_MS[Math.min(failures, RECONNECT_DELAYS_MS.length - 1)] ?? 5_000;
-    failures += 1;
-    retry = setTimeout(() => { retry = undefined; void open().catch(() => scheduleReconnect()); }, delay);
+    retry = setTimeout(() => { retry = undefined; void open().catch(() => scheduleReconnect()); }, backoff.next());
     retry.unref();
   };
 

@@ -18,6 +18,7 @@ import { IssuesHttp, type IssuesHttpAssembly } from "../modules/issues/http.js";
 import { GraphsHttp, type GraphsHttpAssembly } from "../modules/graphs/http.js";
 import { KnowledgeHttp, type KnowledgeHttpAssembly } from "../modules/knowledge/http.js";
 import type { NativeHostService } from "./native-host-service.js";
+import { DUPLICATE_CHANNEL_CLOSE_CODE } from "./channel-close-codes.js";
 import type { DashboardOpenOverride } from "./dashboard-lane-opener.js";
 import { DashboardHttp, type DashboardLaneSetsInput } from "./dashboard-http.js";
 import { json, readJson, refuseWebPage } from "./http-json.js";
@@ -113,6 +114,13 @@ export type JoinEvent =
     readonly at: number;
     readonly reportAt: number;
     readonly deltaMs: number;
+  }
+  | {
+    /** A second lane MCP server of one session was turned away; the first channel kept serving. */
+    readonly event: "join.duplicate_refused";
+    readonly joinKey: string;
+    readonly conversationId: string;
+    readonly at: number;
   };
 
 export type JoinEventSink = (event: JoinEvent) => void;
@@ -162,6 +170,15 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     // be handed another conversation's notifications before its own hook ever reported in.
     const key = conversationId;
     const previous = this.connections.get(key);
+    // Same join key, same conversation, first channel still open: one claude.exe loaded the lane
+    // MCP server twice. Replacing would hand the first client a close it reconnects from, which
+    // displaces the second, and so on without end (LR-30). The first keeps the channel; the second
+    // is told why, and 4409 tells its client not to come back.
+    if (previous && joinKey !== undefined && previous.joinKey === joinKey && previous.socket.readyState === previous.socket.OPEN) {
+      socket.close(DUPLICATE_CHANNEL_CLOSE_CODE, "duplicate lane MCP server in one session");
+      this.emitJoin({ event: "join.duplicate_refused", joinKey, conversationId: key, at: this.now() });
+      return;
+    }
     if (previous) this.stopRenotify(previous);
     previous?.socket.close(1000, "replaced");
     this.connections.set(key, { socket, connectedAt: this.now(), joinKey, busy: false, lastLifecycleAt: null, lastLifecycleEvent: null, lastNotifiedAt: null, renotify: undefined });

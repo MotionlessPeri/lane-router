@@ -828,6 +828,24 @@ lane-router-lane issue record-tui-close --json-file ./issue-tui-close.json
 - 第 4 步 ✓：design 自己在一个长回合里（03:18 起连续 `UserPromptSubmit`、无 `Stop`）收到 `c8b1ccba`（03:19:44）、`e3bd155a`（03:25:26）两封信，日志里没有 `lane-router/design` 的 `channel.renotify`；两封在回合内被处理。
 - 第 1–2 步 ✓（受控）：探针 `lane-router/probe-b` 被结束进程后离线、信箱 2 封（04:04），04:05:51 由 `lane_restore_project` 开出恢复窗口；用户 09:13 点开发通道确认，之后不打字、不补信：09:13:26.976 `join.channel_connected` → 首帧没起回合 → 09:13:41.984 `channel.renotify laneAddress=lane-router/probe-b attempt=1 sinceFirstMs=15006` → 09:13:43.372 `UserPromptSubmit`（`lastLifecycleAt` 变非空）→ 两封 pending 被读、ack，回信 09:14:21 到达 design → 09:14:31 `Stop`。只重通知一次就起了回合，没有 attempt 2。它的记录只有 1 MB，启动窗口来自弹窗后的初始化而不是大记录；「记录大」的情形由下面生产观察 ① 覆盖。另有两条生产观察：① 部署重启后 `lane-router/inbox-impl` 带积压重连，03:18:04 `channel.renotify attempt 1`，03:18:05 它 `UserPromptSubmit`——重通知起了回合；② `lane-router/inbox` 从 03:17 起每轮 4 档都走完仍无 lifecycle，它的 transcript 显示每帧都被 Claude Code `enqueue` 却没起回合（会话停在某个交互状态），这是重通知设计上管不到的情形，不算失败。
 
+### TC-DUPLICATE-CHANNEL：一个会话挂了两个 lane MCP 服务器，只留一条频道
+
+**依据：** Vikunja LR-30，口径是 design 2026-10-21 定的。LR-24 隔离实测时，一个 Claude 会话同时加载了用户级 `lane` 和插件 `plugin:lane:lane`。两个服务器 joinKey 相同、conversationId 也相同，互相把对方挤成「replaced」，又各自立刻重连。Router 日志每 ~110 ms 一条 `join.channel_connected`，`lane_attach_current` 挂不上，直到结束 claude.exe 才停。LR-24 迁移期间，两者并存的机器一定会撞上。
+
+**行为：**
+- **Router（`ClaudeChannelHub.connect`）：** 已有一条同 joinKey、同 conversationId、仍打开的频道时，新来的那条以 close code 4409、理由 `duplicate lane MCP server in one session` 关掉，日志写一行 `join.duplicate_refused`（joinKey、conversationId）。原来那条继续服务。joinKey 不同（会话重启）、旧连接已在关闭、或客户端不带 joinKey，都照旧替换。
+- **客户端（`connectClaudeChannel`）：** 收到 4409 不再重连，stderr 写一句说明。其余断线照旧重连，等待从 0.5 秒起翻倍、封顶 30 秒。只有连上后撑过 30 秒的连接断了，等待才从头算。以前每次连上就归零，被 Router 一接就断的频道永远按第一档重连，这就是那个 ~110 ms 的循环。
+
+**自动测试：** `tests/process/duplicate-channel.test.ts` 共 6 条：hub 拒绝与照旧替换的三种情形、退避表、只认撑过 30 秒的连接、真 Router 加两个真客户端（1.5 秒内只有一条 `channel_connected`、一条 `duplicate_refused`、stderr 一句、先来的那条照样收到通知）、一接就断的频道 2.6 秒内只连 2–4 次。10 项变异全部杀掉。
+
+**步骤：**（部署后做，用一条 scratch lane）
+1. 在一个 Claude 会话里同时加载两个 lane 服务器，比如用户级 `lane` 加 LR-24 的插件，开一条 scratch lane。
+2. `router-start.log` 里这条会话只有一条 `join.channel_connected`，紧跟一行 `join.duplicate_refused`，之后不再出现新的 `channel_connected`。
+3. 在这个会话里 `lane_attach_current` 能挂上；给它发一封信，它被唤醒、处理、ack。
+
+**预期：** 三步都成立。第 2 步如果 `channel_connected` 还在一条接一条地出，就是拒绝没生效。
+**最后验证：** 尚未执行（等部署）。
+
 ## Codex remote TUI
 
 前提：已构建 `dist/`，`codex --version` 与实验性 App Server schema 检查通过。
