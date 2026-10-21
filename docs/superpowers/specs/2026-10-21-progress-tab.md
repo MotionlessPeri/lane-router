@@ -42,7 +42,7 @@ Router 启动与每次 `/dashboard/state` 时读它（文件小，直接读，�
 - 顶栏加「进度」，与「问答」并列（位置由 inbox-impl 定，交付时写明，不挤成两行；像「切号后继续」那样在真 Edge 里量 1280、681–999、≤680 三档宽度）。
 - **读配置**：第一次切到「进度」时页面 `GET /dashboard/state`，只取 `progressBoard`。读到 `null` → 显示配置说明，之后**每次切回「进度」都重读一次**（用户写好配置文件后不用刷新整页）；读到 URL → 建好 iframe 后不再重读。**不要走页面现有的 `request()`**（它每次 GET 都用返回的 `actionToken` 覆盖页面自己的；`/dashboard/state` 哪天没带这个字段，后面的写操作全会失败）：用单独的 `fetch`，或把 `request()` 改成只在返回里确实有 `actionToken` 时才覆盖——inbox-impl 二选一，交付时写明。
 - 选中「进度」时右侧内容区整块换成一个 iframe，`src` = `progressBoard.url`，高度撑满内容区；窄屏（≤680px，内容区在列表下面）给 iframe 固定高度（如 `80vh`）。切回「问答」时隐藏 iframe 而不销毁（保留用户在看板里的滚动与筛选）；在「进度」页点了左栏某条问答或「新问答」，自动切回「问答」。
-- `progressBoard` 为 `null` 时不显示 iframe，显示一段说明：「进度板还没配置：在 `~/.lane-router/progress-board.json` 写 `{ "url": "<Vikunja 看板地址>" }` 后刷新。」
+- `progressBoard` 为 `null` 时不显示 iframe，显示一段说明：「进度板还没配置：在 `~/.lane-router/progress-board.json` 写 `{ "url": "<Vikunja 看板地址>" }`，写好后再点一次「进度」。」（再点一次就会重读，不用整页刷新；页面自己也只认本机地址，与 Router 同一规则——inbox-impl 2026-10-21 交付时定。）
 - iframe 顶部一行小字：「这是 Vikunja 看板，拖动卡片、点开卡片都在里面做；在新窗口打开 ↗」（链接到同一 URL，`target=_blank`）。
 - 不做刷新按钮（Vikunja 页面自己是活的）、不做 lane 筛选控件（用 Vikunja 自己的筛选）、不把卡的内容读进问答页。
 
