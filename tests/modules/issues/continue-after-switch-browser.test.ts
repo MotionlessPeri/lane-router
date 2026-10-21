@@ -36,9 +36,8 @@ test.skipIf(!browser)("8: the buttons press the board route; each backend's lane
     return { text: await page.textContent("#continue-status"), className: await page.getAttribute("#continue-status", "class") };
   };
 
-  // The page's own words for offline and idle come with inbox-impl's change; until then a skipped
-  // reason is shown as the Router names it.
-  expect(await press("claude")).toEqual({ text: "已唤醒 1 条：alpha/open；跳过 1 条：alpha/closed（offline）。", className: "meta" });
+  // A closed lane is counted, not named: there may be dozens (spec 2026-10-21-continue-after-account-switch.md, revision).
+  expect(await press("claude")).toEqual({ text: "已唤醒 1 条：alpha/open；1 条离线，没发。", className: "meta" });
   const letter = { sender: "user:continue-after-switch", body: continueBody("claude") };
   expect(router.pending("alpha/open")).toEqual([letter]);
   // A closed lane had no turn to cut, so it gets nothing, not even a letter for later (LR-55).

@@ -1699,10 +1699,15 @@
   function continueSummary(result) {
     const skipped = result.skipped || [];
     if (!result.notified.length && !result.queued.length && skipped.length && skipped.every(item => item.reason === "sent_within_60s")) return "60 秒内刚发过一轮，这次没有再发。";
+    // Only open lanes whose turn was cut short are sent to; the idle and the closed are many, so counted.
+    const idle = skipped.filter(item => item.reason === "idle").length, offline = skipped.filter(item => item.reason === "offline").length;
+    const others = skipped.filter(item => item.reason !== "idle" && item.reason !== "offline");
     const parts = [];
     if (result.notified.length) parts.push("已唤醒 " + result.notified.length + " 条：" + result.notified.join("、"));
     if (result.queued.length) parts.push(result.queued.length + " 条没开着，信已留在它的信箱，打开时处理：" + result.queued.join("、"));
-    if (skipped.length) parts.push("跳过 " + skipped.length + " 条：" + skipped.map(item => item.address + "（" + (continueSkips[item.reason] || item.reason) + "）").join("、"));
+    if (idle) parts.push(idle + " 条在线但空闲，没发");
+    if (offline) parts.push(offline + " 条离线，没发");
+    if (others.length) parts.push("跳过 " + others.length + " 条：" + others.map(item => item.address + "（" + (continueSkips[item.reason] || item.reason) + "）").join("、"));
     return parts.length ? parts.join("；") + "。" : "没有在用的 " + (continueBackends[result.backend] || result.backend) + " lane。";
   }
   async function continueLanes(backend) {

@@ -96,6 +96,21 @@ test("8: the answer is told in three kinds, in the account page's words", async 
   expect(p.errors).toEqual([]);
 });
 
+// The 2026-10-21 revision: only open lanes whose turn was cut short are sent to; the idle and the
+// closed are counted, not named, in the account page's words.
+test("8: idle and closed lanes are counted, not named; other reasons still name their lanes", async () => {
+  const p = await open();
+  expect(await p.press("claude", { status: 200, body: { result: { backend: "claude", notified: ["project/work", "studio/solve"], queued: [],
+    skipped: [{ address: "project/a", reason: "idle" }, { address: "project/b", reason: "idle" }, { address: "project/c", reason: "offline" },
+      { address: "project/old", reason: "archived" }, { address: "task/done", reason: "finished" }] } } }))
+    .toBe("已唤醒 2 条：project/work、studio/solve；2 条在线但空闲，没发；1 条离线，没发；跳过 2 条：project/old（已归档）、task/done（已完成）。");
+  expect(await p.press("claude", { status: 200, body: { result: { backend: "claude", notified: [], queued: [],
+    skipped: [{ address: "project/a", reason: "idle" }, { address: "project/c", reason: "offline" }] } } }))
+    .toBe("1 条在线但空闲，没发；1 条离线，没发。");
+  expect(p.status().textContent).not.toContain("project/a");
+  expect(p.errors).toEqual([]);
+});
+
 test("8: a refusal shows its reason, and the next answer clears it", async () => {
   const p = await open();
   expect(await p.press("claude", { status: 403, body: { error: "action token is invalid" } })).toContain("action token is invalid");
