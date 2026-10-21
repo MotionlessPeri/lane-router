@@ -803,6 +803,7 @@ master `33e5ff3` 部署后，Router 在 `http://127.0.0.1:60690`。接口用 Pow
   - `LaneRepoLocator.commitsForLane`：没有 GitHub 远端就不跑 git；有的话在仓库根目录跑一次 `git cat-file --batch-check`，每行输入 `<id>^{commit}`，只收 `commit` 行；
   - 树、blob、不存在的 id、有歧义的前缀，git 一律回 `missing`（实测：带 `^{commit}` 时歧义也报 `missing`，原因走 stderr）；
   - 链接是 `<webUrl>/commit/<完整 sha>`，新标签页打开，悬停是完整 sha；
+  - `runGit` 写 stdin 时接住管道的 `error`：git 没读完就退出，写入会失败，失败由退出码报出来，不会变成未捕获异常把 Router 带崩。impl 预审时发现，用 node v22.14 实测过：4 MiB 输入配一个马上退出的 git，没有这行就是 `write EOF`；`tests/process/lane-repo.test.ts` 有一条照这个情形写的用例；
   - resolve 接口每次都返回 `commits` 一项，没问就是空；`commits` 和 `issue` 必须一起给。
 - **不链的情况：** 远端不是 GitHub（公司 GitLab）、没有远端、lane 没报过工作目录、别的仓库的提交号。
 

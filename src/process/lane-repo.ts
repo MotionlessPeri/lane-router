@@ -32,11 +32,16 @@ export function githubWebUrl(remote: string): string | null {
 
 type Git = (args: readonly string[], cwd: string, input?: string) => Promise<{ readonly code: number; readonly stdout: string }>;
 
-/** Git in `cwd`, `input` on its standard input; only cat-file reads it, and the rest get it closed. */
+/**
+ * Git in `cwd`, `input` on its standard input; only cat-file reads it, and the rest get it closed.
+ * Git may quit before reading all of it: the exit code already says it failed, so the failed write is
+ * dropped rather than left to bring down the Router this runs in.
+ */
 export const runGit: Git = (args, cwd, input) => new Promise((resolve) => {
   const child = execFile("git", [...args], { cwd, windowsHide: true, timeout: 5_000 }, (error, stdout) => {
     resolve({ code: error === null ? 0 : typeof error.code === "number" ? error.code : 1, stdout: String(stdout) });
   });
+  child.stdin?.on("error", () => undefined);
   child.stdin?.end(input ?? "");
 });
 

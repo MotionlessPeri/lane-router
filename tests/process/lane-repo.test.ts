@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { afterEach, expect, test, vi } from "vitest";
 
-import { githubWebUrl, laneCwd, LaneRepoLocator } from "../../src/process/lane-repo.js";
+import { githubWebUrl, laneCwd, LaneRepoLocator, runGit } from "../../src/process/lane-repo.js";
 
 // Spec docs/superpowers/specs/2026-10-21-issue-page-usability.md, section 7 (third batch): the 问答
 // page links a commit id only in the repository of the lane the issue belongs to. The Router knows
@@ -60,6 +60,16 @@ test("the checkout's top level and web address are found once per directory", as
   expect(await locator.repoForLane("beta")).toEqual({ root: "D:/work/beta", webUrl: null });
   expect(git).toHaveBeenCalledTimes(4);
 });
+
+// lane-router/impl's review of the third batch: git can quit before reading what it is given, and the
+// write to its standard input then fails. The exit code says git failed; the Router, whose core this
+// runs in, must not fall over the pipe. Four megabytes is well past what the pipe holds unread.
+test("git that quits before reading its input answers with a failure, and the failed write takes nothing down", async () => {
+  const root = mkdtempSync(join(tmpdir(), "lane-router-repo-")); roots.push(root);
+  execFileSync("git", ["init", "-q"], { cwd: root });
+  const answer = await runGit(["cat-file", "--no-such-option"], root, "x".repeat(4 * 1024 * 1024));
+  expect(answer.code).not.toBe(0);
+}, 30_000);
 
 test("against a real git checkout", async () => {
   const root = mkdtempSync(join(tmpdir(), "lane-router-repo-")); roots.push(root);
