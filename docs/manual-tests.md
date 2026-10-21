@@ -1770,7 +1770,7 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 **自动测试：**
 - `tests/process/terminal-spawn.test.ts`：新参数，并断言不再有开发标志。
 - `tests/process/channel-plugin.test.ts`：市场、插件、通道的名字；`.mcp.json` 不含机器路径；`server.mjs` 的 import 解析到仓库的 `dist`。另有一条冒烟用例：用 stdio 起 `server.mjs`，发 `initialize`，回的是 `lane-router`，并带 `claude/channel` 能力。这条要先构建，没有 `dist` 时跳过。
-- `tests/process/install-channel-plugin.test.ts`：用一个替身 `claude` 跑真的脚本，5 种情形：新机器按顺序装、已装好的全部跳过、没有白名单、托管文件还不存在、`lane-local` 指向别处。
+- `tests/process/install-channel-plugin.test.ts`：用一个替身 `claude` 跑真的脚本，7 种情形：新机器按顺序装、已装好的全部跳过、没有白名单、托管文件还不存在、`lane-local` 指向别处，以及部署时那个 bug 补的两条（lane 只装在 local、旁边另有 user 作用域的插件；`lane-local` 旁边还有别的目录市场）。
 - `claude plugin validate tools/channel-plugin` 通过。
 
 **上线顺序（每台机器）：**
@@ -1801,7 +1801,12 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
   该会话目录下没有 `mcp-logs-lane`，说明用户级服务器没有起。Router 日志里 joinKey 72768：16:06:39 `channel_connected placed`，16:07:43 `UserPromptSubmit adopted`，16:09:06 `Stop`，16:09:25 空闲时被叫醒。只有一条 `channel_connected`，没有 `duplicate_refused`。
 - 第 3 步（`open` 旧会话）：请用户自己唤醒一条旧 lane 后回话。没有从工具 shell 去开别的项目的离线 lane，因为它们信箱里还有那封「切号后继续」，一开就会跑起来干活。尚未执行。
-- 第 4 步（`rotate`）：design 收尾手头这批后给自己换一代，看新会话是不是插件工具、不弹框。尚未执行。
+- 第 4 步（`rotate`）：2026-10-21 约 17:10，design 从第 6 代换到第 7 代，成功，没有弹框。
+  - 命令行：claude.exe pid 73012，17:08:47 起，参数是 `--name "lane-router/design gen7" --channels plugin:lane@lane-local -- "<bootstrap>"`。没有 `--dangerously-load-development-channels`，也就没有弹开发通道框的条件。从进程起来到 attach 用了 28 秒，中间的 bootstrap 回合自己跑起来了。
+  - 通道：`mcp-logs-plugin-lane-lane\2026-10-21T09-08-55-544Z.jsonl` 里 09:08:59.867Z 有 `Channel notifications registered`，会话 `a66e8bd2…`。
+  - 新会话的工具前缀是 `mcp__plugin_lane_lane__`，没有任何 `mcp__lane__*`。17:09:15 attach，generation 7。
+  - 第 5 步对这条会话的核对（impl 读 `router-start.log`）：joinKey 73012 只有一条 `join.channel_connected`（17:08:59），接着 `UserPromptSubmit adopted`、`Stop adopted`，没有 `duplicate_refused`。
+  - 换代时 pending 信箱是空的。第 6 代的旧窗口（pid 31248，旧参数 `--dangerously-load-development-channels server:lane`）留给用户关。
 - 家里那台机器：安装脚本在 `65f1ba7` 修好之后才可以跑，尚未执行。
 
 ### TC-LANE-AUTONOMY：开新、唤醒、轮换不再先问用户；只有接替和改角色说明要确认
