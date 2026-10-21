@@ -1751,7 +1751,7 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 2. 让一条 lane 为当前任务唤醒一个离线 peer（`lane_restore_project` 或 `lane-router-lane open`）。它不应停下来问用户要不要唤醒，也不应顺手把整个项目都打开。
 3. 让一条长跑 lane 换代轮换（新会话 attach 回同地址、同角色）。不应要用户确认，新一代接着干原来的活。
 4. 让一条 lane 改另一条已有 lane 的角色说明，或接替一条还 live 的别的 lane。它应先向用户说明，等确认后再动。
-5. 关掉一条有 pending 信或问答、手上还有已授权任务的 lane，再恢复它。它应先处理 pending，再接着原任务，而不是停着等用户说「开工」。Claude lane 恢复时要点一下开发通道确认，见 TC-LANE-NEW 第 3 步。
+5. 关掉一条有 pending 信或问答、手上还有已授权任务的 lane，再恢复它。它应先处理 pending，再接着原任务，而不是停着等用户说「开工」。2026-10-21 LR-24 起 Claude lane 走插件通道，恢复时不再弹开发通道确认（见 TC-CHANNEL-PLUGIN）。
 
 **预期：** 五步都成立。第 4 步要是没停下来问，就说明收窄后的文字没守住接替和改角色这两道闸，要回到设计稿重议。
 **最后验证：** 2026-10-21 03:36–04:2x，Router pid 70720（master `1fae7e9`，03:17 部署），全部在部署后新开的会话里做；用户只点开发通道确认、没打字。design 用探针 lane 做：`lane-router/probe`（任务 lane 角色首句，gen 1 会话 `4e438354`、gen 2 `9c31e3b2`）、`lane-router/probe-b`（`e4a19414`）、一个手拉的无绑定会话（`140579e8`）；判据来自各会话的 transcript、`lane_directory` / `/dashboard/state` 与 `router-start.log`。
