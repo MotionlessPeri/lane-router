@@ -44,6 +44,7 @@
 - [问答页「进度」标签页：把 Vikunja 的进度看板放进问答页 —— 需求与设计](superpowers/specs/2026-10-21-progress-tab.md)
 - [问答页「进度」：按 lane 分组的待办表 —— 需求与设计](superpowers/specs/2026-10-21-progress-list.md)
 - [问答页「进度」待办表：页面（补充稿）](superpowers/specs/2026-10-21-progress-list-page.md)
+- [问答记下自己配的卡：`task`（补充稿，问答库 v5）](superpowers/specs/2026-10-21-issue-task-ref.md)
 - [Codex 宿主独立进程：需求与设计](superpowers/specs/2026-10-19-codex-host-process.md)
 
 ## 界面样稿
