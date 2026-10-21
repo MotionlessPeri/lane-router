@@ -38,6 +38,9 @@
 - [任务 lane：为一条需求临时开的 lane，做完调 `lane_finish`，Router 关窗并归档（需求与设计）](superpowers/specs/2026-10-21-task-lane.md)
 - [问答页：按项目分组（需求与设计）](superpowers/specs/2026-10-21-issue-group-by-project.md)
 - [问答页易用性：引用能跳转、短 id 看得懂、回复框把手、画 mermaid 图（需求与设计，分三批）](superpowers/specs/2026-10-21-issue-page-usability.md)
+- [Claude lane 启动免点「开发通道确认」：插件路线调研笔记](superpowers/specs/2026-10-21-channel-plugin-research.md)
+- [Claude lane 的通道改走插件：免点「开发通道确认」—— 需求与设计](superpowers/specs/2026-10-21-channel-plugin-migration.md)
+- [问答页「进度」标签页：把 Vikunja 的进度看板放进问答页 —— 需求与设计](superpowers/specs/2026-10-21-progress-tab.md)
 - [Codex 宿主独立进程：需求与设计](superpowers/specs/2026-10-19-codex-host-process.md)
 
 ## 界面样稿
