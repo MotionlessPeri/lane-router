@@ -54,7 +54,7 @@
 ### 4.3 launcher 换启动参数
 
 - `src/process/terminal-child.ts:58-59`：两处 `"--dangerously-load-development-channels", "server:lane"` → `"--channels", "plugin:lane@lane-local"`（`new` 与 `--resume` 两条路）。
-- `scripts/open-vm-lane.ps1`：同样两处。
+- `scripts/open-vm-lane.ps1`：**本次不动**（2026-10-21 impl 开工时发现、design 定）：它在 Linux 虚拟机上起 `claude`，那份 Claude Code 是独立安装、用自己的用户级 `lane` 注册，插件没装、托管白名单要写 `/etc/claude-code/managed-settings.json`、`server.mjs` 要指到虚拟机的 `dist`；照改会让虚拟机 lane 没有通道。脚本继续用开发标志，并写一句原因；虚拟机迁移见 Vikunja LR-58（用户下次要在虚拟机开 lane 时做）。
 - `tests/process/terminal-spawn.test.ts`：期望改为新参数，并断言**不再**含开发标志。
 - `rotation-launcher` / `lane-launcher` 走 terminal-child，不另改。
 - 手工起会话的写法同步进规范（4.5）。
@@ -114,7 +114,7 @@
 
 自动测试：
 
-1. `tests/process/terminal-spawn.test.ts`：`new` 与 `--resume` 两条命令行都含 `--channels plugin:lane@lane-local`，**不含** `--dangerously-load-development-channels`；`scripts/open-vm-lane.ps1` 里的两处与 TS 一致（既有的逐字节核对用例覆盖）。
+1. `tests/process/terminal-spawn.test.ts`：`new` 与 `--resume` 两条命令行都含 `--channels plugin:lane@lane-local`，**不含** `--dangerously-load-development-channels`；`scripts/open-vm-lane.ps1` 里的两处**保持**开发标志（本次不迁，见 4.3）；若既有的逐字节核对用例把它和 TS 绑在一起，改成只核对 Windows 那条路。
 2. 插件清单测试（node 组）：读取 `tools/channel-plugin` 的 `marketplace.json` / `plugin.json` / `.mcp.json`：marketplace 名 `lane-local`、条目名与 `plugin.json.name` 都是 `lane`、`channels[0].server === "lane"`、`.mcp.json` 的 `args` 为 `${CLAUDE_PLUGIN_ROOT}/server.mjs`；`server.mjs` 存在且 import 的相对路径解析到仓库里的 `dist/mcp/lane-mcp-server.js`（构建后）。
 3. `server.mjs` 冒烟（node 组，构建后跑或标 build 组）：用 stdio 起它、发 MCP `initialize`，返回 `serverVersion.name === "lane-router"` 且 `capabilities.experimental["claude/channel"]` 存在——证明间接层起的是同一个服务器。
 4. 既有 launcher / terminal-child / rotation 测试全过；`npm test`、`npm run typecheck` 全过。
@@ -139,7 +139,7 @@
 
 ## 八、边界
 
-- 只动：插件目录（`.mcp.json` 改可移植、加 `server.mjs`）、`terminal-child.ts` 两处参数、`open-vm-lane.ps1` 两处、一个安装脚本、测试、规范与文档、问答页四处文案。
+- 只动：插件目录（`.mcp.json` 改可移植、加 `server.mjs`）、`terminal-child.ts` 两处参数、`open-vm-lane.ps1` 只加一句注释（不改参数）、一个安装脚本、测试、规范与文档、问答页四处文案。
 - 不动：Router 协议与路由、lifecycle hook、Codex / zcode 后端、`lane-mcp-server.ts`（LR-30 的客户端退避是另一稿）。
 - 顺序硬约束：LR-30 → 本稿；每台机器先撤用户级注册再开新 lane。
 - 上线：build + 重启核心；可与 LR-27 / LR-28 / 问答分组同批（那批要 `-CodexHost` 与账号后台重启，本稿不额外要求）。
