@@ -125,7 +125,7 @@ source `{ kind: "user", origin: "continue-after-switch" }`（`senderLabel` 只�
 **取证**（2026-10-21 14:16–14:21，Router pid 98936 的 `router-start.log`）：按钮按下前有 lifecycle 记录的 10 条会话里，5 条最后一条是 `UserPromptSubmit` 没有跟 `Stop`（都停在 14:16:46–14:20:11，其中一条是 design 自己：收到通道通知开了一轮，被额度掐断，切号后才接着跑），另 5 条最后一条是 `Stop`、当时空闲。额度掐断的会话不发 `Stop`，所以「回合开着」（reach 的 `believedBusy`）就是「可能被掐断」的可用信号。
 
 **改法**（替换 4.1 的「全部活跃 lane」）：
-- 收件人 = 该后端 **在线**（有活动绑定且 channel 连着）**且最近一次 lifecycle 是 `UserPromptSubmit`**（没收到 `Stop`，即 `believedBusy`）的 lane。最近一次是 `Stop` 的不发；重启后还没报过 lifecycle 的（`unconfirmed`）不发；离线的不发、**不写信箱**。
+- 收件人 = 该后端 **在线**（有活动绑定且 channel 连着）**且最近一次 lifecycle 是 `UserPromptSubmit`**（没收到 `Stop`，即 `believedBusy`）的 lane。最近一次是 `Stop` 的不发；重启后还没报过 lifecycle 的（`unconfirmed`）不发；离线的不发、**不写信箱**。**Codex 例外**（impl 2026-10-21 定，design 认）：Router 看不到 Codex 的回合状态（`believedBusy` 恒为 null），「继续 Codex lane」只做在线都发，离线同样不发不写。`queued` 一类保留给「选中时在线、投递时刚好关掉」的竞态。
 - 正常跑长回合的 lane 会被误发一封，它读完 ack 即可，代价可接受。按此规则这次事件是 30 → 5。
 - 返回与两处页面回显改成三个数：**已唤醒 N 条（地址）、在线但空闲未发 M 条、离线未发 K 条**；原「已落盘等打开」一类取消。
 - 去重、`refuseWebPage`、账号后台转发、按钮不二次确认均不变。
