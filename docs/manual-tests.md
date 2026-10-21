@@ -71,7 +71,7 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
 - 邻域只收出边、把请求节点放进 `neighbors`、分组祖先只取直接父级：邻域用例变红。
 - 不存在的 ID 被静默跳过：服务层与 RPC 两条 `NODE_NOT_FOUND` 用例变红。
 
-#### TC-GRAPH-READS-1：真实 lane 用新读法改一次图（第六节，尚未执行）
+#### TC-GRAPH-READS-1：真实 lane 用新读法改一次图（第六节，已通过）
 
 **前提：** 共享 Router 已部署到含此改动的版本；Claude lane 已刷新工具清单，Codex lane 是部署后新开或 resume 的。部署和重启归外部维护对话。
 
@@ -80,12 +80,39 @@ lane-router-lane graph force-unlock --id <graphId> --expected-lock <lockId>
 
 **预期：** 提纲和邻域都明显小于整图（2026-10-20 整图约 2.6 万字符）；apply 与释放的返回里没有节点说明，只有计数、锁和更新时间；获锁仍返回整份文档。
 
-#### TC-GRAPH-READS-2：部署前开着的会话照旧能读（第六节，尚未执行）
+**最后验证（2026-10-22）：** 通过。由任务 lane `lane-router/graph-reads-check` 执行。它是 LR-24 之后新开的 Claude 会话，工具清单里有 `view` 和 `nodeIds`；Router pid 80744，端口 56635。
+
+- **偏差：** 没有在样本图上做。用户同意新建一张临时图「渲染知识图谱（验收用临时图，2026-10-22）」，graphId `9593ed5d-2d2a-451f-8995-fd6f330701c9`，内容由 `tests/fixtures/graphs/rendering.json` 分三批 apply 建成，与 fixture 逐条一致：分组 32、节点 104、边 85。
+- **字符数**（会话 transcript 里 tool_result 正文的精确长度）：
+
+  | 调用 | 字符数 |
+  |---|---|
+  | 全文读取 | 44,968 |
+  | 提纲读取 | 24,298（全文的 54%） |
+  | 邻域读取 `nodeIds:["bsdf"]`（9 条关联边） | 3,631（8%） |
+  | 获锁（含 document） | 45,267 |
+  | apply | 607 |
+  | 释放 | 370 |
+
+- **逐条核对：**
+  - 提纲里节点只有 id/label/kind/tags/groupId/summary，分组只有 id/label/parentId/summary，边只有 id/source/target/type。
+  - 邻域含 view/nodes/edges/neighbors/groups：nodes 1 个，字段齐全；edges 9 条（8 入 1 出）；neighbors 9 个，只有提纲字段，不含自身；groups 12 个，含全部祖先。
+  - 获锁带 document；apply 和释放都不带 document，释放返回 `released`、`lock: null`、`lockValid: false`。
+- **局限：** fixture 的边都没有 description，这张图测不出「提纲不带边的 description」，这一点由自动测试覆盖。
+- **收尾：** 给 bsdf 加了 tag「验收」，锁已释放，没有残留。临时图留在共享 Router 里，现在没有删图的入口。
+
+#### TC-GRAPH-READS-2：部署前开着的会话照旧能读（第六节，已通过）
 
 1. 部署前打开一条 Claude 或 Codex lane，只给 `graphId` 读样本图，保存结果。期间不要改这张图。
 2. 部署后在同一会话里再读一次，不刷新工具清单。
 
 **预期：** 两次结果相同，没有 `view` 字段。
+
+**最后验证（2026-10-20）：** 通过，有偏差。部署后由 `lane-router/graph` 在部署前开的会话里执行，工具清单是旧的。
+
+- 只给 graphId 读样本图 `9ec0d162-e49e-4594-943e-082b50730600`，返回键为 graphId/document/createdAt/updatedAt/viewPath/lock/viewUrl，没有 `view`。
+- `updatedAt`（1792466590158）和锁状态（无锁）与新 Router `GET /graphs/api/...` 的 result 一致；`viewUrl` 已指向新端口 60930。
+- **偏差：** 部署前没有先用工具读一次并存档，所以第 1 步的基线缺失。对照用的是新 Router 的 HTTP 接口，加上图的更新时间在部署前后没变。
 
 ### 大纲、全部展开与全部收起
 
