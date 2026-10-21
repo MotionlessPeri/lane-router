@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "lane": {
+      "command": "node",
+      "args": ["E:/xd_projects/lane-router/dist/mcp/lane-mcp-server.js"]
+    }
+  }
+}

@@ -67,6 +67,23 @@ lane 用 `claude --dangerously-load-development-channels server:lane` 启动，�
 4. 用管理员身份把 `C:\Program Files\ClaudeCode\managed-settings.json` 改成 `{ "channelsEnabled": true, "allowedChannelPlugins": [{ "marketplace": "lane-local", "plugin": "lane" }] }`（改前贴给用户看；注意它替换默认列表——本机没用官方 channel 插件，无损失），再起一次：看 ① 弹不弹对话框；② `/mcp` 里 `plugin:lane:lane` 是否带 channel；③ 工具名是否 `mcp__plugin_lane_lane__*`；④ 发一封信，`<channel source>` 是什么、能否唤醒；⑤ 旧的用户级 `lane` 同时在时会不会双挂。
 5. 结果贴问答 `3ade2628`，再定改名迁移（launcher 参数、权限规则、规范、Router 说明文字里的 source 标签）。
 
+## 五、实测进度
+
+- 2026-10-21 05:57：第 1、2 步做完。插件骨架在仓库 `tools/channel-plugin/`（marketplace `lane-local` → 插件 `lane`，`.mcp.json` 用绝对路径指向主检出 `dist/mcp/lane-mcp-server.js`，`plugin.json` 带 `channels: [{ server: "lane" }]`）；`claude plugin validate` 通过。为了不影响生产会话，marketplace 与插件都以 **local scope** 装在 scratch 目录 `C:\Users\xiedong\AppData\Local\Temp\claude\E--xd-projects-lane-router\96be6be9-8f0f-4739-b827-90c1f1307ee1\scratchpad\plugin-test\`（它的 `.claude\settings.local.json` 写了 `extraKnownMarketplaces.lane-local` 与 `enabledPlugins["lane@lane-local"]`），只有在那个目录开的会话才会加载这个插件。
+- 2026-10-21 09:17–09:35，第 3 步做完（三个会话 `lr24-step3` / `3b` / `3c`，都在 scratch 目录，用户只点了一次目录信任）：
+  - **不弹开发通道框**（没带 `--dangerously-load-development-channels`）。
+  - **白名单是必经一步**：MCP 日志（`%LOCALAPPDATA%\claude-cli-nodejs\Cache\<cwd>\mcp-logs-plugin-lane-lane\*.jsonl`）明写 `Channel notifications skipped: plugin lane@lane-local is not on the approved channels allowlist (use --dangerously-load-development-channels for local dev)`；同会话的用户级 `lane` 则记 `skipped: server lane not in --channels list for this session`。
+  - **工具名** `mcp__plugin_lane_lane__<tool>`，服务器名 `plugin:lane:lane`；两段 MCP instructions 与用户级逐字相同。
+  - **两套并存出事**：用户级 `lane` + 插件同时在一个会话里，Router 进入每 ~110 ms 一次的 `join.channel_connected` 循环（两会话各 2266 / 2325 行，日志 0.2 → 0.7 MB），`lane_attach_current` 报「lifecycle channel is not live」——记 LR-30（Router 拒绝同 joinKey + conversationId 的第二条连接；客户端收 4409 不重连 + 退避）。**插件路线上线前必须先修 LR-30，且迁移时必须撤掉用户级注册。**
+  - `--strict-mcp-config --mcp-config <空>` 会把插件服务器也关掉（3c 会话没有任何 lane 工具、没起 MCP 子进程），不能用它做「只挂插件」。
+- 2026-10-21 09:44–09:48，**第 4 步通过**（用户在问答 3ade2628 回「可以A」）：
+  - 09:44:26 提权（UAC，用户点）把 `C:\Program Files\ClaudeCode\managed-settings.json` 写成 `{ "channelsEnabled": true, "allowedChannelPlugins": [{ "marketplace": "lane-local", "plugin": "lane" }] }`（旧内容 `{ "channelsEnabled": true }` 备份在 design 的 scratch `managed-settings.backup.json`）。**白名单现在长期生效**；本机没用官方 channel 插件，替换默认列表无损失。
+  - 办法 A：`claude mcp remove lane -s user` → 起会话 → 看到插件 MCP 子进程后 `claude mcp add -s user lane -- node E:\xd_projects\lane-router\dist\mcp\lane-mcp-server.js` 放回（`claude mcp get lane` 核对：Scope User、stdio、node、同一路径、无 env）。用户级注册缺席 50 s（09:44:50–09:45:40），期间 `/dashboard/state` 里没有任何 lane 的 `attachedAt` 落在这个区间。
+  - 会话 `lr24-step4`（claude.exe 70808，conversation `60d6bfb9`）：09:45:11 起、只挂插件服务器（`mcp-logs-lane` 没有新文件）；**没有任何弹窗**，09:45:27 自己起回合；MCP 日志 `Channel notifications registered`（01:45:25Z）；Router `join.channel_connected` 一条、`UserPromptSubmit` adopted，无重连循环。
+  - 它用 `mcp__plugin_lane_lane__lane_attach_current` 挂成 `lane-router/lr24-probe` gen 1，09:45:44 发就绪信；design 09:47:03.986 发信 `d704aaf7` → `lastNotifiedAt` 09:47:03.995 → 09:47:09.848 `UserPromptSubmit`（没人打字）→ 09:47:21 回信：`source` 属性原文 **`plugin:lane:lane`**。
+  - 收尾：结束 70808，`lane-router-lane archive lane-router/lr24-probe`；无孤儿 MCP 进程。
+- 结论：插件路线可行且**完全免点**（目录信任框仍是每个新目录一次，与通道无关）。上线前置：LR-30（双服务器互挤）先修；迁移时撤掉用户级 `lane`。迁移稿待用户回「出稿」。
+
 ## 四、已知代价清单（给用户拍板用）
 
 - 工具全名变 `mcp__plugin_lane_lane__*`：权限放行规则、hooks、规范和文档全部改名。

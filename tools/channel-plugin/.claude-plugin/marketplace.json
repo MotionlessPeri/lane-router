@@ -1,0 +1,12 @@
+{
+  "name": "lane-local",
+  "owner": { "name": "lane-router" },
+  "description": "Local marketplace that packages the Lane Router channel as a Claude Code plugin (LR-24).",
+  "plugins": [
+    {
+      "name": "lane",
+      "source": "./plugins/lane",
+      "description": "Lane Router channel: mailbox notifications and lane tools for this machine's Router."
+    }
+  ]
+}

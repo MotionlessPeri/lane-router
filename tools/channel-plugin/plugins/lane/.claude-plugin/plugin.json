@@ -1,0 +1,9 @@
+{
+  "name": "lane",
+  "description": "Lane Router channel: mailbox notifications and lane tools for this machine's Router.",
+  "version": "0.1.0",
+  "author": { "name": "lane-router" },
+  "channels": [
+    { "server": "lane", "displayName": "Lane Router" }
+  ]
+}
