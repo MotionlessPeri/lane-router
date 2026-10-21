@@ -43,7 +43,7 @@
 
 `notified` = 目标 `online`、已发通知帧；`queued` = 目标 `offline`、信已落盘、等它下次打开才处理；`skipped` = `unbound` / `archived` / 去重等。
 
-幂等：**同一后端距上一轮不到 60 秒就不发**（滑动窗口，不按钟面分钟分桶——impl 指出分桶防不住跨秒的双击），`skipped` 里标明 `reason: "deduplicated"`；超过 60 秒照发——用户切了两次号就该发两次。无持久状态，时刻在内存。
+幂等：**同一后端距上一轮不到 60 秒就不发**（滑动窗口，不按钟面分钟分桶——impl 指出分桶防不住跨秒的双击），`skipped` 里标明 `reason: "sent_within_60s"`（impl 实际用的名字，账号页与问答页都按它显示）；超过 60 秒照发——用户切了两次号就该发两次。无持久状态，时刻在内存。
 
 ### 4.2 标准信
 
@@ -93,7 +93,7 @@ source `{ kind: "user", origin: "continue-after-switch" }`（`senderLabel` 只�
 1. `backend=claude` 只给 claude 后端的活跃 lane 发；codex 后端、已归档、无绑定的不发；返回的 `notified` + `queued` 与实际登记的信一致，`skipped` 列出未发的及原因。
 2. 信正文逐字等于 4.2（两行），发件人为 `user:continue-after-switch`；**不含** `tell` 模板的任何句子。
 3. 看板路由缺 / 错 `actionToken` → 拒绝，不发任何信；本机路由带 Origin 的请求 → 拒绝（`refuseWebPage`）；两条路由对同一 body 的结果相同。
-4. 60 秒内对同一后端第二次调用不重复发（`notified` / `queued` 为空，`skipped` 标 `deduplicated`）；时钟推过 60 秒再调用照发；不同后端互不影响。
+4. 60 秒内对同一后端第二次调用不重复发（`notified` / `queued` 为空，`skipped` 标 `sent_within_60s`）；时钟推过 60 秒再调用照发；不同后端互不影响。
 5. 在线 lane：pending 目录有文件且收到通知帧，进 `notified`；离线 lane：pending 目录有文件、**无**通知帧，进 `queued`。
 6. 账号后台转发接口：缺 `x-account-action` 防护头 → 拒绝；正常请求按 discovery 转调 Router 并原样返回三类结果。
 7. 既有 `tell`、投递、dashboard 路由、账号后台路由测试全过；`npm test`、`npm run typecheck` 全过。

@@ -84,6 +84,17 @@ lane 用 `claude --dangerously-load-development-channels server:lane` 启动，�
   - 收尾：结束 70808，`lane-router-lane archive lane-router/lr24-probe`；无孤儿 MCP 进程。
 - 结论：插件路线可行且**完全免点**（目录信任框仍是每个新目录一次，与通道无关）。上线前置：LR-30（双服务器互挤）先修；迁移时撤掉用户级 `lane`。迁移稿待用户回「出稿」。
 
+## 六、迁移稿改动范围（预收集，等用户回「出稿」后成稿）
+
+- 前置：LR-30（同会话双服务器互挤）先修；LR-27 的 `lane_finish` / `close` 上线与否不影响本迁移。
+- Router / launcher（impl）：`terminal-spawn.ts` / `terminal-child.ts` / `rotation-launcher.ts` / `scripts/open-vm-lane.ps1` 的启动参数 `--dangerously-load-development-channels server:lane` → `--channels plugin:lane@lane-local`；Router 发给 lane 的说明文字、`LANE_ROUTER_INSTRUCTIONS` 里任何写死的工具全名或 `source="lane"`；lifecycle hook 不变（joinKey 仍是 `CLAUDE_PID`）。
+- 插件打包：`tools/channel-plugin/` 随仓库；`.mcp.json` 的服务器路径要可移植（`${CLAUDE_PLUGIN_ROOT}` 相对 dist，或部署脚本按机器写绝对路径）；每台机器 `claude plugin marketplace add <repo>/tools/channel-plugin` + `claude plugin install lane@lane-local`（user scope）+ 托管白名单（家里那台要管理员）。
+- 撤用户级注册：`claude mcp remove lane -s user`（与装插件同一步做，避免并存）。
+- 改名清单（2026-10-21 09:51 grep `source="lane"` / `server:lane` / `mcp__lane__` 的实测落点）：用户 `~/.claude/settings.json` **0 处**（权限规则和 hooks 都没按工具全名写，不用改）；规范仓只有 `techniques/lane-router.md` 3 处（启动命令、故障排查）；本仓代码只有 `src/process/terminal-child.ts` 2 处、`tests/process/terminal-spawn.test.ts` 8 处、`scripts/open-vm-lane.ps1` 2 处；其余 9 处在 docs（历史稿子不改，`manual-tests.md` 与 `issue-wake-claude-confirm.md` 改口径）。通知标签 `source="lane"` → `source="plugin:lane:lane"` 在代码里没有写死的匹配。
+- 问答页（inbox 2026-10-21 列）：新问答的 lane 列表里「窗口打开后要你在窗口里点一下确认」删掉、与 Codex 写法一致；`wakeNotice` 的 Claude `launch_requested` / `skipped_launching` 里「请在窗口里点『I am using this for local development』」删掉（`CLAUDE_NUDGE` 那半句 LR-25 这批已先删）；`IssueWakeResult.backend` 保留；`2026-10-20-issue-wake-claude-confirm.md` 标「插件迁移后作废」。`techniques/lane-router-issues.md` 只写短名，不用动。
+- 上线：build + 重启核心（+ `-CodexHost` 若说明文字改了）；所有 Claude lane 关掉再 `open` 一次吃新参数（重开已免弹）。
+- 回滚：老路径不删——`claude mcp add` 回用户级注册、launcher 换回开发标志；白名单可留。
+
 ## 四、已知代价清单（给用户拍板用）
 
 - 工具全名变 `mcp__plugin_lane_lane__*`：权限放行规则、hooks、规范和文档全部改名。
