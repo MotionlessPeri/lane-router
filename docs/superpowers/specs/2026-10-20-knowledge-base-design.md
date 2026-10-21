@@ -154,7 +154,7 @@ lane-router-lane kb <search|record> --json-file <path>
 | 改或取代一个已被取代的页 | `PAGE_SUPERSEDED`，带取代它的页 |
 | 新页标题与已有页撞 | `TITLE_EXISTS`，带那一页 |
 | `operationKey` 同键异内容 | `OPERATION_CONFLICT` |
-| 参数不合 schema | `INVALID_ARGUMENT` |
+| 参数不合 schema | 经工具入口（MCP、Codex 动态工具、RPC）调用时，共享的 `ToolCatalog` 先按 schema 拦下，返回它统一的参数错误和 Zod 报错文字；直接调服务层时返回 `INVALID_ARGUMENT`。不为知识库单独改共享的工具目录（2026-10-21 实施时核实，kb-impl 回报） |
 | 知识库打不开 | `KB_UNAVAILABLE`；不清空库，其他模块不受影响 |
 | 保存成功但工具结果丢失 | 用同一 `operationKey` 重试，取回原结果，不重复写 |
 
