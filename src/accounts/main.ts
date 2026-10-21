@@ -10,9 +10,10 @@ import { AccountError, safeError } from "./contracts.js";
 import { AccountHttpServer } from "./http-server.js";
 import { ManagedAccounts } from "./managed-login.js";
 import { atomicPrivateJson, ensurePrivateDirectory } from "./private-storage.js";
+import { routerContinueClient } from "./router-continue.js";
 import { AccountSwitchService } from "./switch-service.js";
 
-export async function startAccountService(options: { root: string; executable: string; port?: number }) {
+export async function startAccountService(options: { root: string; executable: string; port?: number; routerDataRoot?: string }) {
   const root = resolve(options.root);
   await ensurePrivateDirectory(root);
   const lock = RuntimeLock.acquire(join(root, "service.lock"));
@@ -30,7 +31,9 @@ export async function startAccountService(options: { root: string; executable: s
     await claude.initialize();
     const service = new AccountSwitchService({ source: accounts, expected: ["router", "company"], desired: accounts.desiredProfileId, saveDesired: id => accounts.saveDesired(id) });
     const token = randomBytes(32).toString("base64url");
-    http = new AccountHttpServer({ accounts, service, token, claude });
+    // The Router this machine's lanes use, found the way every other local program finds it.
+    const lanes = routerContinueClient(options.routerDataRoot ?? process.env.LANE_ROUTER_DATA_ROOT ?? join(homedir(), ".lane-router"));
+    http = new AccountHttpServer({ accounts, service, token, claude, lanes });
     const url = await http.start(options.port ?? 47839);
     await atomicPrivateJson(connectionFile, { version: 1, url: url.replace("http:", "ws:") + "/consumer", token });
     let closed = false;

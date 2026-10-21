@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
 import { AccountError, safeError, type AccountIdentity, type SwitchParticipant } from "./contracts.js";
 import { PeerRpc } from "./peer-rpc.js";
+import type { LaneContinuePort } from "./router-continue.js";
 import { AccountSwitchService } from "./switch-service.js";
 
 interface AccountPageSource {
@@ -34,12 +35,15 @@ const CLAUDE_ROUTE_FIELDS: Readonly<Record<string, readonly string[]>> = {
   "/api/claude/profiles/delete": ["profileId"],
   "/api/claude/usage/refresh": ["profileId"],
 };
+const LANE_ROUTE_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  "/api/lanes/continue-after-switch": ["backend"],
+};
 
 export class AccountHttpServer {
   private readonly server = createServer((req, res) => { void this.handle(req, res); });
   private readonly peers = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   private origin = "";
-  constructor(private readonly options: { accounts: AccountPageSource; service: AccountSwitchService; token: string; claude?: ClaudeAccountSource }) {
+  constructor(private readonly options: { accounts: AccountPageSource; service: AccountSwitchService; token: string; claude?: ClaudeAccountSource; lanes?: LaneContinuePort }) {
     this.server.on("upgrade", (request, socket, head) => {
       const expected = Buffer.from(`Bearer ${options.token}`);
       const actual = Buffer.from(request.headers.authorization ?? "");
@@ -119,7 +123,8 @@ export class AccountHttpServer {
       const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       if (!body || typeof body !== "object" || Array.isArray(body)) throw new AccountError("INVALID_REQUEST");
       const fields = body as Record<string, unknown>;
-      const allowed = ROUTE_FIELDS[request.url ?? ""] ?? (this.options.claude === undefined ? undefined : CLAUDE_ROUTE_FIELDS[request.url ?? ""]);
+      const allowed = ROUTE_FIELDS[request.url ?? ""] ?? (this.options.claude === undefined ? undefined : CLAUDE_ROUTE_FIELDS[request.url ?? ""])
+        ?? (this.options.lanes === undefined ? undefined : LANE_ROUTE_FIELDS[request.url ?? ""]);
       if (allowed === undefined) { json(404, { error: "NOT_FOUND" }); return; }
       if (Object.keys(fields).some(key => !allowed.includes(key)) || (fields.profileId !== undefined && (typeof fields.profileId !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(fields.profileId)))) throw new AccountError("INVALID_REQUEST");
       const profileId = fields.profileId as string | undefined;
@@ -147,6 +152,12 @@ export class AccountHttpServer {
         case "/api/claude/usage/refresh": {
           if (!profileId) throw new AccountError("INVALID_REQUEST");
           json(200, { claude: await claude!.refreshUsage(profileId) }); return;
+        }
+        // After a switch by hand, every lane of that backend is asked to carry on. The Router does
+        // the asking; this page cannot reach it, so the request goes through here.
+        case "/api/lanes/continue-after-switch": {
+          if (fields.backend !== "claude" && fields.backend !== "codex") throw new AccountError("INVALID_REQUEST");
+          json(200, { result: await this.options.lanes!.continueAfterSwitch(fields.backend) }); return;
         }
       }
       json(202, { accepted: true });

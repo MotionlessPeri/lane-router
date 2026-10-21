@@ -6,11 +6,13 @@
   <section aria-labelledby="account-title"><div class="section-heading"><div><h2 id="account-title">已授权账号</h2><p>选择目标后点击“同步切换”才会应用，现有回合会先运行完毕。</p></div><button id="add">添加账号</button></div>
     <div id="profiles" class="profiles" role="radiogroup" aria-label="已授权账号"></div>
     <p id="empty" class="empty">还没有保存的账号。点击“添加账号”，在官方页面完成授权。</p>
-    <div class="actions"><button id="switch" class="primary" disabled>同步切换</button><button id="reauthorize" disabled>重新授权</button><button id="cancel" hidden>取消等待</button></div>
+    <div class="actions"><button id="switch" class="primary" disabled>同步切换</button><button id="reauthorize" disabled>重新授权</button><button id="cancel" hidden>取消等待</button><button id="codex-continue" type="button" title="给所有在用的 Codex lane 各发一封信：上一回合因额度停下的，接着干">继续 Codex lane</button></div>
+    <p id="codex-continue-result" class="continue-result" aria-live="polite" hidden></p>
   </section>
   <section aria-labelledby="runtime-title"><h2 id="runtime-title">运行端当前账号</h2><div id="consumers" class="consumers"></div></section>
   <section class="status-box" aria-live="polite"><h2 id="status-title">准备就绪</h2><p id="status-detail">添加或选择一个账号开始。</p><p id="action-error" class="error" hidden></p><button id="cancel-login" hidden>取消授权</button></section>
-  <section id="claude" aria-labelledby="claude-title" hidden><div class="section-heading"><div><h2 id="claude-title">Claude 账号余量</h2><p>各账号 5 小时与 7 天窗口用掉了多少。换号在 lane 窗口里 <code>/login</code>。每次刷新会用该账号发一句极短的对话，花一点点额度。</p></div><div class="heading-actions"><button id="claude-refresh-all" type="button">全部刷新</button><button id="claude-add" type="button">添加 Claude 账号</button></div></div>
+  <section id="claude" aria-labelledby="claude-title" hidden><div class="section-heading"><div><h2 id="claude-title">Claude 账号余量</h2><p>各账号 5 小时与 7 天窗口用掉了多少。换号在 lane 窗口里 <code>/login</code>。每次刷新会用该账号发一句极短的对话，花一点点额度。</p></div><div class="heading-actions"><button id="claude-refresh-all" type="button">全部刷新</button><button id="claude-add" type="button">添加 Claude 账号</button><button id="claude-continue" type="button" title="换号以后，给所有在用的 Claude lane 各发一封信：上一回合因额度停下的，接着干">继续 Claude lane</button></div></div>
+    <p id="claude-continue-result" class="continue-result" aria-live="polite" hidden></p>
     <div id="claude-profiles" class="claude-profiles"></div>
     <p id="claude-empty" class="empty" hidden>还没有 Claude 账号。点击“添加 Claude 账号”。</p>
     <div id="claude-form" class="claude-form" hidden>

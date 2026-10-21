@@ -9,6 +9,7 @@ import type { Notification } from "../router/backend.js";
 import { parseLaneAddress } from "../router/address.js";
 import type { DashboardRouter } from "../router/dashboard.js";
 import { parseTellInput, type TellInput, type TellResult } from "../router/tell.js";
+import { ContinueInputError, parseContinueInput, type ContinueBackend, type ContinueResult } from "../router/continue-after-switch.js";
 import type { CallerContext, BindingRecord, ReachSnapshot, ResolvedIdentity } from "../router/types.js";
 import { LANE_TOOL_NAMES, type LaneToolName } from "../tools/tool-contract.js";
 import type { ToolService } from "../tools/tool-service.js";
@@ -534,6 +535,12 @@ export class LocalRouterServer {
     readonly dashboardOpen?: (input: { readonly addresses: readonly string[]; readonly override: DashboardOpenOverride }) => Promise<unknown>;
     /** Creates, deletes and fills lane sets from the board; answers with every set afterwards. */
     readonly dashboardLaneSets?: (input: DashboardLaneSetsInput) => Promise<unknown>;
+    /**
+     * Mails every lane of one backend after a manual account switch. Two entries share it: the
+     * board's, for the board and the 问答 page, and a loopback one for the account service, whose
+     * page has another origin and none of the board's token.
+     */
+    readonly continueAfterSwitch?: (backend: ContinueBackend) => Promise<ContinueResult>;
   }) {
     this.host = options.host ?? "127.0.0.1";
     if (this.host !== "127.0.0.1" && this.host !== "::1") throw new Error("Router internal server must bind to loopback");
@@ -548,6 +555,7 @@ export class LocalRouterServer {
       dashboardState: options.dashboardState,
       dashboardOpen: options.dashboardOpen,
       dashboardLaneSets: options.dashboardLaneSets,
+      continueAfterSwitch: options.continueAfterSwitch,
     });
     this.issues = options.issues === undefined ? undefined : new IssuesHttp({
       ...options.issues, origin: () => this.discovery().url, actionToken: this.dashboardActionToken,
@@ -671,6 +679,16 @@ export class LocalRouterServer {
         try { input = parseTellInput(await readJson(request)); }
         catch (error) { return json(response, 400, { error: error instanceof Error ? error.message : "invalid request" }); }
         return json(response, 200, { result: await handler(input) });
+      }
+      if (request.method === "POST" && request.url === "/lanes/continue-after-switch") {
+        const handler = this.options.continueAfterSwitch;
+        if (!handler) return json(response, 404, { error: "not found" });
+        // It mails every lane of a backend, so a web page must not be able to press it from here.
+        if (refuseWebPage(request, response)) return;
+        let backend: ContinueBackend;
+        try { backend = parseContinueInput(await readJson(request)); }
+        catch (error) { return json(response, 400, { error: error instanceof ContinueInputError ? error.message : "invalid request" }); }
+        return json(response, 200, { result: await handler(backend) });
       }
       if (request.method === "POST" && request.url === "/lanes/archive") {
         const handler = this.options.archiveLane;

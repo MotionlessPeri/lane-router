@@ -92,6 +92,17 @@ $env:LANE_ROUTER_ACCOUNTS_CONNECTION = Join-Path $env:USERPROFILE '.lane-router-
 
 后台要重启到含此功能的构建，页面才有这一节。
 
+## 换号以后让 lane 接着干
+
+因额度或容量失败而停下的回合已经结束了，lane 停在那里不动。换号本身不会叫醒它，一封信才会。所以换完号以后，在账号页点「继续 Claude lane」（在 Claude 一节的标题右边）或「继续 Codex lane」（在「同步切换」那一排）：
+
+- Router 给这个后端所有在用的 lane 各发一封「切号后继续」的信。上一回合因额度停下的 lane，会从中断处继续原任务；没停下的只是 ack 这封信。哪条 lane 真卡在额度上，Router 分辨不出来（hook 不报失败原因），所以一律都发。
+- 页面列出结果：已唤醒的 lane；没开着、信已留在信箱、打开时才处理的 lane；跳过的 lane 及原因。
+- 60 秒内对同一个后端再点一次不会重发，防的是双击。
+- 问答页顶栏有同样的两个按钮。
+
+账号页和 Router 是两个进程，所以这个按钮由账号后台转给 Router 的本机接口 `/lanes/continue-after-switch`；后台每次都从 `~\.lane-router\discovery.json`（或 `LANE_ROUTER_DATA_ROOT`）找 Router，Router 换了端口也能找到。Router 没在跑时，页面显示「找不到正在运行的 Lane Router」。设计见 `docs/superpowers/specs/2026-10-21-continue-after-account-switch.md`。
+
 ## 状态与恢复
 
 | 页面情况 | 行为及处理 |

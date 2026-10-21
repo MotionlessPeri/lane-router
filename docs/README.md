@@ -34,6 +34,7 @@
 - [lane 自主性：开新、唤醒、轮换不再先问用户，新建和恢复的 lane 按有没有已授权的活开工（需求与设计）](superpowers/specs/2026-10-20-lane-autonomy-gates.md)
 - [唤醒重通知：通知帧没起回合、积压还在，就按 15 / 60 / 180 / 600 秒再送（需求与设计）](superpowers/specs/2026-10-20-wake-renotify.md)
 - [问答页：用键盘发送，可选 Ctrl+Enter 或 Enter（需求与设计）](superpowers/specs/2026-10-20-issue-send-shortcut.md)
+- [切号后继续：手动换号后一键让该后端所有活跃 lane 继续（需求与设计）](superpowers/specs/2026-10-21-continue-after-account-switch.md)
 - [Codex 宿主独立进程：需求与设计](superpowers/specs/2026-10-19-codex-host-process.md)
 
 ## 界面样稿

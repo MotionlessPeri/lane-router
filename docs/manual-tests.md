@@ -1561,6 +1561,37 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 
 **最后验证：** 尚未真机执行。
 
+### TC-CONTINUE-AFTER-SWITCH：手动换号后，一键让这个后端的 lane 接着干
+
+**依据：** 设计稿 `docs/superpowers/specs/2026-10-21-continue-after-account-switch.md`（Vikunja LR-28）。用户在问答 `3e31679c` 说：不要自动切号；手动切号后点一个按钮，给这个后端的所有活跃 lane 各发一封信，让它们继续。账号页和问答页各放一个，Claude 的一起发，Codex 的一起发。
+
+**行为：**
+- **两个入口，同一个处理函数：**
+  - 看板路由 `POST /dashboard/lanes/continue-after-switch`，看板和问答页用，要 `actionToken`；
+  - 本机路由 `POST /lanes/continue-after-switch`，账号后台转调。它只收不带 Origin 的本机程序请求，和 `/lanes/tell` 一样。账号页和 Router 来源不同，所以账号页的按钮先打到账号后台自己的 `/api/lanes/continue-after-switch`，再由后台转发。后台每次都从 `discovery.json` 重新找 Router。
+- **投递：** 不套 `tell` 的讨论模板。发件人显示为 `user:continue-after-switch`，正文是固定两行，第一行「切号后继续：用户已手动切换 <后端> 账号，额度已恢复。」，所以通知里的摘要以「切号后继续」开头。
+- **结果分三类：** `notified`（信已落盘、已发通知帧）、`queued`（lane 没开着，信已落盘，打开时处理）、`skipped`（带原因）。
+- **防双击：** 同一后端距上一轮不到 60 秒，就不再发。
+
+**自动测试：**
+- `tests/router/continue-after-switch.test.ts`：单元测试，加一条走真的 RouterCore，确认信落进 pending 目录、发了通知帧。
+- `tests/process/continue-after-switch-http.test.ts`：两个入口。
+- `tests/process/tell-guard.test.ts`：把本机路由加进了恶意网页请求那一组测试。
+- `tests/accounts/continue-after-switch.test.ts`：账号后台的路由，以及转发到真 Router。
+- `tests/accounts/continue-page.test.ts`：账号页的按钮和结果文字。
+- 变异 14 项全部杀掉。
+
+**上线要重启两样：** Router 核心，以及账号后台（它的新路由和页面在重启后才生效）。
+
+**步骤：**（部署后做）
+1. 让一条 Claude lane 因额度失败停下（或者造一次失败回合，再让它空闲），在任意一个窗口里 `/login` 换号，然后在账号页点「继续 Claude lane」。
+2. 页面显示「已唤醒 N 条：…」。停下的那条 lane 收到「切号后继续」的信，开一个回合，用新号接着原任务；没停下的 Claude lane 只是 ack 了这封信；Codex lane 没收到信。
+3. 60 秒内再点一次：页面显示「60 秒内刚发过一轮，这次没有再发」，各 lane 没再收到新信。
+4. 关掉一条 Claude lane 再点一次（等过了 60 秒）：它出现在「没开着，信已留在它的信箱」里，下次打开时处理这封信。
+5. 在问答页顶栏按同样的步骤点一次（问答页这两个按钮归 inbox-impl）。
+
+**最后验证：** 尚未执行（等部署）。
+
 ## 从 lane 之外捎话：`lane-router-lane tell`
 
 2026-10-17 的[投递底座抽取](superpowers/plans/2026-10-17-tell-user-delivery.md)保留本节 tell 对外验收。新增进程内 `UserMessageDelivery` 的完整正文、重试、ack 后重试、文件先写恢复和归档/地址复用由隔离 fixture 自动验证；它不提供公开 CLI/HTTP/MCP。新 tell 的内部请求键与 `lane_send` 隔离，新文件另带稳定 `target_lane_id` 恢复头；内部编码不是对外契约，下面历史现场记录仍描述当时构建。

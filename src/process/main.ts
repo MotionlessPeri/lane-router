@@ -22,6 +22,7 @@ import { NotificationPump } from "../router/notification-pump.js";
 import { RouterCore } from "../router/router-core.js";
 import { RouterStateStore } from "../router/state-store.js";
 import { TellAdapter } from "../router/tell.js";
+import { ContinueAfterSwitch } from "../router/continue-after-switch.js";
 import { ClaudeSessionLocator } from "./claude-session-locator.js";
 import { ConversationRestorer } from "./conversation-restorer.js";
 import { DashboardLaneOpener } from "./dashboard-lane-opener.js";
@@ -173,6 +174,7 @@ export async function runRouterProcess(options: {
       delivery: core, latestProjectCwd: (project) => state.latestProjectCwd(project),
       newRequestKey: () => `tell:${randomUUID()}`,
     });
+    const continuer = new ContinueAfterSwitch({ delivery: core, lanes: () => core.listActiveLanes() });
     const dashboardOpener = new DashboardLaneOpener({
       state,
       restore,
@@ -238,6 +240,7 @@ export async function runRouterProcess(options: {
       archiveLane: (address) => core.archiveLane(address),
       listArchivedLanes: (project) => core.listArchivedLanes(project),
       tell: (input) => teller.tell(input),
+      continueAfterSwitch: (backend) => continuer.continue(backend),
       ...(zcodeDriver === undefined ? {} : {
         zcodeSpawnLane: (input) => spawnHeadlessZcodeLane({
           driver: zcodeDriver,

@@ -24,6 +24,8 @@
     CLAUDE_UNAVAILABLE: "后台找不到 claude 程序，可用环境变量 CLAUDE_EXE 指定。",
     INVALID_PROFILE: "这个账号已经不在了，请看刷新后的列表。",
     STORAGE_UNAVAILABLE: "后台无法写入它的受限数据目录。",
+    ROUTER_UNAVAILABLE: "找不到正在运行的 Lane Router，请确认 Router 已经启动。",
+    ROUTER_REFUSED: "Lane Router 没有接受这次请求，它可能还是旧版本，需要重启后再试。",
   };
   const describe = code => errors[code] || "操作未完成，请重试。";
   async function action(path, body = {}) {
@@ -158,6 +160,30 @@
     $("claude-add").disabled = busy; $("claude-submit").disabled = busy;
     $("claude-refresh-all").disabled = busy || claude.profiles.length === 0;
   }
+  /* After switching an account by hand, a lane whose last turn stopped on quota sits idle until
+     something wakes it. The Router mails every lane of the backend, and this says what became of
+     each: woken, left in a closed lane's mailbox for when it opens, or skipped and why. */
+  const backendNames = { claude: "Claude", codex: "Codex" };
+  const skipReasons = { archived: "已归档", unbound: "没有对话", missing: "不存在", delivery_failed: "没能写进信箱" };
+  function continueSummary(result) {
+    const skipped = result.skipped || [];
+    if (!result.notified.length && !result.queued.length && skipped.length && skipped.every(item => item.reason === "sent_within_60s")) return "60 秒内刚发过一轮，这次没有再发。";
+    const parts = [];
+    if (result.notified.length) parts.push(`已唤醒 ${result.notified.length} 条：${result.notified.join("、")}`);
+    if (result.queued.length) parts.push(`${result.queued.length} 条没开着，信已留在它的信箱，打开时处理：${result.queued.join("、")}`);
+    if (skipped.length) parts.push(`跳过 ${skipped.length} 条：${skipped.map(item => `${item.address}（${skipReasons[item.reason] || item.reason}）`).join("、")}`);
+    return parts.length ? parts.join("；") + "。" : `没有在用的 ${backendNames[result.backend] || result.backend} lane。`;
+  }
+  async function continueLanes(backend) {
+    const button = $(`${backend}-continue`), shown = $(`${backend}-continue-result`);
+    button.disabled = true; shown.hidden = true; shown.classList.remove("error");
+    try {
+      const response = await fetch("/api/lanes/continue-after-switch", { method: "POST", headers: { "Content-Type": "application/json", "X-Account-Action": "1" }, body: JSON.stringify({ backend }) });
+      const answer = await response.json(); if (!response.ok) throw new Error(describe(answer.error));
+      shown.textContent = continueSummary(answer.result);
+    } catch (error) { shown.textContent = error instanceof Error ? error.message : "后台连接失败。"; shown.classList.add("error"); }
+    finally { shown.hidden = false; button.disabled = false; }
+  }
   async function poll(repeat = true) {
     try { const response = await fetch("/api/state"); if (!response.ok) throw new Error(); state = await response.json(); $("connection").textContent = "本机后台已连接"; render(); }
     catch {
@@ -180,6 +206,8 @@
   $("switch").onclick = () => void action("/api/switch", { profileId: selected });
   $("cancel").onclick = () => void action("/api/switch/cancel");
   $("cancel-login").onclick = () => void action("/api/login/cancel");
+  $("claude-continue").onclick = () => void continueLanes("claude");
+  $("codex-continue").onclick = () => void continueLanes("codex");
   $("claude-add").onclick = () => { $("claude-form").hidden = false; $("claude-email").focus(); };
   $("claude-refresh-all").onclick = () => { for (const profile of state?.claude?.profiles ?? []) void refreshUsage(profile.id); };
   $("claude-form-cancel").onclick = () => { $("claude-email").value = ""; $("claude-token").value = ""; $("claude-form").hidden = true; };

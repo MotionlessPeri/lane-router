@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 
+import { ContinueInputError, parseContinueInput, type ContinueBackend, type ContinueResult } from "../router/continue-after-switch.js";
 import type { DashboardRouter } from "../router/dashboard.js";
 import type { DashboardOpenOverride } from "./dashboard-lane-opener.js";
 import { json, readPageAction } from "./http-json.js";
@@ -21,6 +22,8 @@ export class DashboardHttp {
     readonly dashboardState?: (router: DashboardRouter) => unknown;
     readonly dashboardOpen?: (input: { readonly addresses: readonly string[]; readonly override: DashboardOpenOverride }) => Promise<unknown>;
     readonly dashboardLaneSets?: (input: DashboardLaneSetsInput) => Promise<unknown>;
+    /** Mails every lane of one backend after a manual account switch; the 问答 page presses it too. */
+    readonly continueAfterSwitch?: (backend: ContinueBackend) => Promise<ContinueResult>;
   }) {}
 
   /** Returns false without reading the body when this method and URL belong to another entry. */
@@ -40,7 +43,7 @@ export class DashboardHttp {
         if (!this.options.dashboardState) json(response, 404, { error: "not found" });
         else {
           const snapshot = this.options.dashboardState(this.options.router());
-          json(response, 200, this.options.dashboardOpen === undefined && this.options.dashboardLaneSets === undefined
+          json(response, 200, this.options.dashboardOpen === undefined && this.options.dashboardLaneSets === undefined && this.options.continueAfterSwitch === undefined
             ? snapshot
             : { ...(snapshot as object), actionToken: this.options.actionToken });
         }
@@ -56,7 +59,23 @@ export class DashboardHttp {
       await this.laneSets(request, response);
       return true;
     }
+    if (request.method === "POST" && request.url === "/dashboard/lanes/continue-after-switch") {
+      await this.continueAfterSwitch(request, response);
+      return true;
+    }
     return false;
+  }
+
+  private async continueAfterSwitch(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const handler = this.options.continueAfterSwitch;
+    if (!handler) return json(response, 404, { error: "not found" });
+    const body = await this.readDashboardAction(request, response, "continue-after-switch");
+    if (body === undefined) return;
+    const { actionToken: _token, ...input } = body;
+    let backend: ContinueBackend;
+    try { backend = parseContinueInput(input); }
+    catch (error) { return json(response, 400, { error: error instanceof ContinueInputError ? error.message : "invalid request" }); }
+    return json(response, 200, { result: await handler(backend) });
   }
 
   private async open(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -101,7 +120,7 @@ export class DashboardHttp {
    * They keep out a page on another site, which can send none of the four; they do not try to
    * keep out a process on this machine. Answers the body, or undefined once it has refused.
    */
-  private async readDashboardAction(request: IncomingMessage, response: ServerResponse, action: "open" | "lane-sets"): Promise<Record<string, unknown> | undefined> {
+  private async readDashboardAction(request: IncomingMessage, response: ServerResponse, action: "open" | "lane-sets" | "continue-after-switch"): Promise<Record<string, unknown> | undefined> {
     return readPageAction(request, response, { origin: this.options.origin, actionToken: this.options.actionToken, action });
   }
 }
