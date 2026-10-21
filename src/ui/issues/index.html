@@ -101,6 +101,8 @@
   .entry-body .local-path { display: inline; min-height: 0; margin: 0; padding: 0 3px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--blue); font: inherit; line-height: inherit; text-align: left; overflow-wrap: anywhere; }
   .entry-body .local-path:hover { background: var(--hover); }
   .entry-body .local-path code { color: inherit; }
+  /* Another issue named in an entry: the reference as written, then that issue's title, quieter. */
+  .issue-ref-title { margin-left: 2px; color: var(--muted); font-size: .85em; }
   /* Files under an entry: images as thumbnails that open full size, others by name. */
   .entry-files { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 8px; }
   .entry-files img { display: block; max-height: 160px; max-width: 100%; border: 1px solid var(--line); border-radius: 6px; }
@@ -299,8 +301,75 @@
     if (markdown && !plain) body.innerHTML = markdown.render(text);
     else { body.classList.add("plain-text"); body.textContent = text; }
     if (markdown) linkLocalPaths(body);
+    markIssueRefs(body);
     body.querySelectorAll("pre").forEach(addCopyButton);
     return body;
+  }
+  // An issue's whole ID, or eight hex digits standing alone as a word; only the Router says whether
+  // one names an issue (spec 2026-10-21-issue-page-usability.md, section one).
+  const ISSUE_REF = /(?<![0-9a-zA-Z-])(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8})(?![0-9a-zA-Z-])/gi;
+  const WHOLE_REF = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8})$/i;
+  /**
+   * Marks what might be an issue reference, where a local path would be looked for: running text, and
+   * inline code that holds nothing else. Code blocks and links are left alone.
+   */
+  function markIssueRefs(body) {
+    const candidate = ref => { const span = node("span", "issue-ref-candidate"); span.dataset.ref = ref.toLowerCase(); return span; };
+    for (const code of body.querySelectorAll("code")) {
+      const ref = code.textContent.trim();
+      if (code.closest("pre, a, .local-path") || !WHOLE_REF.test(ref)) continue;
+      const span = candidate(ref); code.replaceWith(span); span.append(code);
+    }
+    const texts = [];
+    for (let walker = document.createTreeWalker(body, document.defaultView.NodeFilter.SHOW_TEXT), text; (text = walker.nextNode());) {
+      if (!text.parentElement.closest("pre, code, a, .local-path, .issue-ref-candidate")) texts.push(text);
+    }
+    for (const text of texts) {
+      const parts = []; let end = 0;
+      for (const match of text.data.matchAll(ISSUE_REF)) {
+        const span = candidate(match[0]); span.textContent = match[0];
+        parts.push(text.data.slice(end, match.index), span); end = match.index + match[0].length;
+      }
+      if (parts.length) text.replaceWith(...parts, text.data.slice(end));
+    }
+  }
+  /**
+   * What each reference named, once asked: the issue, or null for none. A failed lookup remembers
+   * nothing, so the next render asks again. Each render asks once, for what it has not asked before.
+   */
+  const issueRefs = new Map(), refsAsking = new Set();
+  async function resolveIssueRefs() {
+    upgradeIssueRefs();
+    const asking = [...new Set([...document.querySelectorAll(".issue-ref-candidate")].map(span => span.dataset.ref))]
+      .filter(ref => !issueRefs.has(ref) && !refsAsking.has(ref));
+    for (let start = 0; start < asking.length; start += 100) {
+      const refs = asking.slice(start, start + 100);
+      for (const ref of refs) refsAsking.add(ref);
+      try {
+        const { result } = await request("/issues/api/resolve?refs=" + refs.join(","));
+        for (const ref of refs) issueRefs.set(ref, null);
+        for (const item of result.items) issueRefs.set(item.ref.toLowerCase(), item);
+      } catch { /* left as text until a later render asks again */ }
+      finally { for (const ref of refs) refsAsking.delete(ref); }
+    }
+    upgradeIssueRefs();
+  }
+  /** A known reference becomes a link that opens its issue here, its title after it. */
+  function upgradeIssueRefs() {
+    for (const span of document.querySelectorAll(".issue-ref-candidate")) {
+      const item = issueRefs.get(span.dataset.ref);
+      if (!item) continue;
+      const link = node("a", "issue-ref"); link.setAttribute("href", "?issue=" + item.id);
+      link.title = item.title + " · " + (item.ownerAddress ?? "lane 已不存在") + " · " + (item.status === "closed" ? "已结束" : "进行中");
+      link.append(...span.childNodes);
+      // A click with a modifier, or another button, is the browser's: a new tab, a new window.
+      link.addEventListener("click", event => {
+        if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+        event.preventDefault(); selectIssue(item.id, "push");
+      });
+      const characters = [...item.title];
+      span.replaceWith(link, node("span", "issue-ref-title", "（" + (characters.length > 24 ? characters.slice(0, 24).join("") + "…" : item.title) + "）"));
+    }
   }
   // A whole drive-letter absolute path, X:\… or X:/…; network, device and relative paths never match.
   const DRIVE_PATH = /^[A-Za-z]:[\\/][^<>:"|?*\u0000-\u001f]*$/;
@@ -567,9 +636,12 @@
   /**
    * Opening an issue starts its history afresh: entries are rebuilt, and where it opens is decided
    * by the first detail fetched after this, whose reading position predates anything this opening
-   * marks read.
+   * marks read. The address bar names it too: a link followed is a step back can undo ("push"), a
+   * pick from the list is not ("replace"), and back or forward, or an address opened, is already
+   * there ("none").
    */
-  function selectIssue(id) {
+  function selectIssue(id, address = "replace") {
+    showIssueAddress(id, address);
     if (shownView !== "issues") showView("issues");
     if (composing) { composing = false; renderNew(); }
     const region = byId("history-region");
@@ -586,6 +658,39 @@
     byId("issue-detail").removeAttribute("data-issue-id");
     if (view.detail) { renderDetail(id); region.scrollTop = view.scrollTop ?? region.scrollHeight; }
     void loadDetail(id, false, true);
+  }
+  function showIssueAddress(id, how) {
+    const history = document.defaultView.history, address = id ? "?issue=" + id : document.defaultView.location.pathname;
+    if (how === "push") history.pushState({ issue: id }, "", address);
+    else if (how === "replace") history.replaceState({ issue: id }, "", address);
+  }
+  /** The detail area with no issue in it, saying why when there is a reason. */
+  function showNoIssue(text = "选择一个议题，查看完整讨论。") {
+    if (composing) { composing = false; renderNew(); }
+    if (selectedId && byId("issue-detail").dataset.issueId === selectedId) viewFor(selectedId).scrollTop = byId("history-region").scrollTop;
+    selectedId = null; historyFor = null; sight?.observer.disconnect(); sight = null;
+    byId("issue-detail").removeAttribute("data-issue-id");
+    byId("detail-empty").textContent = text; byId("detail-empty").hidden = false; byId("detail-content").hidden = true;
+    renderList();
+  }
+  /**
+   * The issue the address names: on loading the page, and on back or forward. Eight digits are looked
+   * up first, and once found the whole ID takes their place in the address.
+   */
+  async function openFromAddress(loading) {
+    const written = new URLSearchParams(document.defaultView.location.search).get("issue");
+    if (written === null || !WHOLE_REF.test(written)) { if (!loading) showNoIssue(); return; }
+    let id = written.toLowerCase();
+    if (id.length === 8) {
+      try {
+        const { result } = await request("/issues/api/resolve?refs=" + id);
+        const found = result.items[0];
+        issueRefs.set(id, found ?? null);
+        if (!found) { showNoIssue("没找到问答 " + written); return; }
+        id = found.id;
+      } catch (error) { showNoIssue("没能查找问答 " + written + "：" + error.message); return; }
+    }
+    selectIssue(id, id === written ? "none" : "replace");
   }
   /**
    * Where an issue opens. With unread lane content loaded, a divider goes in front of the first of
@@ -750,6 +855,7 @@
       entryFacts.set(article, signature);
       article.querySelector(".entry-facts").replaceChildren(...facts.map(([className, text]) => node("div", className, text)));
     }
+    void resolveIssueRefs();
   }
   function entryArticle(entry) {
     const end = node("div", "entry-end"); end.setAttribute("aria-hidden", "true");
@@ -1201,6 +1307,7 @@
     });
   }
   function openNew() {
+    showIssueAddress(null, "replace");
     if (shownView !== "issues") showView("issues");
     if (composing) { byId("new-body").focus(); return; }
     if (selectedId && byId("issue-detail").dataset.issueId === selectedId) viewFor(selectedId).scrollTop = byId("history-region").scrollTop;
@@ -1426,7 +1533,9 @@
   // An operation in flight or of unknown outcome holds a key a reload would lose, so leaving asks
   // first. A draft alone does not: it is kept in storage.
   document.defaultView.addEventListener("beforeunload", event => { if (fresh.operation || [...views.values()].some(view => view.operation)) event.preventDefault(); });
+  document.defaultView.addEventListener("popstate", () => { void openFromAddress(false); });
   void loadList();
+  void openFromAddress(true);
   setInterval(() => { if (document.visibilityState !== "hidden") refresh(); }, 5000);
 })();
 </script>
