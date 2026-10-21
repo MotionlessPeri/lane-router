@@ -133,7 +133,11 @@
   #reply-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #reply-body { width: 100%; height: calc(2 * 1.65em + 22px); min-height: calc(2 * 1.65em + 22px); padding: 11px; resize: vertical; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
-  #compose[data-expanded="true"] #reply-body { height: calc(6 * 1.65em + 22px); }
+  #compose[data-expanded="true"] #reply-body:not([data-sized]) { height: calc(6 * 1.65em + 22px); }
+  /* Drag up for a taller box: on a wide screen the box's foot is pinned, so its top edge is what moves. */
+  .reply-handle { display: flex; align-items: center; justify-content: center; height: 8px; margin-bottom: -6px; cursor: row-resize; touch-action: none; }
+  .reply-handle::before { content: ""; width: 36px; height: 3px; border-radius: 2px; background: var(--line); }
+  .reply-handle:hover::before, .reply-handle:focus-visible::before { background: var(--muted); }
   .compose-bottom { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
   #reply-question { flex: 1 1 180px; min-width: 0; padding: 5px 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
   .compose-bottom #send-reply { margin-left: auto; }
@@ -173,6 +177,7 @@
     #detail-header, #compose-region { flex: none; }
     #history-region { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
     #compose-region { max-height: 50%; overflow-y: auto; }
+    #reply-body { resize: none; }
     #new-issue-view { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 16px 32px; }
     #progress-view { flex: 1 1 0; min-height: 0; padding: 8px 32px 16px; }
     #progress-view iframe { flex: 1 1 0; height: auto; min-height: 0; }
@@ -182,6 +187,8 @@
     .list-panel { margin: 0 -14px; padding: 8px 14px 12px; }
     .detail-head { flex-wrap: wrap; }
     #reply-body, #new-body, #new-title { font-size: 16px; }
+    /* The page scrolls as a whole here, so the box's own corner handle is the natural one. */
+    .reply-handle { display: none; }
   }
   @media (pointer: coarse) { button, select { min-height: 44px; } }
 </style>
@@ -943,6 +950,7 @@
       const form = node("form"); form.id = "reply-form";
       const bodyLabel = node("label", "visually-hidden", "继续讨论"); bodyLabel.htmlFor = "reply-body";
       const textarea = node("textarea"); textarea.id = "reply-body"; textarea.placeholder = "写下回复，或直接说哪里还不清楚…";
+      const handle = replyHandle(textarea);
       if (!view.draft) view.draft = storedDraft(id);
       textarea.value = view.draft;
       textarea.addEventListener("input", () => { if (!view.operation) { view.draft = textarea.value; storeDraft(id, view.draft); } sizeCompose(id); showTargetHint(id); });
@@ -966,7 +974,7 @@
       const { picker, button } = filePicker("reply");
       send.title = sendKeys[sendKey];
       bottom.append(questionLabel, select, hint, button, node("span", "meta", "保存后交给原 lane，无需回 TUI 重复。"), sendKeyChoice("reply"), send);
-      form.append(bodyLabel, textarea, view.tray.element, picker, bottom);
+      form.append(bodyLabel, handle, textarea, view.tray.element, picker, bottom);
       acceptFiles(form, textarea, picker, () => view.tray);
       sendOnKey(textarea, form, "send-reply");
       form.addEventListener("submit", event => { event.preventDefault(); startReply(id); }); host.append(form);
@@ -1181,6 +1189,54 @@
     const button = node("button", null, "添加文件"); button.type = "button"; button.id = id + "-add-file";
     button.addEventListener("click", () => picker.click());
     return { picker, button };
+  }
+  /**
+   * The reply box's height as chosen with the handle on its top edge: on a wide screen the box sits at
+   * the window's foot, so it grows upward (spec 2026-10-21-issue-page-usability.md, section three).
+   * One height for every issue, kept in this browser; none chosen means the two- and six-line sizes.
+   */
+  const REPLY_HEIGHT = "lane-router.issues.reply-height";
+  let replyHeight = /^[1-9]\d*$/.test(stored(REPLY_HEIGHT)) ? Number(stored(REPLY_HEIGHT)) : null;
+  /** Between two lines and 60% of the window; a step of the keyboard is one line. */
+  function replyLimits(textarea) {
+    const line = 1.65 * (parseFloat(document.defaultView.getComputedStyle(textarea).fontSize) || 14);
+    return { line, least: Math.round(2 * line + 22), most: Math.round(document.defaultView.innerHeight * 0.6) };
+  }
+  function sizeReply(textarea, height) {
+    const { least, most } = replyLimits(textarea);
+    replyHeight = Math.min(Math.max(Math.round(height), least), most);
+    textarea.dataset.sized = "user"; textarea.style.height = replyHeight + "px";
+  }
+  function replyHandle(textarea) {
+    const handle = node("div", "reply-handle"); handle.tabIndex = 0;
+    handle.setAttribute("role", "separator"); handle.setAttribute("aria-orientation", "horizontal"); handle.setAttribute("aria-label", "调整回复框高度");
+    // As drawn: a box nobody sized has the two- or six-line height its expanding rule gives it.
+    const current = () => {
+      if (textarea.dataset.sized) return parseFloat(textarea.style.height);
+      const { line } = replyLimits(textarea);
+      return textarea.getBoundingClientRect().height || Math.round((byId("compose").dataset.expanded === "true" ? 6 : 2) * line + 22);
+    };
+    handle.addEventListener("pointerdown", event => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const startY = event.clientY, startHeight = current();
+      handle.setPointerCapture?.(event.pointerId);
+      const move = moved => sizeReply(textarea, startHeight + (startY - moved.clientY));
+      const end = () => {
+        document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", end); document.removeEventListener("pointercancel", end);
+        store(REPLY_HEIGHT, String(replyHeight));
+      };
+      document.addEventListener("pointermove", move); document.addEventListener("pointerup", end); document.addEventListener("pointercancel", end);
+    });
+    handle.addEventListener("keydown", event => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      sizeReply(textarea, current() + (event.key === "ArrowUp" ? 1 : -1) * replyLimits(textarea).line);
+      store(REPLY_HEIGHT, String(replyHeight));
+    });
+    handle.addEventListener("dblclick", () => { replyHeight = null; delete textarea.dataset.sized; textarea.style.height = ""; store(REPLY_HEIGHT, ""); });
+    if (replyHeight !== null) sizeReply(textarea, replyHeight);
+    return handle;
   }
   /**
    * The reply area opens to about six lines while it is in use — focused, holding a draft, or with
