@@ -117,3 +117,17 @@ source `{ kind: "user", origin: "continue-after-switch" }`（`senderLabel` 只�
 - 只改 Router 核心的两条路由、账号后台一条转发接口与账号页、问答页顶栏；不改账号切换本身；不改任何 lane 工具或 instructions。
 - 上线：重启核心 + 主检出 build + 重启账号后台（用户同意后）；不需要 `-CodexHost`。可与 LR-27 一批（LR-27 要 `-CodexHost`，一批就整体带）。
 - 后续若 hook 能报失败原因，再把「全发」收窄为「只发卡住的」，另起小稿。
+
+## 九、修订 2026-10-21：只发在线且回合开着的 lane（Vikunja LR-55）
+
+**起因**：用户上线后按了一次「继续 Claude lane」（问答 `8565b38a`）：30 条在线 lane 被唤醒、57 条离线 lane 各留一封信，用户说「能不能改成只给在线的发啊？这个消耗有点过于大了」。离线 lane 没有被额度打断的回合，留信只会在它下次打开时白跑一轮；在线但空闲的 lane 收到信也只是读一遍、ack 掉。
+
+**取证**（2026-10-21 14:16–14:21，Router pid 98936 的 `router-start.log`）：按钮按下前有 lifecycle 记录的 10 条会话里，5 条最后一条是 `UserPromptSubmit` 没有跟 `Stop`（都停在 14:16:46–14:20:11，其中一条是 design 自己：收到通道通知开了一轮，被额度掐断，切号后才接着跑），另 5 条最后一条是 `Stop`、当时空闲。额度掐断的会话不发 `Stop`，所以「回合开着」（reach 的 `believedBusy`）就是「可能被掐断」的可用信号。
+
+**改法**（替换 4.1 的「全部活跃 lane」）：
+- 收件人 = 该后端 **在线**（有活动绑定且 channel 连着）**且最近一次 lifecycle 是 `UserPromptSubmit`**（没收到 `Stop`，即 `believedBusy`）的 lane。最近一次是 `Stop` 的不发；重启后还没报过 lifecycle 的（`unconfirmed`）不发；离线的不发、**不写信箱**。
+- 正常跑长回合的 lane 会被误发一封，它读完 ack 即可，代价可接受。按此规则这次事件是 30 → 5。
+- 返回与两处页面回显改成三个数：**已唤醒 N 条（地址）、在线但空闲未发 M 条、离线未发 K 条**；原「已落盘等打开」一类取消。
+- 去重、`refuseWebPage`、账号后台转发、按钮不二次确认均不变。
+
+**验收改动**：第 5 条改为「在线且回合开着 → `notified`；在线且空闲 → `idle`（不写文件、不发帧）；离线 → `offline`（不写文件）」；第 7、8 条的三类显示随之改；变异加「空闲 lane 也进 `notified` → 5 红」「离线 lane 写了文件 → 5 红」。真机：下次额度事件后按一次，看结果里的三个数和被唤醒 lane 的 transcript，记 `docs/manual-tests.md`。

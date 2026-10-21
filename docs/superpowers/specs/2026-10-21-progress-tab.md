@@ -40,7 +40,7 @@ Router 启动与每次 `/dashboard/state` 时读它（文件小，直接读，�
 ### 4.2 标签页（inbox-impl）
 
 - 顶栏加「进度」，与「问答」并列（位置由 inbox-impl 定，交付时写明，不挤成两行；像「切号后继续」那样在真 Edge 里量 1280、681–999、≤680 三档宽度）。
-- **读配置**：第一次切到「进度」时页面 `GET /dashboard/state`，只取 `progressBoard`。读到 `null` → 显示配置说明，之后**每次切回「进度」都重读一次**（用户写好配置文件后不用刷新整页）；读到 URL → 建好 iframe 后不再重读。**不要走页面现有的 `request()`**（它每次 GET 都用返回的 `actionToken` 覆盖页面自己的；`/dashboard/state` 哪天没带这个字段，后面的写操作全会失败）：用单独的 `fetch`，或把 `request()` 改成只在返回里确实有 `actionToken` 时才覆盖——inbox-impl 二选一，交付时写明。
+- **读配置**（2026-10-21 随易用性第二批修订，原稿是「第一次切到「进度」才读」）：页面**一启动就** `GET /dashboard/state` 一次，只取 `progressBoard`；「进度」标签页和正文里的 `LR-n` 卡号链接共用这一次结果（卡号链接渲染时就要看板地址，等到切标签页才读就来不及）。读到 `null` 或请求失败 → 「进度」显示配置说明，之后**每次切到「进度」都重读一次**（用户写好配置文件后不用刷新整页），一旦读到 URL，把已经显示的条目补成卡号链接；读到 URL → 建好 iframe 后不再重读。**不要走页面现有的 `request()`**（它每次 GET 都用返回的 `actionToken` 覆盖页面自己的；`/dashboard/state` 哪天没带这个字段，后面的写操作全会失败）：用单独的 `fetch`，或把 `request()` 改成只在返回里确实有 `actionToken` 时才覆盖——inbox-impl 二选一，交付时写明。
 - 选中「进度」时右侧内容区整块换成一个 iframe，`src` = `progressBoard.url`，高度撑满内容区；窄屏（≤680px，内容区在列表下面）给 iframe 固定高度（如 `80vh`）。切回「问答」时隐藏 iframe 而不销毁（保留用户在看板里的滚动与筛选）；在「进度」页点了左栏某条问答或「新问答」，自动切回「问答」。
 - `progressBoard` 为 `null` 时不显示 iframe，显示一段说明：「进度板还没配置：在 `~/.lane-router/progress-board.json` 写 `{ "url": "<Vikunja 看板地址>" }`，写好后再点一次「进度」。」（再点一次就会重读，不用整页刷新；页面自己也只认本机地址，与 Router 同一规则——inbox-impl 2026-10-21 交付时定。）
 - iframe 顶部一行小字：「这是 Vikunja 看板，拖动卡片、点开卡片都在里面做；在新窗口打开 ↗」（链接到同一 URL，`target=_blank`）。
@@ -75,7 +75,7 @@ Router 启动与每次 `/dashboard/state` 时读它（文件小，直接读，�
 自动测试：
 
 1. Router（node 组）：`progress-board.json` 存在且 URL 合法本机地址 → `/dashboard/state.progressBoard.url` 等于它；文件缺失 / 非法 JSON / 非本机 URL（如 `https://example.com`）→ `null` 且日志一行；文件改动不用重启就生效。
-2. 问答页（happy-dom，`/dashboard/state` 用替身）：第一次切到「进度」才发 `GET /dashboard/state`；有 `progressBoard` → 内容区出现 iframe 且 `src` 等于 URL，之后切换不再重读，切回「问答」iframe 仍在 DOM 里只是隐藏；`progressBoard` 为 `null` → 无 iframe、显示配置说明，每次切回「进度」重读一次，读到 URL 后建 iframe；替身返回里不带 `actionToken` 时页面原有 token 不变、随后的写操作仍带原 token；在「进度」页点左栏议题或「新问答」自动切回「问答」；「在新窗口打开」链接指向同一 URL 且 `target=_blank`。
+2. 问答页（happy-dom，`/dashboard/state` 用替身）：页面启动就发一次 `GET /dashboard/state`（2026-10-21 修订，原来是第一次切到「进度」才发）；有 `progressBoard` → 切到「进度」时内容区出现 iframe 且 `src` 等于 URL，之后切换不再重读，切回「问答」iframe 仍在 DOM 里只是隐藏；`progressBoard` 为 `null` → 无 iframe、显示配置说明，每次切回「进度」重读一次，读到 URL 后建 iframe；替身返回里不带 `actionToken` 时页面原有 token 不变、随后的写操作仍带原 token；在「进度」页点左栏议题或「新问答」自动切回「问答」；「在新窗口打开」链接指向同一 URL 且 `target=_blank`。
 3. 既有问答页用例、dashboard 路由用例全过；`npm test`、`npm run typecheck` 全过。
 
 浏览器（issues 组）：
