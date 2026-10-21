@@ -1718,7 +1718,15 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 - 第 2 步：16:06:27 `lane-router-lane new lane-router/lr24-probe2`，命令行是 `--channels plugin:lane@lane-local`，没有开发标志，8 秒后 bootstrap 就提交了，没有停下来等人点。16:06:39 插件的 MCP 日志出现 `Channel notifications registered`。16:07:06 用 `mcp__plugin_lane_lane__lane_attach_current` 挂上，会话里没有任何 `mcp__lane__*`。空闲后发信，16:09:25 它被叫醒，新回合唯一的输入来自 `server: "plugin:lane:lane"`。
 - 第 6 步：`${CLAUDE_PLUGIN_ROOT}` 指向仓库目录。缓存里那份 `server.mjs` 的相对路径解析不到 `dist`，而服务器照样起来并注册了通道，所以用的是仓库那份。
 - 已经开着的旧会话照常能用。用户级注册撤掉以后，不要在旧会话里 `/mcp` 重连 `lane`，因为配置已经没有了。要拿到新工具，就关掉窗口再 `lane-router-lane open`。
-- 第 3、4 步（`open` 旧会话、`rotate`）和第 5 步的日志核对还没有逐条记录。家里那台机器尚未执行。
+- 第 5 步（design 核对）：探针会话 `d455a772…` 的 `mcp-logs-plugin-lane-lane\2026-10-21T08-06-34-190Z.jsonl` 里：
+  - 08:06:39.918Z `Successfully connected (transport: stdio) in 5827ms`；
+  - 同一秒 `Connection established … serverVersion lane-router 0.1.0`；
+  - 08:06:39.956Z `Channel notifications registered`。
+
+  该会话目录下没有 `mcp-logs-lane`，说明用户级服务器没有起。Router 日志里 joinKey 72768：16:06:39 `channel_connected placed`，16:07:43 `UserPromptSubmit adopted`，16:09:06 `Stop`，16:09:25 空闲时被叫醒。只有一条 `channel_connected`，没有 `duplicate_refused`。
+- 第 3 步（`open` 旧会话）：请用户自己唤醒一条旧 lane 后回话。没有从工具 shell 去开别的项目的离线 lane，因为它们信箱里还有那封「切号后继续」，一开就会跑起来干活。尚未执行。
+- 第 4 步（`rotate`）：design 收尾手头这批后给自己换一代，看新会话是不是插件工具、不弹框。尚未执行。
+- 家里那台机器：安装脚本在 `65f1ba7` 修好之后才可以跑，尚未执行。
 
 ### TC-LANE-AUTONOMY：开新、唤醒、轮换不再先问用户；只有接替和改角色说明要确认
 
