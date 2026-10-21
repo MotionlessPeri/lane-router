@@ -142,7 +142,7 @@ lane-router-lane kb record --json-file record.json
 
 本地真实浏览器检查：先在自己的工作树 `npm run build`，再运行 `node tests/knowledge-browser.mjs`。它用独立临时 core 与知识库、实际的 `lane-router-lane kb` 可执行文件、真实 HTTP 和 Edge（`LANE_ROUTER_TEST_BROWSER` 可改），走一遍目录、筛选、单页、旧版本和不安全正文。截图和 `result.json` 保存在命令输出的仓外目录，可用 `KNOWLEDGE_BROWSER_EVIDENCE` 指定。模型 backend 是替身，不能据此声称真实模型客户端已验收。
 
-#### TC-KB-1：两条真实 lane 录入同一主题（第六节，尚未执行）
+#### TC-KB-1：两条真实 lane 录入同一主题（第六节；第 1–3 步已通过，第 4 步尚未执行）
 
 **前提：** 共享 Router 已部署到含知识库的版本；Claude lane 已刷新工具清单，Codex lane 是部署后新开或 resume 的。部署和重启归外部维护对话。
 
@@ -153,12 +153,23 @@ lane-router-lane kb record --json-file record.json
 
 **预期：** 第 2 步候选里有 A 的页；更新后版本为 2，旧版本可读；第 3 步 agent 能从目录的摘要找到那页；第 4 步读到的内容与工具相同。
 
-#### TC-KB-2：用户在浏览器里看 wiki（第六节，尚未执行）
+**最后验证（2026-10-21，共享 Router 部署 master `33e5ff3` 之后；验收期间 LR-24 上线，Router 又换过两次，每次构建没有逐一核对）：** lane A 是 `lane-router/kb-impl`，lane B 是 `lane-router/kb`，都是 Claude 会话。
+
+- **工具刷新**：两条 lane 部署前开的会话一开始看不到 `lane_kb_*`。用户在两个窗口各执行一次 `/mcp`，选 `lane` 重连（输出「Reconnected to lane.」），之后 ToolSearch 就能查到两项工具，没有重开会话。
+- **第 1 步**：A 做检查，候选和目录都是空的，wiki 原本是空的。随后提交 `create`，得到 pageId `b4e7cb09-a102-45bd-9b5e-a6012cbea414`，版本 1；标题「lane_send 群发」，正文写旧结论「Router 拒收 `cc`」。
+- **第 2 步**：B 检查时用的标题是「cc 字段已可用」，terms 为 `cc,lane_send,群发`。候选只有 A 那一页（v1，active），片段命中正文的「拒收 `cc`」；目录附了整份，只有这一页。B 用 `update` 提交，baseVersion 1，得到版本 2，正文写新结论，并把旧说法单列为「已过时」。
+- **第 3 步**：A 用整句「怎么一次发给多条 lane」检索，关键词没有命中，因为整句不是正文里的子串。A 按工具说明改读目录，从摘要「用 lane_send 的 cc 一封发给多条 lane」判断这页答的就是这个问题。读当前版得到 v2，版本列表是 v1 新建（kb-impl）、v2 修改（kb）；带 `version:1` 读回原来的旧结论。另测了两个字符的 `cc`，命中这一页，片段落在正文。
+- **第 4 步**：lane-router 项目没有 Codex lane，尚未执行。CLI 可执行文件只在 `tests/knowledge-browser.mjs` 的临时 core 上验证过。
+- 每次 Router 换代后端口都会变，工具返回的 `viewUrl` 跟着当前 origin 走（本次依次是 58574、56986）。
+
+#### TC-KB-2：用户在浏览器里看 wiki（第六节，已通过）
 
 1. 打开 TC-KB-1 返回的 `viewUrl` 和 `/knowledge` 目录。
 2. 点版本列表里的第 1 版，再点「看当前版」。
 
 **预期：** 目录、单页、旧版本都能看；正文排版正常；页面上没有编辑入口。请用户确认观感。
+
+**最后验证（2026-10-21）：** 用户在共享 Router 上看了 TC-KB-1 建的那一页，包括目录、单页和第 1 版，在问答 `a8d8110d` 回复「我觉得没啥问题吧。」。用户当时用的是哪个端口的链接没有记下；kb 贴出的 56986 上的三个链接，kb 逐个打开过，都返回 200。用户顺带问了「是不是所有 lane 共享一个知识库」。答复：是，本机所有项目的 lane 共用一个 `knowledge.sqlite`，模块里没有项目概念，标题全局唯一。
 
 ## 用户议题收件箱：使用与操作
 
