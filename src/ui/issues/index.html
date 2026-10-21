@@ -34,6 +34,14 @@
   #filters [aria-pressed="true"] { background: var(--text); color: var(--panel); }
   /* As wide as the sidebar, on a phone too: a project's name and its 待我处理 count stay readable. */
   #project-filter { width: 100%; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+  /* The list narrowed to one lane address: says which, and lets go on ✕. */
+  .lane-filter { display: flex; align-items: center; gap: 6px; padding: 2px 4px 2px 10px; border: 1px solid var(--line); border-radius: 7px; font-size: 13px; }
+  #lane-filter-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #clear-lane-filter { flex: none; padding: 0 8px; border-color: transparent; background: transparent; }
+  /* A lane address that narrows the list: reads as the address, framed as a control like a local path. */
+  .lane-ref { display: inline; min-height: 0; margin: 0; padding: 0 3px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--blue); font: inherit; line-height: inherit; text-align: left; overflow-wrap: anywhere; }
+  .lane-ref:hover { background: var(--hover); }
+  .lane-ref code { color: inherit; }
   .list-bar { display: flex; align-items: center; gap: 8px; padding: 0 4px; }
   /* One line: only the time is written there, the full date and the polling interval go in its
      title, and the ellipsis is a fallback. A read error is shown whole. */
@@ -221,6 +229,7 @@
   </nav>
   <label for="project-filter" class="visually-hidden">项目筛选</label>
   <select id="project-filter"><option value="">全部项目</option></select>
+  <div id="lane-filter" class="lane-filter" hidden><span id="lane-filter-text"></span><button type="button" id="clear-lane-filter" aria-label="不再只看这个 lane">✕</button></div>
   <div class="list-bar"><p id="list-status" class="meta" role="status">正在读取议题…</p><button type="button" id="refresh">刷新</button></div>
   <nav class="list-panel" aria-label="议题列表"><div id="thread-list"></div><button type="button" id="load-threads" hidden>加载更多议题</button></nav>
 </aside>
@@ -291,6 +300,8 @@
   const chosenProject = () => projectNames.includes(wantedProject) ? wantedProject : "";
   /** "issues" or "progress": what the content area shows. */
   let shownView = "issues";
+  /** The list narrowed to one lane address by a click on one; never kept in the browser. */
+  let laneFilter = null;
   const byId = id => document.getElementById(id);
   const node = (tag, className, text) => {
     const element = document.createElement(tag);
@@ -325,6 +336,7 @@
     if (markdown) linkLocalPaths(body);
     markIssueRefs(body);
     markCardRefs(body); upgradeCardRefs(body);
+    markLaneRefs(body);
     body.querySelectorAll("pre").forEach(addCopyButton);
     if (markdown && !plain) drawDiagrams(body);
     return body;
@@ -442,26 +454,74 @@
       link.append(...span.childNodes); span.replaceWith(link);
     }
   }
+  // A lane address standing alone, <project>/<lane> by the address rule; a dot it ends with is the
+  // sentence's. Only the Router says whether one exists (spec 2026-10-21-issue-page-usability.md, six).
+  const LANE_REF = /(?<![\w.%~\/-])[A-Za-z0-9][A-Za-z0-9._%~-]*\/[A-Za-z0-9][A-Za-z0-9._%~-]*(?![\w%~\/-])/g;
+  const WHOLE_LANE = /^[A-Za-z0-9][A-Za-z0-9._%~-]*\/[A-Za-z0-9][A-Za-z0-9._%~-]*$/;
+  /** Marks lane addresses where the other references are looked for: running text and inline code alone. */
+  function markLaneRefs(body) {
+    const candidate = address => { const span = node("span", "lane-ref-candidate"); span.dataset.lane = address; return span; };
+    for (const code of body.querySelectorAll("code")) {
+      const address = code.textContent.trim();
+      if (code.closest("pre, a, .local-path, .issue-ref-candidate, .card-ref-candidate") || !WHOLE_LANE.test(address)) continue;
+      const span = candidate(address); code.replaceWith(span); span.append(code);
+    }
+    const texts = [];
+    for (let walker = document.createTreeWalker(body, document.defaultView.NodeFilter.SHOW_TEXT), text; (text = walker.nextNode());) {
+      if (!text.parentElement.closest("pre, code, a, .local-path, .issue-ref-candidate, .card-ref-candidate, .lane-ref-candidate")) texts.push(text);
+    }
+    for (const text of texts) {
+      const parts = []; let end = 0;
+      for (const match of text.data.matchAll(LANE_REF)) {
+        const address = match[0].replace(/\.+$/, "");
+        if (!WHOLE_LANE.test(address)) continue;
+        const span = candidate(address); span.textContent = address;
+        parts.push(text.data.slice(end, match.index), span); end = match.index + address.length;
+      }
+      if (parts.length) text.replaceWith(...parts, text.data.slice(end));
+    }
+  }
   /**
-   * What each reference named, once asked: the issue, or null for none. A failed lookup remembers
-   * nothing, so the next render asks again. Each render asks once, for what it has not asked before.
+   * What each reference named, once asked: the issue, or null for none; and for each lane address, its
+   * project, or null where no lane has had it. A failed lookup remembers nothing, so the next render
+   * asks again. Each render asks once, for what it has not asked before, issues and addresses together.
    */
-  const issueRefs = new Map(), refsAsking = new Set();
+  const issueRefs = new Map(), laneRefs = new Map(), refsAsking = new Set(), lanesAsking = new Set();
   async function resolveIssueRefs() {
-    upgradeIssueRefs();
-    const asking = [...new Set([...document.querySelectorAll(".issue-ref-candidate")].map(span => span.dataset.ref))]
-      .filter(ref => !issueRefs.has(ref) && !refsAsking.has(ref));
-    for (let start = 0; start < asking.length; start += 100) {
-      const refs = asking.slice(start, start + 100);
+    upgradeIssueRefs(); upgradeLaneRefs();
+    const unasked = (selector, key, known, asking) => [...new Set([...document.querySelectorAll(selector)].map(span => span.dataset[key]))]
+      .filter(value => !known.has(value) && !asking.has(value));
+    const refsLeft = unasked(".issue-ref-candidate", "ref", issueRefs, refsAsking), lanesLeft = unasked(".lane-ref-candidate", "lane", laneRefs, lanesAsking);
+    for (let start = 0; start < Math.max(refsLeft.length, lanesLeft.length); start += 100) {
+      const refs = refsLeft.slice(start, start + 100), lanes = lanesLeft.slice(start, start + 100);
       for (const ref of refs) refsAsking.add(ref);
+      for (const lane of lanes) lanesAsking.add(lane);
       try {
-        const { result } = await request("/issues/api/resolve?refs=" + refs.join(","));
+        const query = new URLSearchParams();
+        if (refs.length) query.set("refs", refs.join(","));
+        if (lanes.length) query.set("lanes", lanes.join(","));
+        const { result } = await request("/issues/api/resolve?" + query);
         for (const ref of refs) issueRefs.set(ref, null);
         for (const item of result.items) issueRefs.set(item.ref.toLowerCase(), item);
+        for (const lane of lanes) laneRefs.set(lane, null);
+        for (const lane of result.lanes ?? []) laneRefs.set(lane.address, lane.project);
       } catch { /* left as text until a later render asks again */ }
-      finally { for (const ref of refs) refsAsking.delete(ref); }
+      finally { for (const ref of refs) refsAsking.delete(ref); for (const lane of lanes) lanesAsking.delete(lane); }
     }
-    upgradeIssueRefs();
+    upgradeIssueRefs(); upgradeLaneRefs();
+  }
+  /** An address the Router knows becomes a control that narrows the list to it. */
+  function upgradeLaneRefs() {
+    for (const span of document.querySelectorAll(".lane-ref-candidate")) {
+      const project = laneRefs.get(span.dataset.lane);
+      if (project) span.replaceWith(laneButton(span.dataset.lane, project, [...span.childNodes]));
+    }
+  }
+  function laneButton(address, project, content) {
+    const button = node("button", "lane-ref"); button.type = "button"; button.title = "只看 " + address + " 的问答";
+    if (content) button.append(...content); else button.textContent = address;
+    button.addEventListener("click", () => narrowToLane(address, project));
+    return button;
   }
   /** A known reference becomes a link that opens its issue here, its title after it. */
   function upgradeIssueRefs() {
@@ -584,6 +644,12 @@
     presence.title = "Router 的判断，不代表 lane 正在处理你的回复";
     return [ownerText(owner) + " · ", presence];
   }
+  /** The issue's own lane in its detail, which narrows the list as an address in an entry does. */
+  function ownerLink(owner) {
+    const nodes = ownerNodes(owner);
+    if (!owner.address || !owner.project) return nodes;
+    return [laneButton(owner.address, owner.project), String(nodes[0]).slice(owner.address.length), ...nodes.slice(1)];
+  }
   const time = value => new Date(value).toLocaleString("zh-CN", { hour12: false });
   const clock = value => new Date(value).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
   const questionLabels = { waiting_user: "待我回答", waiting_lane: "等待 lane", answered: "已回答", not_needed: "无需回答" };
@@ -626,7 +692,7 @@
   function renderList() {
     const host = byId("thread-list"), panel = host.closest(".list-panel");
     const items = keepingSelected();
-    const signature = JSON.stringify([selectedId, projectCounts, [...collapsed], items.map(item => [item.id, item.kept, item.title, item.status, item.closedBy, item.attentionReasons, item.waitingLaneCount, ownerText(item.owner), item.owner.project, item.owner.presence, item.updatedAt])]);
+    const signature = JSON.stringify([selectedId, projectCounts, laneFilter, [...collapsed], items.map(item => [item.id, item.kept, item.title, item.status, item.closedBy, item.attentionReasons, item.waitingLaneCount, ownerText(item.owner), item.owner.project, item.owner.presence, item.updatedAt])]);
     if (signature !== renderedList) { renderedList = signature; const scrollTop = panel.scrollTop; renderTopics(host, items); panel.scrollTop = scrollTop; }
     shownTopics = items;
     byId("load-threads").hidden = !listCursor; byId("load-threads").disabled = listLoading;
@@ -684,7 +750,8 @@
   function projectGroup(project, members) {
     const group = node("section", "project-group"); group.dataset.project = project ?? "";
     const open = !collapsed.has(project), read = members.filter(item => !item.kept).length;
-    const counts = projectCounts?.find(item => item.project === project);
+    // The counts are the project's; narrowed to one lane, only what was read is told.
+    const counts = laneFilter ? undefined : projectCounts?.find(item => item.project === project);
     const head = node("button", "group-head"); head.type = "button"; head.setAttribute("aria-expanded", String(open));
     head.append(node("span", "group-name", project ?? "lane 已不存在"),
       node("span", "group-count", !counts ? "已显示 " + read + " 条" : read < counts.count ? counts.count + " 条，已显示 " + read : counts.count + " 条"));
@@ -733,6 +800,7 @@
       for (let page = 0; page < listPages; page++) {
         const query = new URLSearchParams({ filter: requestedFilter, limit: String(PAGE_SIZE) });
         if (project) query.set("project", project);
+        if (laneFilter) query.set("lane", laneFilter);
         if (cursor) { query.set("beforeUpdatedAt", String(cursor.updatedAt)); query.set("beforeId", cursor.id); }
         const { result } = await request("/issues/api/threads?" + query);
         if (version !== listVersion) return;
@@ -913,7 +981,7 @@
     if (meta.dataset.signature !== metaSignature) {
       const shortId = node("span", "issue-id", id.slice(0, 8)); shortId.title = id;
       const state = closed ? "已结束（" + (detail.thread.closedBy === "lane" ? "lane 结束的" : "你结束的") + "）" : "进行中";
-      meta.replaceChildren(...ownerNodes(detail.owner), " · " + state + " · ", shortId, " ", copyIdButton(id));
+      meta.replaceChildren(...ownerLink(detail.owner), " · " + state + " · ", shortId, " ", copyIdButton(id));
       meta.dataset.signature = metaSignature;
     }
     byId("detail-status").textContent = view.loadError;
@@ -1675,13 +1743,27 @@
     text.textContent = "这是 Vikunja 看板，拖动卡片、点开卡片都在里面做；"; open.setAttribute("href", board); open.hidden = false;
   }
 
+  /** Only this address's issues, in its project; the project chosen as if picked by hand. */
+  function narrowToLane(address, project) {
+    laneFilter = address; wantedProject = project; store(PROJECT_KEY, project);
+    renderLaneFilter(); showFilter(filter);
+  }
+  function renderLaneFilter() {
+    byId("lane-filter").hidden = !laneFilter;
+    byId("lane-filter-text").textContent = laneFilter ? "只看 " + laneFilter : "";
+  }
+
   function showFilter(name) {
     filter = name; listPages = 1; listCursor = null; listItems = []; shownTopics = []; listVersion++; listLoading = false;
     for (const tab of document.querySelectorAll("[data-filter]")) tab.setAttribute("aria-pressed", String(tab.dataset.filter === name));
     renderList(); void loadList();
   }
   for (const button of document.querySelectorAll("[data-filter]")) button.addEventListener("click", () => showFilter(button.dataset.filter));
-  byId("project-filter").addEventListener("change", () => { wantedProject = byId("project-filter").value; store(PROJECT_KEY, wantedProject); showFilter(filter); });
+  byId("project-filter").addEventListener("change", () => {
+    wantedProject = byId("project-filter").value; store(PROJECT_KEY, wantedProject);
+    laneFilter = null; renderLaneFilter(); showFilter(filter);
+  });
+  byId("clear-lane-filter").addEventListener("click", () => { laneFilter = null; renderLaneFilter(); showFilter(filter); });
   byId("new-issue").addEventListener("click", openNew);
   byId("tab-issues").addEventListener("click", () => showView("issues"));
   byId("tab-progress").addEventListener("click", () => showView("progress"));
