@@ -1133,12 +1133,9 @@
   // A Claude window opens on the development-channel confirmation every time, and nothing proceeds
   // until it is clicked; a Codex window has none.
   const CLAUDE_CONFIRM = "『I am using this for local development』";
-  // A notification arriving as the window connects starts no turn, so a lane can sit still after the
-  // click. Drop this half once the re-notify patch is live (spec 2026-10-20-issue-wake-claude-confirm.md).
-  const CLAUDE_NUDGE = "；点完它要是没动，在这条问答里再回一句就能叫醒它";
   function wakeNotice(wake) {
     const claude = wake?.backend === "claude";
-    if (wake?.status === "launch_requested") return "已发送。这个 lane 没开着，已经让 Router 打开它的窗口。" + (claude ? "窗口打开后，请在窗口里点" + CLAUDE_CONFIRM + CLAUDE_NUDGE + "。" : "");
+    if (wake?.status === "launch_requested") return "已发送。这个 lane 没开着，已经让 Router 打开它的窗口。" + (claude ? "窗口打开后，请在窗口里点" + CLAUDE_CONFIRM + "。" : "");
     if (wake?.status === "skipped_launching") return claude ? "已发送。这个 lane 正在打开；窗口要是停在确认提示上，请点" + CLAUDE_CONFIRM + "。" : "已发送。这个 lane 正在打开。";
     if (wake?.status === "failed") return "已发送，但没能打开这个 lane（" + (wakeReasons[wake.reason] || wake.reason) + "）。消息会等它打开后再处理，可以去运行看板手动恢复。";
     return "已发送。";

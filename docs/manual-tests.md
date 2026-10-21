@@ -369,7 +369,7 @@ lane-router-lane kb record --json-file record.json
   - 原因：Claude Code 每次带 `--dangerously-load-development-channels` 启动，都会弹出「WARNING: Loading development channels」，要点「I am using this for local development」才往下走。
   - 唤醒结果的 `launch_requested` 和 `skipped_launching` 带上 lane 的 `backend`，页面只对 Claude lane 换一套说法：
     - lane 列表：没开着的 Claude lane 写「没开着，发出后会打开它的窗口；窗口打开后要你在窗口里点一下确认」。
-    - 打开了窗口：「……已经让 Router 打开它的窗口。窗口打开后，请在窗口里点『I am using this for local development』；点完它要是没动，在这条问答里再回一句就能叫醒它。」后半句「点完它要是没动……」等 design 的重通知补丁上线后删掉，代码里有注释。
+    - 打开了窗口：「……已经让 Router 打开它的窗口。窗口打开后，请在窗口里点『I am using this for local development』。」原先后面还有半句「点完它要是没动，在这条问答里再回一句就能叫醒它」，重通知（LR-25）真机通过后已删（2026-10-21）。
     - 正在打开：「已发送。这个 lane 正在打开；窗口要是停在确认提示上，请点『I am using this for local development』。」
   - Codex lane 的说法不变。
   - 自动测试：`tests/process/issue-wake.test.ts` 和 `tests/modules/issues/ui.test.ts`。第五节的两个变异（不区分后端，在提示和列表两处各试了一次；唤醒结果不带 `backend`）各自让预定的用例变红。

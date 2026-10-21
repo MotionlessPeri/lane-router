@@ -30,7 +30,7 @@ impl 查了本机 Claude Code 2.1.304 的程序：
    - `launch_requested` 且是 Claude：「已发送。这个 lane 没开着，已经让 Router 打开它的窗口。窗口打开后，请在窗口里点『I am using this for local development』；点完它要是没动，在这条问答里再回一句就能叫醒它。」
    - `skipped_launching` 且是 Claude：「已发送。这个 lane 正在打开；窗口要是停在确认提示上，请点『I am using this for local development』。」
    - 其他后端和其他结果照旧。
-4. 「点完它要是没动，再回一句」这半句，等重通知补丁上线后删掉。代码里在这半句旁边写一行注释，指向本稿。
+4. 「点完它要是没动，再回一句」这半句，等重通知补丁上线后删掉。代码里在这半句旁边写一行注释，指向本稿。LR-25 真机通过后已删（2026-10-21）。
 
 ## 四、验收标准
 

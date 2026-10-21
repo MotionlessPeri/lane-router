@@ -909,7 +909,7 @@ test("an empty title is the body's first line without its heading marks, cut to 
 
 // Spec 2026-10-20-issue-wake-claude-confirm.md, acceptance 2: a Claude window waits on the
 // development-channel confirmation, so opening one says to click it; a Codex window does not.
-const CLAUDE_OPENING = "已发送。这个 lane 没开着，已经让 Router 打开它的窗口。窗口打开后，请在窗口里点『I am using this for local development』；点完它要是没动，在这条问答里再回一句就能叫醒它。";
+const CLAUDE_OPENING = "已发送。这个 lane 没开着，已经让 Router 打开它的窗口。窗口打开后，请在窗口里点『I am using this for local development』。";
 const CLAUDE_STILL_OPENING = "已发送。这个 lane 正在打开；窗口要是停在确认提示上，请点『I am using this for local development』。";
 test.each<[IssueWakeResult | undefined, string, string]>([
   [undefined, "已发送。", "meta"],
