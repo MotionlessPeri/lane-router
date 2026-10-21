@@ -115,6 +115,8 @@ export interface IssueListQuery {
   readonly limit?: number;
   /** Only issues whose lane belongs to this project; the page's alone, not a lane tool's. */
   readonly project?: string;
+  /** Only issues of the lanes that have had this address, archived ones too; the page's alone. */
+  readonly lane?: string;
 }
 /** Per project with at least one issue: how many the filter lists, and how many need the user. */
 export interface IssueProjectCount {
@@ -133,7 +135,9 @@ export interface IssueRef {
   /** Null when the lane no longer exists. */
   readonly ownerAddress: string | null;
 }
-export interface IssueRefs { readonly items: readonly IssueRef[] }
+/** A lane address that some lane holding issues has had, and its project. */
+export interface IssueLaneRef { readonly address: string; readonly project: string }
+export interface IssueRefs { readonly items: readonly IssueRef[]; readonly lanes: readonly IssueLaneRef[] }
 export interface IssueHistoryQuery { readonly afterSeq?: number; readonly limit?: number }
 export interface IssueOwner {
   readonly laneId: string;

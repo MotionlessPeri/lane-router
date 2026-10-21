@@ -65,7 +65,7 @@ export class IssuesHttp {
         } else if (projects) {
           json(response, 200, { result: service.projects(projectsQuery(url.searchParams)), actionToken: this.options.actionToken });
         } else if (resolving) {
-          json(response, 200, { result: service.resolveRefs(refsQuery(url.searchParams)), actionToken: this.options.actionToken });
+          json(response, 200, { result: service.resolveRefs(...refsQuery(url.searchParams)), actionToken: this.options.actionToken });
         } else {
           const result = detail ? service.detail(decodeURIComponent(detail[1]!), historyQuery(url.searchParams)) : service.list(listQuery(url.searchParams));
           json(response, 200, { result, actionToken: this.options.actionToken });
@@ -168,19 +168,19 @@ function integer(params: URLSearchParams, key: string): number | undefined {
 }
 
 function listQuery(params: URLSearchParams): IssueListQuery {
-  queryFields(params, ["filter", "limit", "beforeUpdatedAt", "beforeId", "project"]);
-  const updatedAt = integer(params, "beforeUpdatedAt"), id = params.get("beforeId"), project = params.get("project");
+  queryFields(params, ["filter", "limit", "beforeUpdatedAt", "beforeId", "project", "lane"]);
+  const updatedAt = integer(params, "beforeUpdatedAt"), id = params.get("beforeId"), project = params.get("project"), lane = params.get("lane");
   if ((updatedAt === undefined) !== (id === null)) throw new IssueError("INVALID_INPUT", "List cursor needs beforeUpdatedAt and beforeId");
   return { filter: (params.get("filter") ?? "attention") as IssueListQuery["filter"], limit: integer(params, "limit"),
-    ...(updatedAt === undefined || id === null ? {} : { before: { updatedAt, id } }), ...(project === null ? {} : { project }) };
+    ...(updatedAt === undefined || id === null ? {} : { before: { updatedAt, id } }), ...(project === null ? {} : { project }), ...(lane === null ? {} : { lane }) };
 }
 
-/** `refs` is required and comma-separated; the service judges each one. */
-function refsQuery(params: URLSearchParams): string[] {
-  queryFields(params, ["refs"]);
-  const refs = params.get("refs");
-  if (refs === null) throw new IssueError("INVALID_INPUT", "refs is required");
-  return refs.split(",");
+/** Issue references and lane addresses, each comma-separated, at least one of the two; the service judges each. */
+function refsQuery(params: URLSearchParams): [string[], string[]] {
+  queryFields(params, ["refs", "lanes"]);
+  const refs = params.get("refs"), lanes = params.get("lanes");
+  if (refs === null && lanes === null) throw new IssueError("INVALID_INPUT", "refs or lanes is required");
+  return [refs === null ? [] : refs.split(","), lanes === null ? [] : lanes.split(",")];
 }
 
 function projectsQuery(params: URLSearchParams): { filter: IssueFilter } {

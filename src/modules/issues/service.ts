@@ -171,15 +171,26 @@ export class IssuesService {
    * Which of these references name exactly one issue: a whole ID in either case, or its first eight
    * hex digits. One that names none or several is left out; the page's alone, not a lane tool's.
    */
-  resolveRefs(refs: readonly string[]): IssueRefs {
+  resolveRefs(refs: readonly string[], lanes: readonly string[] = []): IssueRefs {
     if (!Array.isArray(refs) || refs.length > 100) invalid("refs must be a list of at most 100 references");
     for (const ref of refs) if (typeof ref !== "string" || !ISSUE_REF.test(ref)) invalid("A reference is a whole issue ID or exactly eight hex digits");
-    return { items: refs.flatMap((ref) => {
+    if (!Array.isArray(lanes) || lanes.length > 100) invalid("lanes must be a list of at most 100 addresses");
+    for (const lane of lanes) if (!isLaneAddress(lane)) invalid("lanes must hold lane addresses");
+    const items = refs.flatMap((ref) => {
       const found = this.store.threadsByRef(ref.toLowerCase());
       if (found.length !== 1) return [];
       const { id, title, status, ownerLaneId } = found[0]!;
       return [{ ref, id, title, status, ownerAddress: this.owner(ownerLaneId).address }];
-    }) };
+    });
+    // An address exists here when a lane that holds issues has had it, archived or not.
+    const known = new Map<string, string>();
+    if (lanes.length > 0) {
+      for (const laneId of this.store.ownerLaneIds()) {
+        const facts = this.options.lanes.readLane(laneId);
+        if (facts) known.set(facts.address, facts.project);
+      }
+    }
+    return { items, lanes: lanes.flatMap((address) => known.has(address) ? [{ address, project: known.get(address)! }] : []) };
   }
 
   /** Each project that has an issue, with lanes gone gathered under null at the end. */
@@ -327,7 +338,7 @@ export class IssuesService {
   }
 
   private listOwned(query: IssueListQuery, ownerLaneId?: string): IssueList {
-    fields(query, ["filter", "before", "limit", "project"]);
+    fields(query, ["filter", "before", "limit", "project", "lane"]);
     if (query.filter !== undefined) listFilter(query.filter);
     if (query.before !== undefined) {
       fields(query.before, ["updatedAt", "id"]);
@@ -335,12 +346,16 @@ export class IssuesService {
       text(query.before.id, "before.id");
     }
     const limit = pageSize(query.limit);
-    const { project, ...listed } = query;
+    const { project, lane, ...listed } = query;
+    if (project !== undefined && (typeof project !== "string" || !isAddressSegment(project))) invalid("project must be one segment of a lane address");
+    if (lane !== undefined && !isLaneAddress(lane)) invalid("lane must be a lane address");
     let owners: string[] | undefined;
-    if (project !== undefined) {
-      if (typeof project !== "string" || !isAddressSegment(project)) invalid("project must be one segment of a lane address");
-      // The project lives on the lane record, so the owners are found there, never stored twice.
-      owners = this.store.ownerLaneIds().filter((laneId) => this.options.lanes.readLane(laneId)?.project === project);
+    if (project !== undefined || lane !== undefined) {
+      // Project and address live on the lane record, so the owners are found there, never stored twice.
+      owners = this.store.ownerLaneIds().filter((laneId) => {
+        const facts = this.options.lanes.readLane(laneId);
+        return facts !== null && (project === undefined || facts.project === project) && (lane === undefined || facts.address === lane);
+      });
       if (owners.length === 0) return { items: [], nextCursor: null };
     }
     const rows = this.store.listThreads({ ...listed, limit: limit + 1 }, ownerLaneId, owners);
@@ -516,6 +531,12 @@ function text(value: unknown, name: string): string {
 }
 
 const ISSUE_REF = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8})$/iu;
+/** `<project>/<lane>`, each part by the address rule. */
+function isLaneAddress(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const parts = value.split("/");
+  return parts.length === 2 && parts.every(isAddressSegment);
+}
 
 /** The filter asked for; none asked means 待我处理. */
 function listFilter(value: unknown): IssueFilter {
