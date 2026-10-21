@@ -1713,7 +1713,15 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 5. Router 日志里，这三条会话各只有一条 `join.channel_connected`，没有 `duplicate_refused`，也没有重连循环。
 6. 核对插件确实是在仓库原地加载的：`${CLAUDE_PLUGIN_ROOT}` 指向仓库里的插件目录，而不是 `~/.claude/plugins/cache` 下的副本。`plugin list` 显示的 `installPath` 是缓存目录、`readFromFolder` 是仓库，要是实际用的是缓存，`server.mjs` 的相对 import 就会找不到 `dist`。第 2 步的 lane 能起来，就说明是原地加载。
 
-**最后验证：** 尚未执行（等合并和安装）。
+**最后验证：** 2026-10-21 16:03–16:10，本机，design 做。master `2dad439`，Router pid 63164。
+- 部署后跑安装脚本：包校验通过；市场已在，跳过；白名单已在；撤掉了用户级 `lane`。
+- **脚本有 bug：** 它报「plugin lane@lane-local (user): already installed, skipped」，但 `claude plugin list --json` 里只有早上隔离实测留下的 local 作用域那份（`enabled: false`），user 作用域并没装。这种情况下新 lane 会一个 lane 服务器都没有。design 当场手动 `claude plugin install lane@lane-local --scope user` 补上（16:05）。
+  - 原因：Windows PowerShell 5.1 的 `ConvertFrom-Json` 把整个 JSON 数组当成一个对象交出来，过滤条件就成了在整张表上比较。lane 是 local，另一个插件（superpowers）是 user，「id 是 lane」和「scope 是 user」各自都能在表里找到，于是误判成已装。
+  - 已修：逐项展开再过滤。加了两条用例，都是先红后绿：一条是 lane 只装在 local、旁边另有 user 作用域的插件；另一条是 `lane-local` 旁边还有别的目录市场。
+- 第 2 步：16:06:27 `lane-router-lane new lane-router/lr24-probe2`，命令行是 `--channels plugin:lane@lane-local`，没有开发标志，8 秒后 bootstrap 就提交了，没有停下来等人点。16:06:39 插件的 MCP 日志出现 `Channel notifications registered`。16:07:06 用 `mcp__plugin_lane_lane__lane_attach_current` 挂上，会话里没有任何 `mcp__lane__*`。空闲后发信，16:09:25 它被叫醒，新回合唯一的输入来自 `server: "plugin:lane:lane"`。
+- 第 6 步：`${CLAUDE_PLUGIN_ROOT}` 指向仓库目录。缓存里那份 `server.mjs` 的相对路径解析不到 `dist`，而服务器照样起来并注册了通道，所以用的是仓库那份。
+- 已经开着的旧会话照常能用。用户级注册撤掉以后，不要在旧会话里 `/mcp` 重连 `lane`，因为配置已经没有了。要拿到新工具，就关掉窗口再 `lane-router-lane open`。
+- 第 3、4 步（`open` 旧会话、`rotate`）和第 5 步的日志核对还没有逐条记录。家里那台机器尚未执行。
 
 ### TC-LANE-AUTONOMY：开新、唤醒、轮换不再先问用户；只有接替和改角色说明要确认
 

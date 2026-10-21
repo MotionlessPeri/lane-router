@@ -98,6 +98,38 @@ test("a managed settings file that does not exist yet is treated as an empty one
   expect(x.read().userLane).toBe(true);
 });
 
+// 2026-10-21 deploy: the plugin was installed only at local scope (an isolated test that morning), and
+// another plugin at user scope. Windows PowerShell hands a parsed JSON array on as one object, and the
+// check matched across the whole list: "already installed", while new lanes had no lane server at all.
+test("a lane plugin installed only for a directory, beside another plugin for the user, is still installed for the user", () => {
+  const x = machine({
+    marketplaces: [{ name: "lane-local", source: "directory", path: PLUGIN_ROOT }],
+    plugins: [
+      { id: "lane@lane-local", scope: "local", enabled: false, projectPath: "C:\\scratch\\plugin-test" },
+      { id: "superpowers@superpowers-dev", scope: "user", enabled: true },
+    ],
+  }, ALLOWED);
+  const result = x.run();
+  expect(result.code, result.out).toBe(0);
+  expect(x.read().calls).toContain("plugin install lane@lane-local --scope user");
+  expect(result.out).not.toMatch(/already installed/u);
+});
+
+test("another directory marketplace beside lane-local is told apart from it", () => {
+  const x = machine({
+    marketplaces: [
+      { name: "other-dir", source: "directory", path: "D:\\other\\plugins" },
+      { name: "lane-local", source: "directory", path: PLUGIN_ROOT },
+    ],
+    plugins: [{ id: "lane@lane-local", scope: "user", enabled: true }],
+    userLane: false,
+  }, ALLOWED);
+  const result = x.run();
+  expect(result.code, result.out).toBe(0);
+  expect(result.out).toMatch(/marketplace lane-local: already added, skipped/u);
+  expect(x.read().calls.some((call) => call.startsWith("plugin marketplace add"))).toBe(false);
+});
+
 test("a lane-local marketplace that points somewhere else is refused rather than used", () => {
   const x = machine({ marketplaces: [{ name: "lane-local", source: "directory", path: "D:\\elsewhere\\channel-plugin" }] }, ALLOWED);
   const result = x.run();

@@ -43,7 +43,11 @@ function Invoke-Claude([string[]]$Arguments) {
 }
 
 function Get-ClaudeJson([string[]]$Arguments) {
-    return ((Invoke-Claude $Arguments) -join "`n") | ConvertFrom-Json
+    # Windows PowerShell's ConvertFrom-Json hands a JSON array on as one object, and a filter on it
+    # then compares every item's field at once: lane at local scope beside another plugin at user
+    # scope read as "installed for the user" (2026-10-21 deploy). The items themselves go on here.
+    $parsed = ((Invoke-Claude $Arguments) -join "`n") | ConvertFrom-Json
+    foreach ($item in $parsed) { $item }
 }
 
 function Test-SamePath([string]$a, [string]$b) {
