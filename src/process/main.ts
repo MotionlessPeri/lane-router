@@ -29,6 +29,7 @@ import { ConversationRestorer } from "./conversation-restorer.js";
 import { DashboardLaneOpener } from "./dashboard-lane-opener.js";
 import { ProgressBoardSource } from "./progress-board.js";
 import { ProgressFeed } from "./progress-feed.js";
+import { laneCwd, LaneRepoLocator } from "./lane-repo.js";
 import { CLAUDE_LAUNCHER_MODELS } from "./claude-models.js";
 import { defaultCodexModelProvider, listCodexModelProviders, listCodexProfiles, profileModelProvider } from "./codex-profiles.js";
 import { readRouterConfig } from "./router-config.js";
@@ -207,6 +208,7 @@ export async function runRouterProcess(options: {
     if (options.issues !== false) {
       try {
         issues = openIssuesModule({ databasePath: join(dataRoot, "issues.sqlite"), lanes: core, delivery: core, wake: issueWakePort(state, restore),
+          repos: new LaneRepoLocator({ cwdForLane: (laneId) => laneCwd(state, laneId) }),
           onError: error => process.stderr.write(`Issues module: ${error instanceof Error ? error.message : "unknown error"}\n`) });
       } catch (error) {
         process.stderr.write(`ISSUES_UNAVAILABLE: ${error instanceof Error ? error.message : "unknown error"}\n`);

@@ -1,7 +1,7 @@
 export { IssuesService } from "./service.js";
 export { openIssueStore } from "./store.js";
 export { ATTACHMENT_SIZE_LIMIT, IssueAttachments } from "./attachments.js";
-export type { DeliveryHandoff, DeliveryProcessing, IssueListRow, IssuesServiceOptions, IssueStore, IssueWakePort } from "./ports.js";
+export type { DeliveryHandoff, DeliveryProcessing, IssueListRow, IssuesServiceOptions, IssueStore, IssueWakePort, LaneRepo, LaneRepoPort } from "./ports.js";
 export { ISSUE_SCHEMA_VERSION } from "./schema.js";
 export * from "./types.js";
 
@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import type { LaneAccess } from "../../router/lane-access.js";
 import { IssueAttachments } from "./attachments.js";
 import { IssueDeliveryWorker, type IssueDeliveryWorkerOptions } from "./delivery.js";
-import type { IssueWakePort } from "./ports.js";
+import type { IssueWakePort, LaneRepoPort } from "./ports.js";
 import { IssuesService } from "./service.js";
 import { openIssueStore } from "./store.js";
 
@@ -21,6 +21,7 @@ export interface IssuesModuleOptions extends Omit<IssueDeliveryWorkerOptions, "s
   readonly databasePath: string;
   readonly lanes: LaneAccess;
   readonly wake?: IssueWakePort;
+  readonly repos?: LaneRepoPort;
   readonly newId?: () => string;
 }
 
@@ -34,7 +35,7 @@ const SWEEP_INTERVAL = 6 * 60 * 60 * 1000;
 export function openIssuesModule(options: IssuesModuleOptions) {
   const store = openIssueStore(options.databasePath);
   try {
-    const service = new IssuesService({ store, lanes: options.lanes, wake: options.wake, now: options.now, newId: options.newId });
+    const service = new IssuesService({ store, lanes: options.lanes, wake: options.wake, repos: options.repos, now: options.now, newId: options.newId });
     const attachments = new IssueAttachments({ store, root: join(dirname(options.databasePath), "issue-attachments"), now: options.now, onError: options.onError });
     const worker = new IssueDeliveryWorker({ store, delivery: options.delivery, now: options.now, onError: options.onError });
     const sweep = () => { attachments.sweep().catch(options.onError ?? (() => undefined)); };

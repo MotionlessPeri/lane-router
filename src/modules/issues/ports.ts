@@ -79,11 +79,25 @@ export interface IssueWakePort {
   wake(laneId: string): Promise<IssueWakeResult>;
 }
 
+/** Where a lane's work lives in git: the checkout's top level, and a GitHub remote's web address. */
+export interface LaneRepo {
+  readonly root: string;
+  /** Null when the remote is not on GitHub, or there is none: then there is nowhere to link a commit. */
+  readonly webUrl: string | null;
+}
+
+/** Finds the repository a lane works in; null when it has no known directory or that is not a checkout. */
+export interface LaneRepoPort {
+  repoForLane(laneId: string): Promise<LaneRepo | null>;
+}
+
 export interface IssuesServiceOptions {
   readonly store: IssueStore;
   readonly lanes: LaneAccess;
   /** Absent when this Router cannot open windows; then nothing is said about waking at all. */
   readonly wake?: IssueWakePort;
+  /** For linking commit ids to the issue's own lane's repository; absent means no commit is linked. */
+  readonly repos?: LaneRepoPort;
   readonly now?: () => number;
   readonly newId?: () => string;
 }
