@@ -544,6 +544,18 @@ lane-router-lane kb record --json-file record.json
 - `tests/modules/issues/project-groups-browser.test.ts`（浏览器组）覆盖第 10 条。
 - 第七节的六个变异各自让预定的用例变红；页面的三个变异也让浏览器组那条变红。
 
+### 切号后继续：问答页上的两个按钮
+
+需求与设计见 `docs/superpowers/specs/2026-10-21-continue-after-account-switch.md`（4.3 问答页入口、验收第 8 条）。Router 的路由和账号页那一半归 impl，用例见那份稿子的验收第 9、10 条。
+
+- 左栏标题行下面单独一行：「继续 Claude lane」「继续 Codex lane」。手动切号以后点对应后端的那个，Router 给这个后端在用的每条 lane 发一封「切号后继续」的信。悬停提示说明了用途。左栏最窄时（窗口宽 681–999px），两个按钮会折成两行；标题行不受影响。
+- 点了调看板路由 `POST /dashboard/lanes/continue-after-switch`，带页面的 `actionToken`。按钮下面一行写结果，说法和账号页一样：「已唤醒 N 条：…；N 条没开着，信已留在它的信箱，打开时处理：…；跳过 N 条：地址（原因）。」60 秒内对同一后端再点，写「60 秒内刚发过一轮，这次没有再发。」没有在用的 lane 时写「没有在用的 Claude lane。」
+- 接口报错时写「没能发出：原因」。等回答时两个按钮都不能点。没有二次确认：多发一封信，代价只是 lane 确认一次已读。
+
+自动测试：
+- `tests/modules/issues/continue-after-switch.test.ts`（happy-dom，路由用替身）：两个按钮、请求的头和正文、三类结果的说法、报错、等回答时不能再点。
+- 去掉结果里的「没开着」一类、请求不带 `actionToken`、等回答时按钮不禁用，三个变异各让用例变红。
+
 #### TC-ISSUES-GROUP-1：在真实问答页上按项目看（尚未执行）
 
 **前提：** 主检出构建到含此改动的版本，并重启 Router。重启和构建的时机都归用户。

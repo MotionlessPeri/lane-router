@@ -25,6 +25,10 @@
   .sidebar-head { display: flex; align-items: baseline; gap: 12px; padding: 0 4px; }
   .sidebar-head a { margin-left: auto; font-size: 13px; }
   #new-issue { flex: none; padding: 3px 10px; }
+  /* A row of its own under the title, kept small: it is pressed after an account switch, not often. */
+  .continue-bar { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 4px; }
+  .continue-bar button { padding: 2px 9px; font-size: 12px; }
+  #continue-status { margin: 0; padding: 0 4px; }
   #filters { display: flex; flex-wrap: wrap; gap: 4px; }
   #filters button { border-color: transparent; background: transparent; padding: 5px 9px; }
   #filters [aria-pressed="true"] { background: var(--text); color: var(--panel); }
@@ -170,6 +174,11 @@
 <body>
 <aside class="sidebar">
   <div class="sidebar-head"><h1 title="集中查看答复与问题。看不懂可以继续追问，一轮回复不会自动结束议题。&#10;可以在这里新开问答，也可以接着已有的问答讨论">问答</h1><button type="button" id="new-issue" class="primary">新问答</button><a href="/dashboard">运行看板</a></div>
+  <div class="continue-bar" role="group" aria-label="切号后继续" title="手动切换账号以后点：给这个后端在用的每条 lane 发一封信。因额度停下的从中断处继续，没停下的确认已读即可">
+    <button type="button" id="continue-claude" data-continue="claude">继续 Claude lane</button>
+    <button type="button" id="continue-codex" data-continue="codex">继续 Codex lane</button>
+  </div>
+  <p id="continue-status" class="meta" role="status" hidden></p>
   <nav id="filters" aria-label="议题筛选">
     <button type="button" data-filter="attention" aria-pressed="true">待我处理</button>
     <button type="button" data-filter="open" aria-pressed="false">进行中</button>
@@ -1279,6 +1288,37 @@
     }
   }
 
+  /**
+   * After the user switches an account by hand, one press mails every lane of that backend to carry
+   * on (spec 2026-10-21-continue-after-account-switch.md). What became of each is told in the account
+   * page's words: woken, left in a closed lane's mailbox for when it opens, or skipped and why.
+   */
+  const continueBackends = { claude: "Claude", codex: "Codex" };
+  const continueSkips = { archived: "已归档", unbound: "没有对话", missing: "不存在", delivery_failed: "没能写进信箱" };
+  function continueSummary(result) {
+    const skipped = result.skipped || [];
+    if (!result.notified.length && !result.queued.length && skipped.length && skipped.every(item => item.reason === "sent_within_60s")) return "60 秒内刚发过一轮，这次没有再发。";
+    const parts = [];
+    if (result.notified.length) parts.push("已唤醒 " + result.notified.length + " 条：" + result.notified.join("、"));
+    if (result.queued.length) parts.push(result.queued.length + " 条没开着，信已留在它的信箱，打开时处理：" + result.queued.join("、"));
+    if (skipped.length) parts.push("跳过 " + skipped.length + " 条：" + skipped.map(item => item.address + "（" + (continueSkips[item.reason] || item.reason) + "）").join("、"));
+    return parts.length ? parts.join("；") + "。" : "没有在用的 " + (continueBackends[result.backend] || result.backend) + " lane。";
+  }
+  async function continueLanes(backend) {
+    const buttons = document.querySelectorAll("[data-continue]"), status = byId("continue-status");
+    if ([...buttons].some(button => button.disabled)) return;
+    for (const button of buttons) button.disabled = true;
+    status.hidden = false; status.className = "meta"; status.textContent = "正在发送…";
+    try {
+      const { result } = await request("/dashboard/lanes/continue-after-switch", {
+        method: "POST", headers: { "content-type": "application/json", "x-lane-router-action": "continue-after-switch" },
+        body: JSON.stringify({ backend, actionToken }),
+      });
+      status.textContent = continueSummary(result);
+    } catch (error) { status.textContent = "没能发出：" + error.message; status.className = "meta warning"; }
+    finally { for (const button of buttons) button.disabled = false; }
+  }
+
   function showFilter(name) {
     filter = name; listPages = 1; listCursor = null; listItems = []; shownTopics = []; listVersion++; listLoading = false;
     for (const tab of document.querySelectorAll("[data-filter]")) tab.setAttribute("aria-pressed", String(tab.dataset.filter === name));
@@ -1287,6 +1327,7 @@
   for (const button of document.querySelectorAll("[data-filter]")) button.addEventListener("click", () => showFilter(button.dataset.filter));
   byId("project-filter").addEventListener("change", () => { wantedProject = byId("project-filter").value; store(PROJECT_KEY, wantedProject); showFilter(filter); });
   byId("new-issue").addEventListener("click", openNew);
+  for (const button of document.querySelectorAll("[data-continue]")) button.addEventListener("click", () => { void continueLanes(button.dataset.continue); });
   byId("cancel-new").addEventListener("click", closeNew);
   byId("new-lane").addEventListener("change", () => { if (!fresh.operation) { fresh.laneId = byId("new-lane").value; store(NEW_LANE, fresh.laneId); renderNew(); } });
   byId("new-title").addEventListener("input", () => { if (!fresh.operation) { fresh.title = byId("new-title").value; storeNewDraft(); } });
