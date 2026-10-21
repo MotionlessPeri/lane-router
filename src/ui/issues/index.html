@@ -1021,7 +1021,7 @@
     if (!task) banner.append("所属 lane 已归档，不能在这里回复了；要接着谈，请新开问答发给别的 lane");
     else if (task.issue) {
       const link = node("button", "issue-link", task.issue.slice(0, 8)); link.type = "button"; link.title = task.issue;
-      link.addEventListener("click", () => selectIssue(task.issue));
+      link.addEventListener("click", () => selectIssue(task.issue, "push"));
       banner.append("该任务 lane 已完成归档；追问请到父 lane 的议题 ", link, "，或让父 lane 再开一条任务 lane");
     } else if (task.parent) banner.append("该任务 lane 已完成归档；请联系 " + task.parent);
     else banner.append("该任务 lane 已完成归档");

@@ -85,7 +85,7 @@ async function open() {
     reply: !query("#reply-body").disabled, send: !query("#send-reply").disabled, question: !query("#reply-question").disabled,
     addFile: !query("#reply-add-file").disabled, close: !query("#close-issue").hidden && !query("#close-issue").disabled,
   });
-  return { x, ids, query, select, shown, errors };
+  return { x, ids, window, query, select, shown, errors };
 }
 
 const LOCKED = { reply: false, send: false, question: false, addFile: false, close: true };
@@ -119,8 +119,12 @@ test("9: the parent issue in the banner opens on this page", async () => {
   await p.select(p.ids.withIssue);
   const link = p.query("#owner-banner .issue-link");
   expect(link.title).toBe(p.ids.parent);
+  // As an issue named in an entry: the address follows, and back returns.
+  const before = p.window.history.length;
   link.click();
   await vi.waitFor(() => expect(p.query("#issue-detail").getAttribute("data-issue-id")).toBe(p.ids.parent));
   expect(p.query("#detail-title").textContent).toBe("父问答");
+  expect(p.window.location.search).toBe(`?issue=${p.ids.parent}`);
+  expect(p.window.history.length).toBe(before + 1);
   expect(p.errors).toEqual([]);
 });

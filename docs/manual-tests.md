@@ -641,6 +641,70 @@ master `33e5ff3` 部署后，Router 在 `http://127.0.0.1:60690`。接口用 Pow
 - 第 3 步：贴出来的是完整 id，按钮写「已复制」。
 - 第 4 步：回复框往上长，发送按钮不动；刷新、换问答后高度不变；双击回到默认高度。
 
+### 问答页易用性（第二批）：画 mermaid 图、LR-n 链到 Vikunja 卡、lane 地址筛选
+
+需求与设计见 `docs/superpowers/specs/2026-10-21-issue-page-usability.md`（第四到六节）。
+
+- **mermaid 图：**
+  - lane 写的正文里，信息串去掉首尾空白、不分大小写正好是 `mermaid` 的代码块，画成图，图下面折着「源码」，展开就是原来的代码块，带「复制」。用户写的仍是纯文本，不画。
+  - 渲染库是 `mermaid` 12.1.0（2026-10-02 发布，写死版本号）。由 Router 从本机的 `GET /issues/assets/mermaid.js` 提供，不走外网；某页第一次有图时才插这个脚本，整页只插一次，没有图就不加载。初始化一次：`startOnLoad: false`，`securityLevel: "strict"`，主题跟着系统的深浅色。
+  - 画不出来（语法错，或者脚本没加载上）就保留代码块，在上面写一行「图没画出来：原因」。
+  - 点图打开覆盖全页的放大层，按原始大小显示，可以滚动；按 Esc 或点外面关掉。5 秒轮询不重画。
+  - **上线要多一步：** 加了依赖，部署时先在主检出 `npm install`，再 build，再重启核心。不要用 `npm ci`，原因见共享树的老规矩。
+  - 实测：mermaid 12 在任何安全级别下都会用 DOMPurify 清洗标签文字，`click` 只有调用方调 `bindFunctions` 才会绑定，而页面从不调。所以「标签里的 HTML 不执行、点节点不调用页面函数」这两条，换成 `loose` 也成立，没法用来区分安全级别；`strict` 由 happy-dom 那条用例直接核对 `initialize` 的参数。
+- **LR-n：** 正文和行内代码里独立成词的 `LR-` 加数字，链到 `<Vikunja 根地址>/projects/LR/tasks/by-index/<n>`，新标签页打开，悬停写「在 Vikunja 里打开 LR-<n>」。`UTF-8`、`SHA-256`、`XLR-3`、`LR-39a`、代码块里的都不变。Vikunja 根地址取进度板地址的 origin。
+  - 进度板地址现在**页面一启动就读一次** `/dashboard/state`（单独的 `fetch`，不动页面的 `actionToken`），进度标签页和 LR-n 共用。读到 `null` 或读失败，LR-n 就是文字；之后每次点「进度」都重读，读到了就把已经显示的条目补成链接。进度稿 4.2 原来写的是「第一次切到进度才读」，这里按易用性稿第五节改了，相应的用例也改了。
+- **lane 地址筛选：**
+  - 正文和行内代码里独立成词的 `<项目>/<lane>`（两段都符合地址规则，句末的点不算），以及详情标题下的所属 lane，Router 确认有过这个地址的 lane（归档的也算）才能点。
+  - 点了，项目下拉框下面出现「只看 <地址> ✕」，项目筛选自动换成这个地址的项目，列表只列这个地址名下所有 lane（现在的和归档的）的问答。点 ✕ 或换项目就去掉；不存进浏览器，刷新后没有。
+  - 这时组头只写「已显示 K 条」：项目的条数和「待我处理」数不是这个 lane 的。
+  - 后端：列表接口加 `lane` 参数；resolve 接口加 `lanes`，返回 `{ items, lanes: [{ address, project }] }`，`refs` 和 `lanes` 至少给一个。页面一次渲染把问答 id 和 lane 地址合在一次 resolve 里查。lane 工具不变。
+
+自动测试：
+- `tests/modules/issues/mermaid-asset.test.ts`（node 组）：版本写死、路由返回打包文件（第二批验收第 1 条）。
+- `tests/modules/issues/mermaid-page.test.ts`（happy-dom，`window.mermaid` 用替身，happy-dom 不真去取脚本）：第 2 条。
+- `tests/modules/issues/mermaid-browser.test.ts`（浏览器组，真库）：第 3 条，流程图画成 SVG、标签里的 `<img onerror>` 不执行、点节点不调用页面函数、点图放大、Esc 关掉。
+- `tests/modules/issues/card-links.test.ts`（happy-dom）：第 4 条。
+- `tests/modules/issues/lane-filter.test.ts`（node 组）：第 5 条。
+- `tests/modules/issues/lane-links.test.ts`（happy-dom）：第 6 条。
+- 第二批变异检验：用户写的也画、每张图插一次脚本、认 `[A-Z]+-\d+`、把 `LR` 换成 12、列表忽略 `lane`、lane 筛选存进浏览器，各让预定的用例变红。`securityLevel` 改成 `loose` 让 happy-dom 那条变红，浏览器那条不红，原因见上面的实测。
+
+#### TC-ISSUES-USABILITY-2：在真实问答页上看图、点卡号、按 lane 筛（尚未执行）
+
+**前提：** 主检出 `npm install` 后构建到含此改动的版本，并重启 Router；进度板已配置。
+
+1. 找一条 lane 写了 mermaid 代码块的问答打开，点图，再按 Esc。
+2. 在一条提到 `LR-<n>` 的问答里点卡号。
+3. 点详情标题下的所属 lane，再点 ✕。
+
+**预期：**
+- 第 1 步：图画出来，下面有「源码」；点图放大，Esc 关掉。
+- 第 2 步：新标签页打开 Vikunja 里的那张卡。
+- 第 3 步：左栏出现「只看 <地址> ✕」，只剩这个 lane 的问答，项目下拉框跟着变；点 ✕ 后恢复。
+
+### 归档横幅：所属 lane 已归档的问答说清追问去哪
+
+需求与设计见 `docs/superpowers/specs/2026-10-21-task-lane.md`（4.3 第 5 条、验收 9）。核心那一半（`lane_finish` 时解析父议题和父 lane、`LaneAccessFacts` 的 `finishedAt` 和 `task`）归 impl。
+
+- 问答的 `owner` 多两个字段：`finishedAt` 和 `task: { issue, parent }`。核心只对已完成或已归档的 lane 给出这两个键，没给时页面一律当 `null`；lane 不存在也是 `null`。
+- 所属 lane 已归档时，回复区上面显示一条横幅：
+  - 任务 lane，有父议题：「该任务 lane 已完成归档；追问请到父 lane 的议题 <前 8 位>，或让父 lane 再开一条任务 lane」。议题号可以点，在本页打开那一条，地址栏跟着变，后退能回来。
+  - 任务 lane，只有父 lane：「该任务 lane 已完成归档；请联系 <父 lane>」。
+  - 任务 lane，两个都没有：「该任务 lane 已完成归档」。
+  - 不是任务 lane：「所属 lane 已归档，不能在这里回复了；要接着谈，请新开问答发给别的 lane」。
+- 这几种情况下，回复框、回复对象、添加文件、发送都不能用；「结束议题」照常可点。完成了但还没归档的任务 lane 不显示横幅。
+
+自动测试：`tests/modules/issues/archived-banner.test.ts`（node 组和 happy-dom）：owner 透传两个字段、四种横幅、回复区禁用、父议题链接能打开。变异「没归档的也显示横幅」「回复框不禁用」各让一条用例变红。
+
+#### TC-ISSUES-BANNER-1：真实的任务 lane 归档后看它的问答（尚未执行）
+
+**前提：** 含此改动的版本已部署，并有一条照任务 lane 收尾流程 `lane_finish` 后已归档的任务 lane，它名下有问答。
+
+1. 在问答页打开它名下的一条问答。
+2. 点横幅里的父议题号，再按浏览器的后退。
+
+**预期：** 横幅写着父议题号；回复框不能用，「结束议题」能点；点议题号打开父议题，后退回到原来那条。
+
 ### 回复对象：空着时自动选上新来的问题
 
 需求与设计见 `docs/superpowers/specs/2026-10-20-issue-reply-target-adopt.md`。
