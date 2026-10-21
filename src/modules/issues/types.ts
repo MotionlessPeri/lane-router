@@ -147,6 +147,10 @@ export interface IssueOwner {
   readonly state: "active" | "archived" | "missing";
   /** The Router's belief about reaching the lane, not whether it is handling anything; null unless active. */
   readonly presence: IssuePresence | null;
+  /** When a task lane said it was done; null for any other lane, and until it does. */
+  readonly finishedAt: number | null;
+  /** Where a finished task lane's follow-ups go, as its role named them; null for any other lane. */
+  readonly task: { readonly issue: string | null; readonly parent: string | null } | null;
 }
 export type IssuePresence = "online" | "busy" | "unconfirmed" | "offline";
 export interface IssueSummary extends IssueThread {

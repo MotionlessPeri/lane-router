@@ -143,6 +143,9 @@
   .new-divider { display: flex; align-items: center; gap: 10px; color: var(--blue); font-size: 12px; }
   .new-divider::before, .new-divider::after { content: ""; flex: 1; border-top: 1px solid var(--blue); }
   #compose-region { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 6px; }
+  /* An issue whose lane is archived: where a follow-up goes instead, over the reply box it locks. */
+  .owner-banner { margin: 0 0 8px; padding: 8px 12px; border: 1px solid var(--line); border-left: 3px solid var(--warm); border-radius: 7px; background: var(--bg); font-size: 13px; }
+  .owner-banner .issue-link { display: inline; min-height: 0; margin: 0; padding: 0; border: 0; background: transparent; color: var(--blue); font: inherit; text-decoration: underline; }
   /* Folded to two lines until it is in use: the reply area stays on screen under the history, and
      every line it holds is a line the history does not get. */
   /* minmax(0, …): 回复对象 shows the question's text, which must not widen the form past the window. */
@@ -253,6 +256,7 @@
         <button type="button" id="load-history" hidden>继续加载历史</button>
       </div>
       <div id="compose-region">
+        <p id="owner-banner" class="owner-banner" role="note" hidden></p>
         <p id="read-status" class="meta" role="status"></p>
         <div id="compose"></div>
         <p id="operation-status" role="status"></p>
@@ -990,6 +994,7 @@
     renderHistory(id, view, detail);
     byId("load-history").hidden = !view.hasMore;
     byId("read-status").textContent = view.readError;
+    renderOwnerBanner(detail.owner);
     renderCompose(id, closed);
     byId("close-confirmation").hidden = !view.confirmClose || closed;
     byId("confirm-close").disabled = Boolean(view.operation);
@@ -1000,6 +1005,28 @@
     // Set readiness only after the entries have actually been placed in the document.
     byId("issue-detail").dataset.issueId = id;
   }
+
+  /**
+   * An archived lane takes no reply. A task lane's banner names where its follow-ups go, as the core
+   * read them from its role (spec 2026-10-21-task-lane.md, 4.3 item 5); any other says to start anew.
+   */
+  function renderOwnerBanner(owner) {
+    const banner = byId("owner-banner"), archived = owner.state === "archived", task = owner.task ?? null;
+    banner.hidden = !archived;
+    const signature = JSON.stringify(archived ? task : "none");
+    if (banner.dataset.signature === signature) return;
+    banner.dataset.signature = signature;
+    banner.replaceChildren();
+    if (!archived) return;
+    if (!task) banner.append("所属 lane 已归档，不能在这里回复了；要接着谈，请新开问答发给别的 lane");
+    else if (task.issue) {
+      const link = node("button", "issue-link", task.issue.slice(0, 8)); link.type = "button"; link.title = task.issue;
+      link.addEventListener("click", () => selectIssue(task.issue));
+      banner.append("该任务 lane 已完成归档；追问请到父 lane 的议题 ", link, "，或让父 lane 再开一条任务 lane");
+    } else if (task.parent) banner.append("该任务 lane 已完成归档；请联系 " + task.parent);
+    else banner.append("该任务 lane 已完成归档");
+  }
+  const ownerGone = view => view.detail?.owner.state === "archived";
 
   function renderQuestions(id, view, detail) {
     const refs = references(view, detail);
@@ -1158,11 +1185,13 @@
       select.dataset.options = JSON.stringify(options);
     }
     if (select.value !== view.questionId) select.value = view.questionId;
-    byId("reply-body").disabled = Boolean(view.operation); select.disabled = Boolean(view.operation); byId("reply-add-file").disabled = Boolean(view.operation);
-    view.tray.lock(Boolean(view.operation));
+    // The banner says why: an archived lane refuses every reply.
+    const locked = Boolean(view.operation) || ownerGone(view);
+    byId("reply-body").disabled = locked; select.disabled = locked; byId("reply-add-file").disabled = locked;
+    view.tray.lock(locked);
     syncSend(id);
     const reopen = byId("reopen-hint");
-    reopen.hidden = !closed;
+    reopen.hidden = !closed || ownerGone(view);
     reopen.textContent = closed ? "这条问答已经结束（由" + (view.detail.thread.closedBy === "lane" ? " lane " : "你") + "结束）。回复会重新打开它。" : "";
     showTargetHint(id);
     sizeCompose(id);
@@ -1170,7 +1199,7 @@
   /** Sending waits for the files: none may still be uploading or have failed. */
   function syncSend(id) {
     const send = byId("send-reply"), view = viewFor(id);
-    if (send && byId("compose").dataset.for === id) send.disabled = Boolean(view.operation) || Boolean(view.tray?.pending());
+    if (send && byId("compose").dataset.for === id) send.disabled = Boolean(view.operation) || ownerGone(view) || Boolean(view.tray?.pending());
     sizeCompose(id);
   }
   /**

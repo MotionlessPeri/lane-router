@@ -44,7 +44,7 @@ test("1: an owner carries its lane's project in the list and the detail; a lane 
   x.lanes.set("lane-solve", { ...solve, archivedAt: 5 });
   expect(x.service.detail(ids.solveWaiting).owner).toMatchObject({ state: "archived", project: "studio" });
   x.lanes.delete("lane-two");
-  expect(x.service.detail(ids.otherOpen).owner).toEqual({ laneId: "lane-two", address: null, project: null, state: "missing", presence: null });
+  expect(x.service.detail(ids.otherOpen).owner).toEqual({ laneId: "lane-two", address: null, project: null, state: "missing", presence: null, finishedAt: null, task: null });
   expect(x.service.list({ filter: "all" }).items.find(item => item.id === ids.otherOpen)?.owner.project).toBeNull();
 });
 

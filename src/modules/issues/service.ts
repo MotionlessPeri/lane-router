@@ -373,10 +373,11 @@ export class IssuesService {
 
   private owner(laneId: string): IssueOwner {
     const facts = this.options.lanes.readLane(laneId);
-    if (facts === null) return { laneId, address: null, project: null, state: "missing", presence: null };
-    const { address, project } = facts;
-    if (facts.archivedAt !== null) return { laneId, address, project, state: "archived", presence: null };
-    return { laneId, address, project, state: "active", presence: presence(facts) };
+    if (facts === null) return { laneId, address: null, project: null, state: "missing", presence: null, finishedAt: null, task: null };
+    // The core names these only for a lane that finished or was archived; a page reads null for the rest.
+    const { address, project } = facts, finishedAt = facts.finishedAt ?? null, task = facts.task ?? null;
+    if (facts.archivedAt !== null) return { laneId, address, project, state: "archived", presence: null, finishedAt, task };
+    return { laneId, address, project, state: "active", presence: presence(facts), finishedAt, task };
   }
 
   private agentWrite<T>(context: CallerContext, operation: string, key: string, payload: object, issueId: string | undefined, work: (actor: LaneCallerIdentity) => T, allowClosed = false): T {
