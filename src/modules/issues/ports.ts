@@ -40,6 +40,8 @@ export interface IssueStore {
   waitingThreads(ownerLaneId: string): readonly { readonly id: string; readonly title: string; readonly waitingUser: number; readonly waitingLane: number }[];
   /** Every lane that owns at least one issue. */
   ownerLaneIds(): readonly string[];
+  /** The issues a whole ID or an eight-digit prefix names, lowercase; at most two, enough to tell one from many. */
+  threadsByRef(ref: string): readonly IssueThread[];
   countsByOwner(filter: IssueFilter): readonly IssueOwnerCount[];
   entry(issueId: string, id: string): IssueEntry | null;
   entries(issueId: string, afterSeq: number, limit: number): readonly IssueEntry[];

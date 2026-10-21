@@ -89,6 +89,11 @@ export class SqliteIssueStore implements IssueStore {
       ORDER BY t.id`).all(ownerLaneId) as { id: string; title: string; waitingUser: number; waitingLane: number }[];
   }
 
+  threadsByRef(ref: string): readonly IssueThread[] {
+    // Eight hex digits hold no % or _, so the prefix needs no escaping.
+    return this.database.prepare(`SELECT ${THREAD} FROM issue_thread WHERE ${ref.length === 8 ? "id LIKE ? || '%'" : "id=?"} ORDER BY id LIMIT 2`).all(ref) as IssueThread[];
+  }
+
   ownerLaneIds(): readonly string[] {
     return (this.database.prepare("SELECT DISTINCT owner_lane_id AS id FROM issue_thread ORDER BY owner_lane_id").all() as { id: string }[]).map((row) => row.id);
   }

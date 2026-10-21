@@ -33,10 +33,11 @@ export class IssuesHttp {
     const detail = /^\/issues\/api\/threads\/([^/]+)$/u.exec(url.pathname);
     const lanes = url.pathname === "/issues/api/lanes";
     const projects = url.pathname === "/issues/api/projects";
+    const resolving = url.pathname === "/issues/api/resolve";
     const exact = request.method === "POST" && request.url === url.pathname;
     const creating = exact && url.pathname === "/issues/api/threads";
     const write = exact ? /^\/issues\/api\/threads\/([^/]+)\/(replies|read|close)$/u.exec(url.pathname) : null;
-    const reading = request.method === "GET" && (url.pathname === "/issues" || markdownAsset || url.pathname === "/issues/api/threads" || detail !== null || lanes || projects);
+    const reading = request.method === "GET" && (url.pathname === "/issues" || markdownAsset || url.pathname === "/issues/api/threads" || detail !== null || lanes || projects || resolving);
     if (!reading && !write && !creating) return false;
     const service = this.options.service;
     if (!service) { json(response, 503, { error: "ISSUES_UNAVAILABLE: issue module is unavailable", code: "ISSUES_UNAVAILABLE" }); return true; }
@@ -61,6 +62,8 @@ export class IssuesHttp {
           json(response, 200, { result: service.listLanes(), actionToken: this.options.actionToken });
         } else if (projects) {
           json(response, 200, { result: service.projects(projectsQuery(url.searchParams)), actionToken: this.options.actionToken });
+        } else if (resolving) {
+          json(response, 200, { result: service.resolveRefs(refsQuery(url.searchParams)), actionToken: this.options.actionToken });
         } else {
           const result = detail ? service.detail(decodeURIComponent(detail[1]!), historyQuery(url.searchParams)) : service.list(listQuery(url.searchParams));
           json(response, 200, { result, actionToken: this.options.actionToken });
@@ -168,6 +171,14 @@ function listQuery(params: URLSearchParams): IssueListQuery {
   if ((updatedAt === undefined) !== (id === null)) throw new IssueError("INVALID_INPUT", "List cursor needs beforeUpdatedAt and beforeId");
   return { filter: (params.get("filter") ?? "attention") as IssueListQuery["filter"], limit: integer(params, "limit"),
     ...(updatedAt === undefined || id === null ? {} : { before: { updatedAt, id } }), ...(project === null ? {} : { project }) };
+}
+
+/** `refs` is required and comma-separated; the service judges each one. */
+function refsQuery(params: URLSearchParams): string[] {
+  queryFields(params, ["refs"]);
+  const refs = params.get("refs");
+  if (refs === null) throw new IssueError("INVALID_INPUT", "refs is required");
+  return refs.split(",");
 }
 
 function projectsQuery(params: URLSearchParams): { filter: IssueFilter } {

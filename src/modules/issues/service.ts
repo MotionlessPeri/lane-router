@@ -10,7 +10,7 @@ import {
   type AppendIssueInput, type AttentionReason, type CloseIssueInput, type CreateIssueInput, type IssueAttachment, type IssueAttachmentInfo, type IssueDetail,
   type IssueEntry, type IssueEntryResult, type IssueHistoryQuery, type IssueList,
   type IssueCloser, type IssueFilter, type IssueListQuery, type IssueOwner, type IssuePresence, type IssueProcessedResult, type IssueProjectCount,
-  type IssueProjects, type IssueQuestion, type IssueThread,
+  type IssueProjects, type IssueQuestion, type IssueRefs, type IssueThread,
   type IssueWakeResult, type LaneCloseIssueInput, type PublishIssueInput, type ReadIssueInput, type RecordProcessedInput, type ReplyIssueInput,
   type UpdateIssueQuestionInput,
 } from "./types.js";
@@ -166,6 +166,21 @@ export class IssuesService {
   }
 
   list(query: IssueListQuery = {}): IssueList { return this.listOwned(query); }
+
+  /**
+   * Which of these references name exactly one issue: a whole ID in either case, or its first eight
+   * hex digits. One that names none or several is left out; the page's alone, not a lane tool's.
+   */
+  resolveRefs(refs: readonly string[]): IssueRefs {
+    if (!Array.isArray(refs) || refs.length > 100) invalid("refs must be a list of at most 100 references");
+    for (const ref of refs) if (typeof ref !== "string" || !ISSUE_REF.test(ref)) invalid("A reference is a whole issue ID or exactly eight hex digits");
+    return { items: refs.flatMap((ref) => {
+      const found = this.store.threadsByRef(ref.toLowerCase());
+      if (found.length !== 1) return [];
+      const { id, title, status, ownerLaneId } = found[0]!;
+      return [{ ref, id, title, status, ownerAddress: this.owner(ownerLaneId).address }];
+    }) };
+  }
 
   /** Each project that has an issue, with lanes gone gathered under null at the end. */
   projects(query: { readonly filter?: IssueFilter } = {}): IssueProjects {
@@ -499,6 +514,8 @@ function text(value: unknown, name: string): string {
   if (typeof value !== "string" || value.trim().length === 0) invalid(`${name} must be a nonempty string`);
   return value;
 }
+
+const ISSUE_REF = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8})$/iu;
 
 /** The filter asked for; none asked means 待我处理. */
 function listFilter(value: unknown): IssueFilter {

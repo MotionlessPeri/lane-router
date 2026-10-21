@@ -124,6 +124,16 @@ export interface IssueProjectCount {
   readonly attentionCount: number;
 }
 export interface IssueProjects { readonly items: readonly IssueProjectCount[] }
+/** A reference in some text that names exactly one issue: as written, and what it names. */
+export interface IssueRef {
+  readonly ref: string;
+  readonly id: string;
+  readonly title: string;
+  readonly status: IssueStatus;
+  /** Null when the lane no longer exists. */
+  readonly ownerAddress: string | null;
+}
+export interface IssueRefs { readonly items: readonly IssueRef[] }
 export interface IssueHistoryQuery { readonly afterSeq?: number; readonly limit?: number }
 export interface IssueOwner {
   readonly laneId: string;
