@@ -497,9 +497,16 @@ lane-router-lane kb record --json-file record.json
 - `tests/modules/issues/attachments-http.test.ts`：上传和读取两个入口。
 - `tests/modules/issues/attachments-link.test.ts`：回复和新问答带附件。
 - `tests/modules/issues/attachments-schedule.test.ts`：模块启动时清理一次，之后每 6 小时一次。
-- `tests/modules/issues/schema-upgrade.test.ts`：v1、v2 升到 v3。
+- `tests/modules/issues/schema-upgrade.test.ts`：v1、v2 升到 v3（现在升到 v4，见下）。
 - `tests/modules/issues/attachments-browser.test.ts`：浏览器组，页面上的贴、拖、选、上传中不能发、重试、页面拦超限、草稿还原和清理提示、历史显示、新问答。
 - 设计稿第六节里属于 3.2、3.3 的六个变异，各自让预定的用例变红。
+
+**附件按添加的顺序显示**（`docs/superpowers/specs/2026-10-21-issue-attachment-order.md`，问答库 v4）：
+
+- 一条回复或新问答里的附件，历史里按用户添加的顺序显示，也就是发送时 `attachmentIds` 的顺序，和给 lane 的信里列的顺序一致。原来按上传完成的先后排，几个文件同时上传时，历史里的顺序可能和信里对不上。
+- 问答库升到 v4：`issue_attachment` 加可空整数列 `position`，认领时写入它在 `attachmentIds` 里的下标；读出时先按 `position`，再按 `created_at`。升级前的行 `position` 为空，照旧按上传先后，显示不变。升级前照例备份成 `issues.sqlite.v3.bak`；从 v1 一次升上来只留 `.v1.bak`。
+- **上线：** 要重启核心。升到 v4 以后旧构建打不开问答库，部署前先备份。
+- 自动测试：`tests/modules/issues/schema-upgrade.test.ts` 加了 v3 的夹具（`tests/fixtures/issues/v3-from-v2.sql`，v3 当时的语句原样冻结），以及升级、备份、已有附件行不变、结构和新库一致的用例；`tests/modules/issues/attachment-order.test.ts` 测回复、新问答的顺序和旧数据的退路。`attachments-browser` 里比上传先后的那句改成不比先后，连跑 5 遍都过。三个变异（读出不按 `position` 排、认领不写 `position`、升级时改了旧行）各让预定的用例变红。
 
 #### TC-ISSUES-FILES-1：截图贴进问答发给 lane（第 10 条，尚未执行）
 

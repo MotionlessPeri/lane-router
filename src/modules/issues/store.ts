@@ -190,11 +190,12 @@ export class SqliteIssueStore implements IssueStore {
   }
 
   attachmentsOfIssue(issueId: string): readonly IssueAttachment[] {
-    return this.database.prepare(`SELECT ${ATTACHMENT} FROM issue_attachment WHERE issue_id=? ORDER BY created_at,id`).all(issueId) as IssueAttachment[];
+    // As each entry was sent with them; files from before positions were kept, as they were uploaded.
+    return this.database.prepare(`SELECT ${ATTACHMENT} FROM issue_attachment WHERE issue_id=? ORDER BY position IS NULL,position,created_at,id`).all(issueId) as IssueAttachment[];
   }
 
-  claimAttachment(id: string, issueId: string, entryId: string): boolean {
-    return this.database.prepare("UPDATE issue_attachment SET issue_id=?,entry_id=? WHERE id=? AND entry_id IS NULL").run(issueId, entryId, id).changes === 1;
+  claimAttachment(id: string, issueId: string, entryId: string, position: number): boolean {
+    return this.database.prepare("UPDATE issue_attachment SET issue_id=?,entry_id=?,position=? WHERE id=? AND entry_id IS NULL").run(issueId, entryId, position, id).changes === 1;
   }
 
   unclaimedAttachments(createdBefore: number): readonly IssueAttachment[] {

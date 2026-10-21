@@ -63,8 +63,11 @@ export interface IssueStore {
   attachment(id: string): IssueAttachment | null;
   /** Every attachment an issue's entries took, in upload order. */
   attachmentsOfIssue(issueId: string): readonly IssueAttachment[];
-  /** Gives an unclaimed attachment to an entry; false when it is gone or another entry has it. */
-  claimAttachment(id: string, issueId: string, entryId: string): boolean;
+  /**
+   * Gives an unclaimed attachment to an entry, at its place among the files that entry was sent
+   * with; false when it is gone or another entry has it.
+   */
+  claimAttachment(id: string, issueId: string, entryId: string, position: number): boolean;
   unclaimedAttachments(createdBefore: number): readonly IssueAttachment[];
   /** Removes the row only while no entry has claimed it; true when a row went. */
   deleteUnclaimedAttachment(id: string): boolean;

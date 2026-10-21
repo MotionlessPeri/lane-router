@@ -91,7 +91,8 @@ test.skipIf(!browser)("a pasted screenshot, a dropped file and a picked file eac
   expect(items.map(item => item.name)).toEqual(["image.png", "日志.txt", "plan.md"]);
   expect(items[0]!.thumbnail).toMatch(/^blob:/u);
   expect(items.slice(1).map(item => item.thumbnail)).toEqual([null, null]);
-  expect(uploads).toEqual(["image.png", "日志.txt", "plan.md"]);
+  // The three upload at once, so which the Router hears first is not fixed; that each went once is.
+  expect([...uploads].sort()).toEqual(["image.png", "日志.txt", "plan.md"].sort());
 
   await page.fill("#reply-body", "三个文件");
   const sent = page.waitForRequest(request => request.url().endsWith("/replies"));

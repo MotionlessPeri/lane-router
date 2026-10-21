@@ -129,6 +129,13 @@ CREATE INDEX issue_attachment_entry_idx ON issue_attachment(issue_id,entry_id);
 CREATE INDEX issue_attachment_unattached_idx ON issue_attachment(created_at) WHERE entry_id IS NULL;`,
     data: "",
   },
+  {
+    // Where a file stands among those its entry was sent with, so it reads in the order the user
+    // added it, as the letter lists it. Set when an entry takes the file; rows from before have none
+    // and read in upload order, as they always did.
+    structure: "ALTER TABLE issue_attachment ADD COLUMN position INTEGER CHECK(position IS NULL OR (typeof(position)='integer' AND position>=0))",
+    data: "",
+  },
 ];
 
 export const ISSUE_SCHEMA_VERSION = UPGRADES.length + 1;

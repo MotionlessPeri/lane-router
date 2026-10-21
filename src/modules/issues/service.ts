@@ -471,8 +471,8 @@ export class IssuesService {
 
   /** Gives the entry its uploads; one that is gone or already sent refuses the whole write. */
   private claim(entry: IssueEntry, attachmentIds: readonly string[] | null): readonly IssueAttachment[] {
-    return (attachmentIds ?? []).map((id) => {
-      if (!this.store.claimAttachment(id, entry.issueId, entry.id)) reference(`Attachment ${id} is missing, was cleaned up, or was already sent`);
+    return (attachmentIds ?? []).map((id, position) => {
+      if (!this.store.claimAttachment(id, entry.issueId, entry.id, position)) reference(`Attachment ${id} is missing, was cleaned up, or was already sent`);
       return this.store.attachment(id)!;
     });
   }
