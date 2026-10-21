@@ -81,9 +81,9 @@ test("8: the answer is told in three kinds, in the account page's words", async 
   expect(await p.press("claude", { status: 200, body: { result: { backend: "claude",
     notified: ["project/work", "studio/solve"], queued: ["project/other"],
     skipped: [{ address: "project/old", reason: "archived" }, { address: "project/lost", reason: "delivery_failed" }, { address: "project/new", reason: "unbound" },
-      { address: "project/gone", reason: "missing" }, { address: "project/odd", reason: "something_else" }] } } }))
+      { address: "project/gone", reason: "missing" }, { address: "task/done", reason: "finished" }, { address: "project/odd", reason: "something_else" }] } } }))
     .toBe("已唤醒 2 条：project/work、studio/solve；1 条没开着，信已留在它的信箱，打开时处理：project/other；"
-      + "跳过 5 条：project/old（已归档）、project/lost（没能写进信箱）、project/new（没有对话）、project/gone（不存在）、project/odd（something_else）。");
+      + "跳过 6 条：project/old（已归档）、project/lost（没能写进信箱）、project/new（没有对话）、project/gone（不存在）、task/done（已完成）、project/odd（something_else）。");
   expect(p.status().hidden).toBe(false);
   expect(p.status().className).not.toContain("warning");
   expect(await p.press("claude", { status: 200, body: { result: { backend: "claude", notified: [], queued: [],
