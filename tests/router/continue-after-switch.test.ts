@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type { NotificationOutcome, PlatformBackend, ReachSnapshot, RestorePresence } from "../../src/router/backend.js";
 import { BackendRegistry } from "../../src/router/backend.js";
-import { ContinueAfterSwitch, ContinueInputError, continueBody, parseContinueInput, type ContinueLane } from "../../src/router/continue-after-switch.js";
+import { ContinueAfterSwitch, ContinueInputError, continueBody, continueLanes, parseContinueInput, type ContinueLane } from "../../src/router/continue-after-switch.js";
 import { openRouterDatabase } from "../../src/router/database.js";
 import { MailboxStore } from "../../src/router/mailbox-store.js";
 import { NotificationPump } from "../../src/router/notification-pump.js";
@@ -20,7 +20,12 @@ import type { UserMessageInput, UserMessageTargetState } from "../../src/router/
 
 const CLAUDE_LETTER = "切号后继续：用户已手动切换 Claude 账号，额度已恢复。\n若你上一回合因额度 / 容量失败而停下，请从中断处继续原任务；若没有停下，忽略本信并 ack。";
 
-const lane = (address: string, backend: ContinueLane["backend"]): ContinueLane => ({ laneId: `id-${address}`, address, backend });
+const MID_TURN: ReachSnapshot = { state: "live", connectedAt: 1, lastLifecycleAt: 2, lastNotifiedAt: null, believedBusy: true };
+const IDLE: ReachSnapshot = { ...MID_TURN, believedBusy: false };
+
+/** An open lane whose last turn started and never reported its end, unless the test says otherwise. */
+const lane = (address: string, backend: ContinueLane["backend"], over: Partial<ContinueLane> = {}): ContinueLane =>
+  ({ laneId: `id-${address}`, address, backend, restorePresence: "online", reach: backend === "codex" ? { ...MID_TURN, believedBusy: null } : MID_TURN, ...over });
 
 /** A delivery that answers each lane with the state the test names, and a clock the test drives. */
 function setup(lanes: readonly ContinueLane[], states: Record<string, UserMessageTargetState | "throw">) {
@@ -45,10 +50,45 @@ const addressesOf = (sent: readonly UserMessageInput[], lanes: readonly Continue
 
 const LANES = [lane("alpha/a", "claude"), lane("alpha/b", "claude"), lane("alpha/c", "codex")];
 
-test("acceptance 1: only the named backend's lanes are written to, and the answer says which were woken and which will read it when opened", async () => {
-  const x = setup(LANES, { "alpha/a": "online", "alpha/b": "offline" });
-  expect(await x.continuer.continue("claude")).toEqual({ backend: "claude", notified: ["alpha/a"], queued: ["alpha/b"], skipped: [] });
+test("acceptance 1: only the named backend's lanes are written to, and the answer says which were woken", async () => {
+  const x = setup(LANES, { "alpha/a": "online", "alpha/b": "online" });
+  expect(await x.continuer.continue("claude")).toEqual({ backend: "claude", notified: ["alpha/a", "alpha/b"], queued: [], skipped: [] });
   expect(addressesOf(x.sent, LANES)).toEqual(["alpha/a", "alpha/b"]);
+});
+
+// 2026-10-21 revision (Vikunja LR-55; the user in 问答 8565b38a: 「能不能改成只给在线的发啊？这个
+// 消耗有点过于大了」). One press had woken 30 open lanes and left a letter with 57 closed ones. Only
+// a lane whose turn was cut short needs the letter: one that is open, and whose last lifecycle was
+// UserPromptSubmit with no Stop after it. A closed lane gets nothing, not even a queued letter.
+test("LR-55: a closed lane and an open but idle one get no letter, and are counted apart", async () => {
+  const lanes = [
+    lane("alpha/cut", "claude"),
+    lane("alpha/idle", "claude", { reach: IDLE }),
+    lane("alpha/restarted", "claude", { reach: { ...MID_TURN, state: "unconfirmed", lastLifecycleAt: null } }),
+    lane("alpha/closed", "claude", { restorePresence: "offline", reach: null }),
+    lane("alpha/gone", "claude", { restorePresence: "unavailable", reach: null }),
+  ];
+  const x = setup(lanes, {});
+  expect(await x.continuer.continue("claude")).toEqual({
+    backend: "claude", notified: ["alpha/cut"], queued: [],
+    skipped: [
+      { address: "alpha/idle", reason: "idle" },
+      { address: "alpha/restarted", reason: "idle" },
+      { address: "alpha/closed", reason: "offline" },
+      { address: "alpha/gone", reason: "offline" },
+    ],
+  });
+  expect(addressesOf(x.sent, lanes)).toEqual(["alpha/cut"]);
+});
+
+// The Codex backend reports no turn state at all (believedBusy null), so "only a cut turn" cannot be
+// told there: every open Codex lane gets the letter, a closed one still none.
+test("LR-55: a backend that reports no turn state sends to every open lane and no closed one", async () => {
+  const lanes = [lane("alpha/c", "codex"), lane("alpha/c-closed", "codex", { restorePresence: "offline", reach: null })];
+  const x = setup(lanes, {});
+  expect(await x.continuer.continue("codex")).toEqual({
+    backend: "codex", notified: ["alpha/c"], queued: [], skipped: [{ address: "alpha/c-closed", reason: "offline" }],
+  });
 });
 
 test("acceptance 2: the letter is the fixed one, from the user, through the action's own origin", async () => {
@@ -112,7 +152,7 @@ describe("through the real core", () => {
     async notifyNormal(binding: BindingRecord): Promise<NotificationOutcome> { this.notified.push(binding); return "sent"; }
     async notifyCorrection(binding: BindingRecord): Promise<NotificationOutcome> { this.notified.push(binding); return "sent"; }
     onAttentionOpportunity(): () => void { return () => undefined; }
-    reach(): ReachSnapshot { return { state: "live", connectedAt: 1, lastLifecycleAt: 2, lastNotifiedAt: null, believedBusy: false }; }
+    reach(): ReachSnapshot { return { state: "live", connectedAt: 1, lastLifecycleAt: 2, lastNotifiedAt: null, believedBusy: this.name === "claude" ? true : null }; }
     restorePresence(): RestorePresence { return "online"; }
     resolveIdentity(context: CallerContext): ResolvedIdentity { return { value: context.conversationId, source: "caller" }; }
     async waitUntilReplaceable(): Promise<void> {}
@@ -132,7 +172,7 @@ describe("through the real core", () => {
       await core.attachCurrent({ backend: "codex", conversationId: "thread-c", requestKey: "attach-c" }, { address: "alpha/c", roleDescription: "C." });
       claude.notified.length = 0; codex.notified.length = 0;
 
-      const result = await new ContinueAfterSwitch({ delivery: core, lanes: () => core.listActiveLanes() }).continue("claude");
+      const result = await new ContinueAfterSwitch({ delivery: core, lanes: () => continueLanes(core) }).continue("claude");
 
       expect(result).toEqual({ backend: "claude", notified: ["alpha/a"], queued: [], skipped: [] });
       const [message] = state.pendingMessages("alpha/a");

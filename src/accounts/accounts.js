@@ -161,17 +161,23 @@
     $("claude-refresh-all").disabled = busy || claude.profiles.length === 0;
   }
   /* After switching an account by hand, a lane whose last turn stopped on quota sits idle until
-     something wakes it. The Router mails every lane of the backend, and this says what became of
-     each: woken, left in a closed lane's mailbox for when it opens, or skipped and why. */
+     something wakes it. The Router mails the open lanes whose turn was cut short, and this says what
+     became of each: woken, or left alone as idle or closed (counted, there are many), or, rarely,
+     left in the mailbox of a lane that closed meanwhile, or skipped for another reason, named. */
   const backendNames = { claude: "Claude", codex: "Codex" };
   const skipReasons = { archived: "已归档", finished: "已完成", unbound: "没有对话", missing: "不存在", delivery_failed: "没能写进信箱" };
   function continueSummary(result) {
     const skipped = result.skipped || [];
     if (!result.notified.length && !result.queued.length && skipped.length && skipped.every(item => item.reason === "sent_within_60s")) return "60 秒内刚发过一轮，这次没有再发。";
+    const idle = skipped.filter(item => item.reason === "idle").length;
+    const offline = skipped.filter(item => item.reason === "offline").length;
+    const others = skipped.filter(item => item.reason !== "idle" && item.reason !== "offline");
     const parts = [];
     if (result.notified.length) parts.push(`已唤醒 ${result.notified.length} 条：${result.notified.join("、")}`);
     if (result.queued.length) parts.push(`${result.queued.length} 条没开着，信已留在它的信箱，打开时处理：${result.queued.join("、")}`);
-    if (skipped.length) parts.push(`跳过 ${skipped.length} 条：${skipped.map(item => `${item.address}（${skipReasons[item.reason] || item.reason}）`).join("、")}`);
+    if (idle) parts.push(`${idle} 条在线但空闲，没发`);
+    if (offline) parts.push(`${offline} 条离线，没发`);
+    if (others.length) parts.push(`跳过 ${others.length} 条：${others.map(item => `${item.address}（${skipReasons[item.reason] || item.reason}）`).join("、")}`);
     return parts.length ? parts.join("；") + "。" : `没有在用的 ${backendNames[result.backend] || result.backend} lane。`;
   }
   async function continueLanes(backend) {

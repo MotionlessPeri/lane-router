@@ -59,6 +59,31 @@ test("the answer is shown as woken, waiting in a closed lane's mailbox, and skip
   expect(shown(p.document, "codex-continue-result").hidden).toBe(true);
 });
 
+// LR-55: only lanes cut mid-turn get the letter. Open idle lanes and closed ones are many, so they
+// are counted rather than named; other skips are still named with their reason.
+test("idle and offline lanes are counted, not listed, beside the ones woken and other skips", async () => {
+  const p = await page(answered({
+    backend: "claude", notified: ["alpha/a"], queued: [],
+    skipped: [
+      { address: "alpha/b", reason: "idle" }, { address: "alpha/c", reason: "idle" },
+      { address: "alpha/d", reason: "offline" }, { address: "alpha/e", reason: "offline" }, { address: "alpha/f", reason: "offline" },
+      { address: "alpha/g", reason: "archived" },
+    ],
+  }));
+  shown(p.document, "claude-continue").click();
+  const result = shown(p.document, "claude-continue-result");
+  await vi.waitFor(() => expect(result.hidden).toBe(false));
+  expect(result.textContent).toBe("已唤醒 1 条：alpha/a；2 条在线但空闲，没发；3 条离线，没发；跳过 1 条：alpha/g（已归档）。");
+});
+
+test("with no lane cut mid-turn, the line still says how many were left alone", async () => {
+  const p = await page(answered({ backend: "claude", notified: [], queued: [], skipped: [{ address: "alpha/b", reason: "idle" }, { address: "alpha/d", reason: "offline" }] }));
+  shown(p.document, "claude-continue").click();
+  const result = shown(p.document, "claude-continue-result");
+  await vi.waitFor(() => expect(result.hidden).toBe(false));
+  expect(result.textContent).toBe("1 条在线但空闲，没发；1 条离线，没发。");
+});
+
 // A task lane between lane_finish and its window closing is still in service, and is skipped as
 // finished (LR-27). The 问答 page says 已完成 for it; this page says the same.
 test("a finished task lane is skipped as 已完成", async () => {

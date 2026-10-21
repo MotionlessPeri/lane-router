@@ -36,12 +36,14 @@ test.skipIf(!browser)("8: the buttons press the board route; each backend's lane
     return { text: await page.textContent("#continue-status"), className: await page.getAttribute("#continue-status", "class") };
   };
 
-  expect(await press("claude")).toEqual({ text: "已唤醒 1 条：alpha/open；1 条没开着，信已留在它的信箱，打开时处理：alpha/closed。", className: "meta" });
+  // The page's own words for offline and idle come with inbox-impl's change; until then a skipped
+  // reason is shown as the Router names it.
+  expect(await press("claude")).toEqual({ text: "已唤醒 1 条：alpha/open；跳过 1 条：alpha/closed（offline）。", className: "meta" });
   const letter = { sender: "user:continue-after-switch", body: continueBody("claude") };
   expect(router.pending("alpha/open")).toEqual([letter]);
-  expect(router.pending("alpha/closed")).toEqual([letter]);
+  // A closed lane had no turn to cut, so it gets nothing, not even a letter for later (LR-55).
+  expect(router.pending("alpha/closed")).toEqual([]);
   expect(router.pending("alpha/codex")).toEqual([]);
-  // A frame only to the open window; the closed lane reads its letter when it next opens.
   expect(router.frames.map((frame) => frame.conversationId)).toEqual([open]);
 
   expect(await press("claude")).toEqual({ text: "60 秒内刚发过一轮，这次没有再发。", className: "meta" });

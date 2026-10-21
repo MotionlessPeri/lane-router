@@ -22,7 +22,7 @@ import { NotificationPump } from "../router/notification-pump.js";
 import { RouterCore } from "../router/router-core.js";
 import { RouterStateStore } from "../router/state-store.js";
 import { TellAdapter } from "../router/tell.js";
-import { ContinueAfterSwitch } from "../router/continue-after-switch.js";
+import { ContinueAfterSwitch, continueLanes } from "../router/continue-after-switch.js";
 import { TaskLaneCloser } from "./task-lane-closer.js";
 import { ClaudeSessionLocator } from "./claude-session-locator.js";
 import { ConversationRestorer } from "./conversation-restorer.js";
@@ -187,7 +187,7 @@ export async function runRouterProcess(options: {
       delivery: core, latestProjectCwd: (project) => state.latestProjectCwd(project),
       newRequestKey: () => `tell:${randomUUID()}`,
     });
-    const continuer = new ContinueAfterSwitch({ delivery: core, lanes: () => core.listActiveLanes() });
+    const continuer = new ContinueAfterSwitch({ delivery: core, lanes: () => continueLanes(core) });
     const progressBoard = new ProgressBoardSource({ dataRoot, log: (line) => process.stderr.write(`${line}\n`) });
     // Once now, so a missing or wrong file is in the start log before anyone opens the 进度 tab.
     progressBoard.read();

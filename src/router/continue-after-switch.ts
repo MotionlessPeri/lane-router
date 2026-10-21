@@ -1,14 +1,18 @@
 import { randomUUID } from "node:crypto";
 
+import type { ReachSnapshot, RestorePresence } from "./backend.js";
+import type { ActiveLane } from "./lane-access.js";
 import type { BackendName } from "./types.js";
 import type { UserMessageDelivery } from "./user-message.js";
 
 /**
- * After the user switches an account by hand, one press asks every lane of that backend to carry
- * on. A turn that failed on quota or capacity has already ended, and the lane sits idle; switching
- * the account does not wake it, but a letter does. Which lanes actually failed is not knowable here
- * (the lifecycle hook reports no reason), so every lane of the backend gets the letter, and one that
- * did not stop simply acks it. Spec docs/superpowers/specs/2026-10-21-continue-after-account-switch.md.
+ * After the user switches an account by hand, one press asks the lanes of that backend whose turn
+ * was cut short to carry on. Switching the account does not wake such a lane, but a letter does. The
+ * lifecycle hook reports no reason, and a turn cut off on quota sends no Stop, so "cut short" is read
+ * as an open lane whose last lifecycle was UserPromptSubmit. A closed lane had no turn to cut and
+ * gets nothing; an open idle one is left alone. A backend that reports no turn state (Codex) cannot
+ * be told apart, so there every open lane gets the letter. One that did not stop simply acks it.
+ * Spec docs/superpowers/specs/2026-10-21-continue-after-account-switch.md, section 9 (LR-55).
  */
 export type ContinueBackend = "claude" | "codex";
 
@@ -16,11 +20,31 @@ export interface ContinueLane {
   readonly laneId: string;
   readonly address: string;
   readonly backend: BackendName;
+  readonly restorePresence: RestorePresence;
+  readonly reach: ReachSnapshot | null;
+}
+
+/** Every lane in service with what its backend says about it now: open or not, and its turn. */
+export function continueLanes(lanes: { listActiveLanes(): readonly ActiveLane[]; readLane(laneId: string): { readonly reach: ReachSnapshot | null } | null }): ContinueLane[] {
+  return lanes.listActiveLanes().map((lane) => ({
+    laneId: lane.laneId, address: lane.address, backend: lane.backend, restorePresence: lane.restorePresence,
+    reach: lanes.readLane(lane.laneId)?.reach ?? null,
+  }));
+}
+
+/** Why a lane gets no letter: closed, or open with no turn left hanging. Undefined: it gets one. */
+function withheld(lane: ContinueLane): "offline" | "idle" | undefined {
+  if (lane.restorePresence !== "online") return "offline";
+  const busy = lane.reach?.believedBusy;
+  if (busy === null || busy === undefined) return undefined;
+  // Unconfirmed is a channel no lifecycle has reached since it connected: no turn to have been cut.
+  return lane.reach?.state === "live" && busy ? undefined : "idle";
 }
 
 /**
  * notified: the letter is in the mailbox and the lane was notified; queued: it is in the mailbox of
- * a lane that is not open, which reads it when it next is; skipped: no letter, and why.
+ * a lane that closed between being chosen and being written to, which reads it when it next opens;
+ * skipped: no letter, and why — offline and idle among the reasons.
  */
 export interface ContinueResult {
   readonly backend: ContinueBackend;
@@ -94,6 +118,8 @@ export class ContinueAfterSwitch {
     const notified: string[] = [], queued: string[] = [], skipped: { address: string; reason: string }[] = [];
     const body = continueBody(backend);
     for (const lane of lanes) {
+      const reason = withheld(lane);
+      if (reason !== undefined) { skipped.push({ address: lane.address, reason }); continue; }
       try {
         // A key of its own per letter: a later press is new mail, not a replay of this one.
         const result = await this.dependencies.delivery.deliverUserMessage({

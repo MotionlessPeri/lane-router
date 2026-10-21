@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { ProgressBoardSource } from "../../../src/process/progress-board.js";
 import { LocalRouterServer } from "../../../src/process/local-server.js";
 import { BackendRegistry, type Notification, type PlatformBackend } from "../../../src/router/backend.js";
-import { ContinueAfterSwitch } from "../../../src/router/continue-after-switch.js";
+import { ContinueAfterSwitch, continueLanes } from "../../../src/router/continue-after-switch.js";
 import { dashboardSnapshot } from "../../../src/router/dashboard.js";
 import { openRouterDatabase } from "../../../src/router/database.js";
 import { MailboxStore } from "../../../src/router/mailbox-store.js";
@@ -36,13 +36,15 @@ export async function startPageRouter() {
       frames.push({ conversationId: binding.conversationId, notification }); return "sent";
     },
     notifyCorrection: async () => "sent", onAttentionOpportunity: () => () => undefined,
-    reach: () => ({ state: "live", connectedAt: 1, lastLifecycleAt: 1, lastNotifiedAt: null, believedBusy: false }),
+    // An open Claude window here is one whose turn was cut short, the lane continue-after-switch is
+    // for (LR-55); Codex, as the real backend, reports no turn state at all.
+    reach: (binding) => ({ state: "live", connectedAt: 1, lastLifecycleAt: 1, lastNotifiedAt: null, believedBusy: name === "codex" ? null : open.get(binding.conversationId) === true }),
     restorePresence: (binding) => open.get(binding.conversationId) === true ? "online" : "offline",
     resolveIdentity: (context) => ({ value: context.conversationId, source: "caller" }), waitUntilReplaceable: async () => undefined,
   });
   const backends = new BackendRegistry([backend("claude"), backend("codex")]);
   const core = new RouterCore({ state, mailbox, backends, pump: new NotificationPump(state, mailbox, backends), newId: () => randomUUID(), now: Date.now });
-  const continuer = new ContinueAfterSwitch({ delivery: core, lanes: () => core.listActiveLanes() });
+  const continuer = new ContinueAfterSwitch({ delivery: core, lanes: () => continueLanes(core) });
   const progressBoard = new ProgressBoardSource({ dataRoot: root, log: () => undefined });
   const issues = setupIssues();
   publishQuestion(issues);
