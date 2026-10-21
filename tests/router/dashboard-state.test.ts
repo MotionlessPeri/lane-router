@@ -168,6 +168,19 @@ describe("dashboardSnapshot", () => {
     } finally { x.database.close(); }
   });
 
+  // The 问答 page's 进度 tab (docs/superpowers/specs/2026-10-21-progress-tab.md, 4.1): asked of its
+  // source on every snapshot, absence included, so the page can tell "not configured" from a URL.
+  it("publishes the progress board its source names, null included, asking on every snapshot", () => {
+    const x = setup();
+    try {
+      let board: { url: string } | null = null;
+      const snapshot = () => dashboardSnapshot({ state: x.state, mailbox: x.mailbox, backends: x.backends, now: () => 9_999, progressBoard: () => board }, ROUTER);
+      expect(snapshot().progressBoard).toBeNull();
+      board = { url: "http://localhost:3456/projects/12/48" };
+      expect(snapshot().progressBoard).toEqual(board);
+    } finally { x.database.close(); }
+  });
+
   // Acceptance 4, both sides. Testing only the over-limit side would pass with `truncated` wired
   // to a constant true, which is the same defect as a list that never admits it was cut.
   it("returns the newest messages up to the limit and says whether it cut any", () => {

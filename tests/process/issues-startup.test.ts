@@ -164,6 +164,28 @@ test("a Codex model list failure no longer aborts startup; shutdown releases the
   const db = new Database(join(path, "router.sqlite")); db.close();
 });
 
+// Spec docs/superpowers/specs/2026-10-21-progress-tab.md, acceptance 1, through the Router itself:
+// the 进度 tab's board URL comes from the data root, is read at startup and on every state request,
+// and is null with the reason in the log when it is missing or not a local address.
+test("the state carries the progress board from the data root, re-read on every request", async () => {
+  const path = root();
+  const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  const x = await boot(path);
+  const logged = () => stderr.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("progress-board.json"));
+  // Read once at startup, so a missing file is in the log before anyone opens the page.
+  expect(logged()).toHaveLength(1);
+  const { url } = JSON.parse(readFileSync(join(path, "discovery.json"), "utf8"));
+  const board = async () => ((await (await fetch(`${url}/dashboard/state`)).json()) as { progressBoard?: unknown }).progressBoard;
+  expect(await board()).toBeNull();
+  writeFileSync(join(path, "progress-board.json"), JSON.stringify({ url: "http://localhost:3456/projects/12/48" }));
+  expect(await board()).toEqual({ url: "http://localhost:3456/projects/12/48" });
+  writeFileSync(join(path, "progress-board.json"), JSON.stringify({ url: "https://example.com/board" }));
+  expect(await board()).toBeNull();
+  expect(logged().at(-1)).toMatch(/not a local http address/u);
+  stderr.mockRestore();
+  await x.runtime.close();
+});
+
 test("failed module recovery closes its started worker and leaves its configured entry unavailable", async () => {
   const path = root(); fake.moduleStartError = true;
   const x = await boot(path);

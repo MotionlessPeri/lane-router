@@ -102,6 +102,12 @@ export interface DashboardSnapshot {
   readonly truncated: { readonly messages: boolean; readonly limit: number };
   readonly launcher?: DashboardLauncherChoices;
   readonly codexHost?: DashboardCodexHost;
+  /** The Vikunja board the 问答 page's 进度 tab embeds; null when this machine has not named one. */
+  readonly progressBoard?: DashboardProgressBoard | null;
+}
+
+export interface DashboardProgressBoard {
+  readonly url: string;
 }
 
 /**
@@ -121,6 +127,7 @@ interface DashboardDependencies {
   readonly now: () => number;
   readonly launcherChoices?: DashboardLauncherChoices;
   readonly codexHost?: () => DashboardCodexHost;
+  readonly progressBoard?: () => DashboardProgressBoard | null;
 }
 
 /**
@@ -185,6 +192,7 @@ export function dashboardSnapshot(
     truncated: { messages: state.countMessages() > limit, limit },
     ...(dependencies.launcherChoices === undefined ? {} : { launcher: dependencies.launcherChoices }),
     ...(dependencies.codexHost === undefined ? {} : { codexHost: dependencies.codexHost() }),
+    ...(dependencies.progressBoard === undefined ? {} : { progressBoard: dependencies.progressBoard() }),
   };
 }
 

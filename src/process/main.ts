@@ -26,6 +26,7 @@ import { ContinueAfterSwitch } from "../router/continue-after-switch.js";
 import { ClaudeSessionLocator } from "./claude-session-locator.js";
 import { ConversationRestorer } from "./conversation-restorer.js";
 import { DashboardLaneOpener } from "./dashboard-lane-opener.js";
+import { ProgressBoardSource } from "./progress-board.js";
 import { CLAUDE_LAUNCHER_MODELS } from "./claude-models.js";
 import { defaultCodexModelProvider, listCodexModelProviders, listCodexProfiles, profileModelProvider } from "./codex-profiles.js";
 import { readRouterConfig } from "./router-config.js";
@@ -175,6 +176,9 @@ export async function runRouterProcess(options: {
       newRequestKey: () => `tell:${randomUUID()}`,
     });
     const continuer = new ContinueAfterSwitch({ delivery: core, lanes: () => core.listActiveLanes() });
+    const progressBoard = new ProgressBoardSource({ dataRoot, log: (line) => process.stderr.write(`${line}\n`) });
+    // Once now, so a missing or wrong file is in the start log before anyone opens the 进度 tab.
+    progressBoard.read();
     const dashboardOpener = new DashboardLaneOpener({
       state,
       restore,
@@ -251,7 +255,9 @@ export async function runRouterProcess(options: {
           input,
         }),
       }),
-      dashboardState: (router) => dashboardSnapshot({ state, mailbox, backends, now: Date.now, launcherChoices, codexHost: () => codexHub.status() }, router),
+      dashboardState: (router) => dashboardSnapshot({
+        state, mailbox, backends, now: Date.now, launcherChoices, codexHost: () => codexHub.status(), progressBoard: () => progressBoard.read(),
+      }, router),
       dashboardOpen: (input) => dashboardOpener.open(input),
       dashboardLaneSets: async (input) => {
         if (input.action === "create") core.createLaneSet(input.name);
