@@ -145,7 +145,7 @@ test("names the Claude session after the lane so every window and picker entry s
 test("the child environment speaks the shell that will read it", () => {
   const ps = childEnvironment(promptRequest, { CLAUDE_CODE_EXECPATH: "C:/real.exe", PATH: "x" }, "title", "powershell", "alpha");
   expect(ps.LANE_ROUTER_CHILD_WINDOW).toBe("alpha");
-  expect(ps.LANE_ROUTER_CHILD_COMMAND).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD");
+  expect(Buffer.from(ps.LANE_ROUTER_CHILD_COMMAND ?? "", "base64").toString("utf16le")).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD\nif ($LASTEXITCODE -eq 75) { [Environment]::Exit(0) }");
   // Windows Terminal splits its command line on `;`, so the command must stay one statement.
   expect(ps.LANE_ROUTER_CHILD_COMMAND).not.toContain(";");
   expect(ps.LANE_ROUTER_CHILD_TITLE).toBe("title");
@@ -162,7 +162,7 @@ test("the child environment speaks the shell that will read it", () => {
   // A caller that names no window still yields a usable -w value; an empty string would make
   // wt read the next token as the window name.
   expect(cmd.LANE_ROUTER_CHILD_WINDOW).toBe("lane-router");
-  expect(cmd.LANE_ROUTER_CHILD_COMMAND).toBe("\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"\"");
+  expect(cmd.LANE_ROUTER_CHILD_COMMAND).toBe("\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\" & if errorlevel 75 if not errorlevel 76 exit 0\"");
   expect(cmd.LANE_ROUTER_CHILD_COMMAND).not.toContain(";");
 });
 

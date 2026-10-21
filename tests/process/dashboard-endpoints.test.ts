@@ -83,7 +83,7 @@ test("neither path accepts a write, and the tool list is unchanged", async () =>
       expect(response.status).toBe(404);
     }
     expect([...LANE_TOOL_NAMES]).toEqual([
-      "lane_directory", "lane_attach_current", "lane_send", "lane_ack", "lane_restore_project",
+      "lane_directory", "lane_attach_current", "lane_send", "lane_ack", "lane_restore_project", "lane_finish",
     ]);
   } finally { await server.close(); }
 });
@@ -225,7 +225,7 @@ test("the set endpoint is absent when it is not wired, and the tool list does no
     const { send } = await setRequest(discovery.url);
     expect((await send({ action: "create", name: "research" })).status).toBe(404);
     expect([...LANE_TOOL_NAMES]).toEqual([
-      "lane_directory", "lane_attach_current", "lane_send", "lane_ack", "lane_restore_project",
+      "lane_directory", "lane_attach_current", "lane_send", "lane_ack", "lane_restore_project", "lane_finish",
     ]);
   } finally { await server.close(); }
 });

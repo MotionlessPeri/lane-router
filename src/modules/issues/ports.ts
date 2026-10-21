@@ -29,6 +29,8 @@ export interface IssueStore {
   insertThread(thread: IssueThread): void;
   updateThread(thread: IssueThread): void;
   listThreads(query: IssueListQuery, ownerLaneId?: string): readonly IssueListRow[];
+  /** A lane's issues with any question waiting, on the user or on the lane, with how many of each. */
+  waitingThreads(ownerLaneId: string): readonly { readonly id: string; readonly title: string; readonly waitingUser: number; readonly waitingLane: number }[];
   entry(issueId: string, id: string): IssueEntry | null;
   entries(issueId: string, afterSeq: number, limit: number): readonly IssueEntry[];
   insertEntry(entry: IssueEntry): void;

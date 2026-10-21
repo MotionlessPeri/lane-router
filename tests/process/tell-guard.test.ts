@@ -31,9 +31,11 @@ async function startServer() {
   const recordCwd = vi.fn();
   const zcodeSpawnLane = vi.fn(async (input: { address: string }) => ({ sessionId: "sess_1", address: input.address }));
   const continueAfterSwitch = vi.fn(async (backend: "claude" | "codex") => ({ backend, notified: [], queued: [], skipped: [] }));
+  const closeTaskLane = vi.fn(async (address: string) => ({ address, action: "archived" }));
   const hostConnect = vi.fn();
   const server = new LocalRouterServer({
-    tools: { call } as never, codexHost: { connect: hostConnect, close: vi.fn() }, instanceId: "x", archiveLane, tell, recordCwd, zcodeSpawnLane, continueAfterSwitch,
+    tools: { call } as never, codexHost: { connect: hostConnect, close: vi.fn() }, instanceId: "x", archiveLane, tell, recordCwd, zcodeSpawnLane,
+    continueAfterSwitch, closeTaskLane,
   });
   // The provider entry moved to the Codex host with the bridges it creates; the same guard went with it.
   const host = new CodexHostServer({ endpoint: "ws://127.0.0.1:1" } as never, () => ({ instanceId: "host" }));
@@ -45,7 +47,7 @@ async function startServer() {
   const discovery = await server.start();
   const hostUrl = (await host.start()).url;
   const urlFor = (entry: { readonly on: "core" | "host" }) => entry.on === "host" ? hostUrl : discovery.url;
-  return { server, discovery, urlFor, archiveLane, call, tell, recordCwd, zcodeSpawnLane, continueAfterSwitch, reportLifecycle, providerEndpoint, hostConnect };
+  return { server, discovery, urlFor, archiveLane, call, tell, recordCwd, zcodeSpawnLane, continueAfterSwitch, closeTaskLane, reportLifecycle, providerEndpoint, hostConnect };
 }
 
 type Started = Awaited<ReturnType<typeof startServer>>;
@@ -53,7 +55,8 @@ type Started = Awaited<ReturnType<typeof startServer>>;
 /** Every way an entry could have acted, so a refusal is checked against all of them at once. */
 function expectNothingActed(x: Started): void {
   for (const [name, spy] of Object.entries({
-    archiveLane: x.archiveLane, call: x.call, tell: x.tell, recordCwd: x.recordCwd, zcodeSpawnLane: x.zcodeSpawnLane, continueAfterSwitch: x.continueAfterSwitch,
+    archiveLane: x.archiveLane, call: x.call, tell: x.tell, recordCwd: x.recordCwd, zcodeSpawnLane: x.zcodeSpawnLane,
+    continueAfterSwitch: x.continueAfterSwitch, closeTaskLane: x.closeTaskLane,
     reportLifecycle: x.reportLifecycle, providerEndpoint: x.providerEndpoint, hostConnect: x.hostConnect,
   })) expect(spy, name).not.toHaveBeenCalled();
 }
@@ -88,6 +91,8 @@ const ENTRIES = [
   { on: "core", path: "/zcode/spawn", body: JSON.stringify({ address: "alpha/victim", role: "r", cwd: "C:/forged", intro: "forged first turn" }) },
   // A page that could press this would mail every lane of a backend; the board's own entry needs its token.
   { on: "core", path: "/lanes/continue-after-switch", body: JSON.stringify({ backend: "claude" }) },
+  // A page that could press this would end a task lane's process and archive it.
+  { on: "core", path: "/lanes/close", body: JSON.stringify({ address: "alpha/victim" }) },
 ] as const;
 
 describe("entries that change state refuse what a web page can send", () => {

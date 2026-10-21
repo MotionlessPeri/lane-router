@@ -5,6 +5,7 @@ import type { ActiveLane, LaneAccess, LaneAccessFacts, LaneCallerIdentity } from
 import type { UserMessageDelivery, UserMessageInput, UserMessageResult, UserMessageTargetState } from "./user-message.js";
 import type { NotificationPump } from "./notification-pump.js";
 import type { RouterStateStore } from "./state-store.js";
+import { finishedLaneRefusal, isTaskLane, TASK_LANE_PREFIX, taskLaneOrigin } from "./task-lane.js";
 import type { CallerContext, BackendName, LaneRecord, LaneSetRecord, MessageKind, MessageRecord, ReachSnapshot, ResolvedIdentity } from "./types.js";
 import type { BindingRecord } from "./types.js";
 
@@ -112,6 +113,11 @@ interface RouterCoreDependencies {
   readonly restore?: LaneRestorePort;
   readonly newId: (kind: "binding" | "message") => string;
   readonly now: () => number;
+  /**
+   * What else keeps a task lane from finishing, by lane ID, as sentences: the 问答 issues still
+   * waiting on someone. The issues module is opened after the core, so this is asked when needed.
+   */
+  readonly finishBlockers?: (laneId: string) => readonly string[];
 }
 
 export class RouterCore implements UserMessageDelivery, LaneAccess {
@@ -140,6 +146,10 @@ export class RouterCore implements UserMessageDelivery, LaneAccess {
       laneId: lane.id, address: lane.address, archivedAt: lane.archivedAt,
       binding: binding ? { bindingId: binding.id, generation: binding.generation, backend: binding.backend } : null,
       reach: binding ? this.dependencies.backends.find(binding.backend)?.reach(binding) ?? null : null,
+      ...(lane.finishedAt === null && lane.archivedAt === null ? {} : {
+        finishedAt: lane.finishedAt,
+        task: lane.finishedAt === null ? null : { issue: lane.parentIssueId, parent: lane.parentLane },
+      }),
     };
   }
 
@@ -545,11 +555,16 @@ export class RouterCore implements UserMessageDelivery, LaneAccess {
       // mailbox of a lane nobody will reopen is exactly the silent loss archiving guards against.
       // "Archived" and "never existed" are told apart because the sender can act on the first.
       if (!recipient) {
-        if (state.archivedLaneAt(address)) {
+        const archived = state.archivedLaneAt(address);
+        // A task lane is archived because it finished, and its refusal is the one that says where a
+        // follow-up goes; "archived" alone would leave the sender guessing.
+        if (archived?.finishedAt != null) throw new RouterError("LANE_FINISHED", finishedLaneRefusal(archived));
+        if (archived) {
           throw new RouterError("LANE_ARCHIVED", `Lane is archived: ${address}; archiving is permanent, so send to a different lane`);
         }
         throw new RouterError("LANE_NOT_FOUND", `Lane not found: ${address}`);
       }
+      if (recipient.finishedAt !== null) throw new RouterError("LANE_FINISHED", finishedLaneRefusal(recipient));
       if (!recipients.includes(address)) recipients.push(address);
     }
     if (input.kind === "correction" && !input.replyTo) throw new RouterError("REPLY_TO_REQUIRED", "A correction must identify the message it corrects");
@@ -598,6 +613,7 @@ export class RouterCore implements UserMessageDelivery, LaneAccess {
     let targetState: UserMessageTargetState;
     if (!lane) targetState = "missing";
     else if (lane.archivedAt !== null) targetState = "archived";
+    else if (lane.finishedAt !== null) targetState = "finished";
     else {
       const binding = state.activeBindingForLane(lane.address);
       targetState = binding === undefined ? "unbound"
@@ -624,7 +640,8 @@ export class RouterCore implements UserMessageDelivery, LaneAccess {
       if (!existing.archived && existing.message.state === "pending") await this.dependencies.pump.notifyLane(lane.address);
       return { delivered: true, messageId: existing.message.id, target };
     }
-    if (!lane || lane.archivedAt !== null) {
+    // A finished task lane is on its way to the archive: mail now would be mail nobody reads.
+    if (!lane || lane.archivedAt !== null || lane.finishedAt !== null) {
       return { delivered: false, messageId: null, target };
     }
     const id = this.dependencies.newId("message");
@@ -664,6 +681,30 @@ export class RouterCore implements UserMessageDelivery, LaneAccess {
       createdAt: message.createdAt,
       body: this.dependencies.mailbox.readBody(message.relativePath),
     }));
+  }
+
+  /**
+   * A task lane says it is done. Only a task lane may (see task-lane.ts), and only once nothing is
+   * left for it: no unread mail and no issue waiting on anyone, because archiving refuses unread
+   * mail and a question left waiting would be dropped. What is left is named in the refusal.
+   */
+  async finishLane(context: CallerContext): Promise<{ address: string; finishedAt: number }> {
+    const state = this.dependencies.state;
+    const binding = this.requireCallerBinding(context);
+    const lane = state.requireLane(binding.laneAddress);
+    if (!isTaskLane(lane.roleDescription)) {
+      throw new RouterError("LANE_NOT_A_TASK_LANE", `Lane ${lane.address} is not a task lane: only a lane whose role begins with 「${TASK_LANE_PREFIX}」 can finish itself, because finishing ends in archiving, which is permanent`);
+    }
+    const left: string[] = [];
+    const pending = state.pendingMessagesByLaneId(lane.id);
+    if (pending.length > 0) {
+      const senders = [...new Set(pending.map((message) => message.senderLane))].join(", ");
+      left.push(`${pending.length} unread message(s) from ${senders}: read them and lane_ack each`);
+    }
+    left.push(...(this.dependencies.finishBlockers?.(lane.id) ?? []));
+    if (left.length > 0) throw new RouterError("LANE_FINISH_BLOCKED", `Lane ${lane.address} cannot finish yet: ${left.join("; ")}`);
+    const finished = state.finishLane(lane.id, this.dependencies.now(), taskLaneOrigin(lane.roleDescription));
+    return { address: finished.address, finishedAt: finished.finishedAt! };
   }
 
   async ack(context: CallerContext, input: { messageIds: readonly string[] }): Promise<{ resolved: string[] }> {

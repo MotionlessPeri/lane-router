@@ -115,6 +115,9 @@ export interface LaneMcpStdioProfile {
   readonly backend?: BackendName;
   readonly joinKey?: () => string;
   readonly conversationId?: () => string;
+  /** The pipe from the client; its end means the client is gone. Tests hand in their own. */
+  readonly stdin?: NodeJS.ReadableStream;
+  readonly exit?: (code: number) => void;
 }
 
 export async function runLaneMcpStdio(profile: LaneMcpStdioProfile = {}): Promise<{ close(): Promise<void> }> {
@@ -144,8 +147,20 @@ export async function runLaneMcpStdio(profile: LaneMcpStdioProfile = {}): Promis
     await channel.close();
     await server.close();
   })();
-  try { await server.connect(new StdioServerTransport()); }
+  const stdin = profile.stdin ?? process.stdin;
+  try { await server.connect(new StdioServerTransport(stdin as never)); }
   catch (error) { await close(); throw error; }
+  // The client going away ends stdin, and the SDK's stdio transport does not listen for that: left
+  // alone, this process would keep its channel open, and the lane would look online to the Router
+  // for good. Its client is gone, so there is nothing left to serve.
+  let exiting = false;
+  const clientGone = () => {
+    if (exiting) return;
+    exiting = true;
+    void close().catch(() => undefined).finally(() => (profile.exit ?? ((code: number) => process.exit(code)))(0));
+  };
+  stdin.once("end", clientGone);
+  stdin.once("close", clientGone);
   return { close };
 }
 

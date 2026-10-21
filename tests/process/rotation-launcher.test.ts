@@ -260,7 +260,7 @@ test("titles the window with the generation the successor is about to become", a
   expect(environment.LANE_ROUTER_CHILD_TITLE).toBe("alpha/design gen5");
   expect(environment.LANE_ROUTER_CHILD_WINDOW).toBe("alpha");
   // The title reaches the terminal from the child process, not through this command line.
-  expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD");
+  expect(Buffer.from(environment.LANE_ROUTER_CHILD_COMMAND ?? "", "base64").toString("utf16le")).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD\nif ($LASTEXITCODE -eq 75) { [Environment]::Exit(0) }");
 });
 
 test("opens the successor in the set's window when the lane is in a set", async () => {
@@ -367,7 +367,7 @@ test("passes the terminal choice through to the child environment's command synt
   });
 
   const environment = spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
-  expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"\"");
+  expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\" & if errorlevel 75 if not errorlevel 76 exit 0\"");
 });
 
 test("rejects an unknown terminal choice without opening anything", async () => {

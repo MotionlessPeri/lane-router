@@ -133,6 +133,12 @@
   }
 
   function reachText(lane) {
+    // A finished task lane is still listed only until the Router archives it, and the reader wants
+    // to know what that is waiting for: its unread mail, or its window closing.
+    if (lane.finishedAt) {
+      if (lane.pending.count > 0) { return "已完成，有 " + lane.pending.count + " 封未读"; }
+      return lane.restorePresence === "online" ? "已完成，待关窗" : "已完成";
+    }
     if (!lane.binding) { return "未绑定"; }
     if (!lane.reach) { return "无 backend"; }
     return lane.reach.state + (lane.reach.believedBusy ? "（忙）" : "");

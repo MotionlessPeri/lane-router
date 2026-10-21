@@ -47,6 +47,10 @@ export class ToolService {
         const parsed = toolArgsSchemas.lane_restore_project.parse(args);
         return this.router.restoreProject(context, parsed.lanes === undefined ? {} : { lanes: parsed.lanes });
       }
+      case "lane_finish": {
+        toolArgsSchemas.lane_finish.parse(args);
+        return this.router.finishLane(context);
+      }
     }
   }
 }

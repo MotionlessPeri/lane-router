@@ -161,6 +161,7 @@ describe("stable lane facts", () => {
     expect(x.core.readLane(x.lane.id)).toEqual({
       laneId: x.lane.id, address: x.lane.address, archivedAt: 3,
       binding: { bindingId: old.id, generation: old.generation, backend: "codex" }, reach: unreachable,
+      finishedAt: null, task: null,
     });
     expect(x.core.readLane(replacement.id)).toEqual({
       laneId: replacement.id, address: replacement.address, archivedAt: null,
@@ -176,7 +177,7 @@ describe("stable lane facts", () => {
     const replacement = x.state.createLane({ address: x.lane.address, project: "alpha", roleDescription: "New.", now: 4 });
     x.bind("replacement-conversation", replacement.address);
     expect(x.core.readLane(x.lane.id)).toEqual({
-      laneId: x.lane.id, address: x.lane.address, archivedAt: 3, binding: null, reach: null,
+      laneId: x.lane.id, address: x.lane.address, archivedAt: 3, binding: null, reach: null, finishedAt: null, task: null,
     });
   });
 });

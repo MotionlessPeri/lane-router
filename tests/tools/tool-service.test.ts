@@ -16,8 +16,8 @@ function setup() {
 
 const context = { backend: "codex" as const, conversationId: "thread-1", requestKey: "codex:call-1" };
 
-test("exports the five Lane Router tools", () => {
-  expect(LANE_TOOL_NAMES).toEqual(["lane_directory", "lane_attach_current", "lane_send", "lane_ack", "lane_restore_project"]);
+test("exports the six Lane Router tools", () => {
+  expect(LANE_TOOL_NAMES).toEqual(["lane_directory", "lane_attach_current", "lane_send", "lane_ack", "lane_restore_project", "lane_finish"]);
   expect(LANE_TOOLS.find((tool) => tool.name === "lane_attach_current")?.description).toMatch(/explicit confirmation/i);
 });
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
-import { realpathSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { TerminalChildRequest } from "./terminal-spawn.js";
@@ -64,7 +64,16 @@ export interface TerminalChildDependencies {
   readonly here: string;
   readonly spawn?: (executable: string, args: string[], options: SpawnOptions) => ChildProcess;
   readonly stdout?: (text: string) => void;
+  /** Where this child's own exit code goes; the process's, unless a test is watching. */
+  readonly exit?: (code: number) => void;
 }
+
+/**
+ * The Router ends a finished task lane's CLI and leaves close-requests/<pid> under its data root
+ * first. A child that finds its CLI's pid there exits with this, and the shell around it exits 0 on
+ * it, which is what makes Windows Terminal close the tab rather than keep it at a prompt.
+ */
+export const CLOSE_REQUESTED_EXIT_CODE = 75;
 
 /**
  * Start the lane's CLI in this window, on exactly the environment this child inherited minus the
@@ -108,7 +117,18 @@ export function runTerminalChild(source: NodeJS.ProcessEnv, dependencies: Termin
     report(`The lane CLI could not be started: ${error.message}`);
     throw error;
   });
-  child.once("exit", (code) => { process.exitCode = code ?? 1; });
+  // The status file sits in a directory directly under the data root (lane-status, rotation-status),
+  // which is where the Router leaves its close requests too.
+  const closeRequest = child.pid === undefined ? undefined : resolve(dirname(request.statusPath), "..", "close-requests", String(child.pid));
+  const exit = dependencies.exit ?? ((code: number) => { process.exitCode = code; });
+  child.once("exit", (code) => {
+    if (closeRequest !== undefined && existsSync(closeRequest)) {
+      rmSync(closeRequest, { force: true });
+      exit(CLOSE_REQUESTED_EXIT_CODE);
+      return;
+    }
+    exit(code ?? 1);
+  });
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {

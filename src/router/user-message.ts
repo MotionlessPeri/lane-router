@@ -23,7 +23,8 @@ export interface UserMessageInput {
   readonly requestKey: string;
 }
 
-export type UserMessageTargetState = "online" | "offline" | "unbound" | "archived" | "missing";
+/** "finished": a task lane that said it was done and takes no more mail (task-lane.ts). */
+export type UserMessageTargetState = "online" | "offline" | "unbound" | "archived" | "finished" | "missing";
 
 export interface UserMessageResult {
   /** The message is in the durable mailbox, not necessarily read or processed by the agent. */

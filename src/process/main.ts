@@ -23,6 +23,7 @@ import { RouterCore } from "../router/router-core.js";
 import { RouterStateStore } from "../router/state-store.js";
 import { TellAdapter } from "../router/tell.js";
 import { ContinueAfterSwitch } from "../router/continue-after-switch.js";
+import { TaskLaneCloser } from "./task-lane-closer.js";
 import { ClaudeSessionLocator } from "./claude-session-locator.js";
 import { ConversationRestorer } from "./conversation-restorer.js";
 import { DashboardLaneOpener } from "./dashboard-lane-opener.js";
@@ -110,6 +111,7 @@ export async function runRouterProcess(options: {
   let issues: ReturnType<typeof openIssuesModule> | undefined;
   let graphs: ReturnType<typeof openGraphs> | undefined;
   let knowledge: ReturnType<typeof openKnowledge> | undefined;
+  let closer: TaskLaneCloser | undefined;
   let graphOrigin: string | undefined;
   let server: LocalRouterServer | undefined;
   const discoveryPath = join(dataRoot, "discovery.json");
@@ -124,6 +126,7 @@ export async function runRouterProcess(options: {
     let failure: unknown;
     const attempt = async (work: () => unknown | Promise<unknown>) => { try { await work(); } catch (error) { failure ??= error; } };
     hostKeeper.stop();
+    closer?.close();
     // Drain module work while core storage and delivery backends are still available.
     await attempt(() => issues?.close());
     await attempt(() => server?.close());
@@ -170,7 +173,16 @@ export async function runRouterProcess(options: {
       fallbackCwd: resolve(dirname(fileURLToPath(import.meta.url)), "../.."),
       dataRoot,
     });
-    const core = new RouterCore({ state, mailbox, backends, pump, restore, newId: () => randomUUID(), now: Date.now });
+    const core = new RouterCore({
+      state, mailbox, backends, pump, restore, newId: () => randomUUID(), now: Date.now,
+      // Asked when a task lane finishes, by which time the issues module, opened below, is there.
+      finishBlockers: (laneId) => issues?.service.waitingIssues(laneId) ?? [],
+    });
+    closer = new TaskLaneCloser({
+      dataRoot, state, hub: claudeHub, archive: (address) => core.archiveLane(address),
+      presence: (binding) => backends.find(binding.backend)?.restorePresence(binding) ?? "unavailable",
+      onError: (error) => { process.stderr.write(`TASK_LANE_CLOSER: ${error instanceof Error ? error.message : String(error)}\n`); },
+    });
     const teller = new TellAdapter({
       delivery: core, latestProjectCwd: (project) => state.latestProjectCwd(project),
       newRequestKey: () => `tell:${randomUUID()}`,
@@ -242,6 +254,7 @@ export async function runRouterProcess(options: {
       },
       resumeInfo: (address) => core.resumeInfo(address),
       archiveLane: (address) => core.archiveLane(address),
+      closeTaskLane: (address) => closer!.requestClose(address),
       listArchivedLanes: (project) => core.listArchivedLanes(project),
       tell: (input) => teller.tell(input),
       continueAfterSwitch: (backend) => continuer.continue(backend),
@@ -271,6 +284,7 @@ export async function runRouterProcess(options: {
     writeDiscovery(discoveryPath, discovery);
     for (const backend of [claudeBackend, codexBackend, dshBackend, zcodeBackend]) backend.onAttentionOpportunity((lane) => { void pump.onAttentionOpportunity(lane); });
     await pump.onStartup();
+    closer.start();
     // After discovery, never before: the host finds this core through that file, so a core that
     // waited for its host first would wait forever.
     hostKeeper.ensure();

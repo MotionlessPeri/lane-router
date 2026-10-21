@@ -20,11 +20,11 @@ async function connected() {
   return { client, call };
 }
 
-test("advertises exactly five strict tools with the shared attach confirmation", async () => {
+test("advertises exactly six strict tools with the shared attach confirmation", async () => {
   const x = await connected();
   const listed = await x.client.listTools();
   expect(listed.tools.map((tool) => tool.name)).toEqual(LANE_TOOL_NAMES);
-  expect(listed.tools).toHaveLength(5);
+  expect(listed.tools).toHaveLength(6);
   expect(listed.tools.find((tool) => tool.name === "lane_attach_current")?.description).toMatch(/explicit confirmation/i);
   for (const tool of listed.tools) {
     expect(tool.inputSchema.additionalProperties).toBe(false);

@@ -165,6 +165,28 @@ test("the board says when the Codex host runs a different build from the core, a
   }
 });
 
+// Task lanes (docs/superpowers/specs/2026-10-21-task-lane.md, acceptance 4 and 5): a finished lane
+// still on the board says what it is waiting for — unread mail holding back its archive, or a
+// window yet to close. A snapshot from a Router without task lanes has no finishedAt at all.
+test("a finished lane's reach cell says what it is waiting for", async () => {
+  const base = snapshot.lanes[0]!;
+  const idle = { count: 0, oldestCreatedAt: null };
+  const document = await renderWith({ ...snapshot, lanes: [
+    base,
+    { ...base, address: "alpha/role", finishedAt: null },
+    { ...base, address: "alpha/unread", finishedAt: 5, pending: { count: 2, oldestCreatedAt: 1 } },
+    { ...base, address: "alpha/window", finishedAt: 5, restorePresence: "online", pending: idle },
+    { ...base, address: "alpha/closed", finishedAt: 5, restorePresence: "offline", reach: { ...base.reach, state: "no_channel" }, pending: idle },
+  ] });
+  const reachOf = (address: string) => [...document.querySelectorAll("#lanes tr")]
+    .find((row) => row.firstElementChild?.textContent === address)?.children[5]?.textContent;
+  expect(reachOf("alpha/one")).toBe("live");
+  expect(reachOf("alpha/role")).toBe("live");
+  expect(reachOf("alpha/unread")).toBe("已完成，有 2 封未读");
+  expect(reachOf("alpha/window")).toBe("已完成，待关窗");
+  expect(reachOf("alpha/closed")).toBe("已完成");
+});
+
 test("hostile text in a snapshot is shown, not run", async () => {
   const document = await render();
 

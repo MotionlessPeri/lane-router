@@ -19,6 +19,17 @@ export interface LaneAccessFacts {
     readonly backend: BackendName;
   } | null;
   readonly reach: ReachSnapshot | null;
+  /**
+   * When a task lane said it was done, or null. Present only for a lane that finished or was
+   * archived: those are the lanes a page has something to say about.
+   */
+  readonly finishedAt?: number | null;
+  /**
+   * For a finished task lane, the 问答 issue and parent lane its role named, so a page can say where
+   * a follow-up goes; null for an archived lane that never finished. Present when finishedAt is.
+   * The role text itself still never leaves here.
+   */
+  readonly task?: { readonly issue: string | null; readonly parent: string | null } | null;
 }
 
 /** A lane a user could address right now: in service and with a conversation to reopen. */

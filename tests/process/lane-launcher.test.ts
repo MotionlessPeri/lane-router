@@ -105,7 +105,7 @@ test("new opens a terminal whose first prompt creates the lane", async () => {
   expect(request.prompt).not.toContain("do not start feature work on your own");
   expect(request.prompt).toContain("Afterwards, make sure you understand what this role covers and the project's current state, then report that the lane is ready.");
   expect(request.prompt).toContain("You have no assigned task yet, so do not invent feature work on your own — wait for direction, or for work addressed to you through your mailbox or 问答.");
-  expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD");
+  expect(Buffer.from(environment.LANE_ROUTER_CHILD_COMMAND ?? "", "base64").toString("utf16le")).toBe("& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD\nif ($LASTEXITCODE -eq 75) { [Environment]::Exit(0) }");
   expect(environment.LANE_ROUTER_CHILD_TITLE).toBe("alpha/worker");
   expect(environment.LANE_ROUTER_CHILD_WINDOW).toBe("alpha");
 });
@@ -238,7 +238,7 @@ test("passes the terminal choice through and fails when the child never reports"
   });
   await launchLane(["open", "alpha/worker", "--terminal", "cmd"], cmd);
   const environment = cmd.spawnTerminal.mock.calls[0]![1] as NodeJS.ProcessEnv;
-  expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"\"");
+  expect(environment.LANE_ROUTER_CHILD_COMMAND).toBe("\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\" & if errorlevel 75 if not errorlevel 76 exit 0\"");
 
   const silent = fakes({ spawnTerminal: vi.fn(async () => undefined), startTimeoutMs: 200 });
   await expect(launchLane(["new", "alpha/worker", "--role", "r"], silent)).rejects.toThrow(/did not start/u);

@@ -13,12 +13,13 @@ const contracts = {
   lane_send: { required: ["target", "body", "kind"], properties: { target: text, cc: list, body: { type: "string" }, kind: { type: "string", enum: ["normal", "correction"] }, reply_to: text } },
   lane_ack: { required: ["message_ids"], properties: { message_ids: list } },
   lane_restore_project: { required: [], properties: { lanes: list } },
+  lane_finish: { required: [], properties: {} },
 } satisfies Record<LaneToolName, unknown>;
 
 test("Codex and MCP publish the existing names, shared descriptions, and argument semantics", () => {
   for (const tools of [codexDynamicTools(), LANE_MCP_TOOLS]) {
     expect(tools.map(tool => tool.name)).toEqual([
-      "lane_directory", "lane_attach_current", "lane_send", "lane_ack", "lane_restore_project",
+      "lane_directory", "lane_attach_current", "lane_send", "lane_ack", "lane_restore_project", "lane_finish",
     ]);
     for (const tool of tools) {
       expect(tool.description).toBe(LANE_TOOLS.find(shared => shared.name === tool.name)!.description);

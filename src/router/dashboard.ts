@@ -40,6 +40,8 @@ export interface DashboardLane {
   /** Null for the same reasons as reach: without a binding and backend there is no presence claim. */
   readonly restorePresence: RestorePresence | null;
   readonly pending: { readonly count: number; readonly oldestCreatedAt: number | null };
+  /** When a task lane called lane_finish; null for every lane that has not. */
+  readonly finishedAt: number | null;
 }
 
 export interface DashboardMessage {
@@ -172,6 +174,7 @@ export function dashboardSnapshot(
         reach: binding === undefined || backend === undefined ? null : backend.reach(binding),
         restorePresence: binding === undefined || backend === undefined ? null : backend.restorePresence(binding),
         pending: { count: waiting?.count ?? 0, oldestCreatedAt: waiting?.oldestCreatedAt ?? null },
+        finishedAt: lane.finishedAt,
       };
     }),
     laneSets: state.listLaneSets().map((set) => ({ id: set.id, name: set.name, members: set.members })),

@@ -21,7 +21,9 @@ function fixture(kind: string, transform: (sql: string) => string = sql => sql) 
   return db;
 }
 function rows(db: Database.Database) {
-  return Object.fromEntries(["lane", "binding", "message", "message_archive"].map(table => [table, db.prepare(`SELECT * FROM ${table} ORDER BY id`).all().map(row => table.startsWith("message") ? { sender_label: null, ...(row as object) } : row)]));
+  // A column a later version adds reads as its empty value on the rows from before it.
+  const added: Record<string, object> = { lane: { finished_at: null, parent_issue_id: null, parent_lane: null }, message: { sender_label: null }, message_archive: { sender_label: null } };
+  return Object.fromEntries(["lane", "binding", "message", "message_archive"].map(table => [table, db.prepare(`SELECT * FROM ${table} ORDER BY id`).all().map(row => ({ ...added[table], ...(row as object) }))]));
 }
 function insertNew(db: Database.Database, backend: string) {
   db.prepare("INSERT INTO binding VALUES(?,?,?,?,?,?,?,?,?)").run(`new-${backend}`, "lane-3", backend, backend, 10 + (backend === "zcode" ? 1 : 2), "{}", 20, 21, null);
@@ -134,14 +136,22 @@ test.each([false, true])("version 10 with native=%s preserves bindings, sender l
   expect(db.prepare("SELECT * FROM lane_set").all()).toEqual([{ id: "set", name: "company", created_at: 4, updated_at: 4 }]);
   expect(() => db.prepare("INSERT INTO binding VALUES('next','lead','native-codex','next-host',8,'{}',7,8,NULL)").run()).not.toThrow();
   initializeRouterSchema(db);
-  expect(db.pragma("user_version", { simple: true })).toBe(11);
+  expect(db.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
   expect(db.pragma("foreign_key_check")).toEqual([]);
 });
 
-test("a version 11 stamp cannot make the old backend constraint current", () => {
+test("a current-version stamp cannot make the old backend constraint current", () => {
   const db = new Database(":memory:"); databases.push(db);
   db.exec(schemaSql(STARTING_SHAPES.v10));
-  db.pragma("user_version=11");
+  db.pragma(`user_version=${ROUTER_SCHEMA_VERSION}`);
   expect(() => initializeRouterSchema(db)).toThrow(/schema shape/);
-  expect(db.pragma("user_version", { simple: true })).toBe(11);
+  expect(db.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
+});
+
+test("a current-version stamp cannot make a lane table without finished_at current", () => {
+  const db = new Database(":memory:"); databases.push(db);
+  db.exec(schemaSql(STARTING_SHAPES.v10).replace("'dsh','zcode'", "'dsh','zcode','native-codex'"));
+  db.pragma(`user_version=${ROUTER_SCHEMA_VERSION}`);
+  expect(() => initializeRouterSchema(db)).toThrow(/schema shape/);
+  expect((db.pragma("table_info(lane)") as Array<{ name: string }>).map(column => column.name)).not.toContain("finished_at");
 });

@@ -91,12 +91,12 @@ export function terminalLaunchScript(resolved: ResolvedTerminal): string {
     // Codex otherwise overwrites the one-shot OSC title as soon as its TUI starts. The title and
     // cwd elements carry their own quotes because PowerShell 5.1 joins the argument list verbatim
     // without adding any; WT's CommandLineToArgvW parsing folds them back into single arguments.
-    return "Start-Process -FilePath 'wt.exe' -ArgumentList @('-w', $env:LANE_ROUTER_CHILD_WINDOW, 'new-tab', '--title', ('\"' + $env:LANE_ROUTER_CHILD_TITLE + '\"'), '--suppressApplicationTitle', '-d', ('\"' + $env:LANE_ROUTER_CHILD_CWD + '\"'), 'powershell.exe', '-NoExit', '-Command', $env:LANE_ROUTER_CHILD_COMMAND)";
+    return "Start-Process -FilePath 'wt.exe' -ArgumentList @('-w', $env:LANE_ROUTER_CHILD_WINDOW, 'new-tab', '--title', ('\"' + $env:LANE_ROUTER_CHILD_TITLE + '\"'), '--suppressApplicationTitle', '-d', ('\"' + $env:LANE_ROUTER_CHILD_CWD + '\"'), 'powershell.exe', '-NoExit', '-EncodedCommand', $env:LANE_ROUTER_CHILD_COMMAND)";
   }
   if (resolved.shell === "cmd") {
     return "Start-Process -FilePath 'cmd.exe' -ArgumentList @('/k', $env:LANE_ROUTER_CHILD_COMMAND) -WorkingDirectory $env:LANE_ROUTER_CHILD_CWD -WindowStyle Normal";
   }
-  return "Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoExit', '-Command', $env:LANE_ROUTER_CHILD_COMMAND) -WorkingDirectory $env:LANE_ROUTER_CHILD_CWD -WindowStyle Normal";
+  return "Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoExit', '-EncodedCommand', $env:LANE_ROUTER_CHILD_COMMAND) -WorkingDirectory $env:LANE_ROUTER_CHILD_CWD -WindowStyle Normal";
 }
 
 /**
@@ -178,21 +178,27 @@ export function childEnvironment(
     // Never empty: wt would read the token after -w as the window name. Callers pass the lane's
     // project so a project's lanes share one window; anything unnamed shares the fallback.
     LANE_ROUTER_CHILD_WINDOW: window || "lane-router",
-    // One statement, and above all no semicolon: Windows Terminal splits its own command line on
-    // `;`, so a two-statement command made wt treat everything after it as a separate program to
-    // launch and fail with "the system cannot find the file specified". The title is therefore
-    // set by the child process, which needs no shell at all.
+    // Above all no semicolon: Windows Terminal splits its own command line on `;`, so a
+    // two-statement command made wt treat everything after it as a separate program to launch and
+    // fail with "the system cannot find the file specified". The title is therefore set by the
+    // child process, which needs no shell at all. The second statement, closing the shell when the
+    // Router ended a finished task lane's CLI (CLOSE_REQUESTED_EXIT_CODE), travels base64-encoded
+    // for -EncodedCommand, which has no `;` in it to split.
     //
     // The cmd variant says the same thing in cmd syntax, with a sacrificial outer quote pair:
     // PowerShell 5.1 joins -ArgumentList verbatim (it adds no quotes), and cmd's /C|/K rule
     // strips the first and last quote character of its command — without the outer pair the
     // stripping lands on the path quotes and no path with a space survives. Verified 2026-08-18
     // by replaying the exact production shape against cmd.exe with plain and spaced paths.
+    // `if errorlevel` is read when the line runs, unlike %ERRORLEVEL%, which cmd fills in first.
     LANE_ROUTER_CHILD_COMMAND: shell === "cmd"
-      ? "\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\"\""
-      : "& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD",
+      ? "\"\"%LANE_ROUTER_NODE%\" \"%LANE_ROUTER_CHILD%\" & if errorlevel 75 if not errorlevel 76 exit 0\""
+      : Buffer.from(POWERSHELL_CHILD_SCRIPT, "utf16le").toString("base64"),
   };
 }
+
+/** What a PowerShell lane window runs: the child, then a clean exit if the Router ended the lane. */
+const POWERSHELL_CHILD_SCRIPT = "& $env:LANE_ROUTER_NODE $env:LANE_ROUTER_CHILD\nif ($LASTEXITCODE -eq 75) { [Environment]::Exit(0) }";
 
 /** A fresh status file path for one launch; the terminal child reports its start through it. */
 export function newStatusPath(dataRoot: string): string {

@@ -244,7 +244,7 @@ describe("dashboardSnapshot", () => {
       expect(state.capturedAt).toBe(9_999);
       expect(state.router).toEqual({ ...ROUTER, schemaVersion: ROUTER_SCHEMA_VERSION });
       expect(Object.keys(state.lanes[0]!).sort())
-        .toEqual(["address", "archived", "binding", "model", "pending", "project", "reach", "restorePresence", "roleDescription"]);
+        .toEqual(["address", "archived", "binding", "finishedAt", "model", "pending", "project", "reach", "restorePresence", "roleDescription"]);
       expect(Object.keys(state.lanes[0]!.binding!).sort())
         .toEqual(["attachedAt", "backend", "conversationId", "cwd", "generation"]);
       // No owed-ack duration: it is capturedAt − createdAt, and a second copy of a number is a
@@ -254,6 +254,18 @@ describe("dashboardSnapshot", () => {
         "replyTo", "resolvedAt", "sender", "state", "target",
       ]);
       expect(state.truncated).toEqual({ messages: false, limit: DASHBOARD_MESSAGE_LIMIT });
+    } finally { x.database.close(); }
+  });
+
+  // Task lanes (docs/superpowers/specs/2026-10-21-task-lane.md, acceptance 4 and 5): the board marks a
+  // finished lane still in service. When it finished is the fact; which label that earns is the page's.
+  it("publishes when a lane finished, and null for one that has not", () => {
+    const x = setup();
+    try {
+      const done = x.state.createLane({ address: "alpha/done", project: "alpha", roleDescription: "任务 lane：fix it", now: 1 });
+      addLane(x, "alpha/role");
+      x.state.finishLane(done.id, 700, { issue: null, parent: null });
+      expect(x.snapshot().lanes.map((lane) => [lane.address, lane.finishedAt])).toEqual([["alpha/done", 700], ["alpha/role", null]]);
     } finally { x.database.close(); }
   });
 

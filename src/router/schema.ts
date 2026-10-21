@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import Database from "better-sqlite3";
 
-export const ROUTER_SCHEMA_VERSION = 11;
+export const ROUTER_SCHEMA_VERSION = 12;
 
 /**
  * The version 2 message table, kept verbatim because the version 1 migration has to build exactly
@@ -228,7 +228,8 @@ CREATE TABLE lane_set_member (
 CREATE INDEX lane_set_member_set_idx ON lane_set_member(set_id);
 `;
 
-const ROUTER_SCHEMA_PREFIX = `
+/** The lane table from version 6 to 11. */
+const LANE_TABLE_V6_SQL = `
 CREATE TABLE lane (
   id TEXT PRIMARY KEY,
   address TEXT NOT NULL,
@@ -239,7 +240,17 @@ CREATE TABLE lane (
   model TEXT,
   archived_at INTEGER
 );
+`;
 
+/**
+ * Version 12 adds when a task lane said it was finished, and the 问答 issue and parent lane its role
+ * says it was opened for, taken from that sentence as it finishes. The columns go last because that
+ * is where ALTER TABLE puts them, so an upgraded database and a new one record the same table.
+ */
+const LANE_TASK_COLUMNS = ["finished_at INTEGER", "parent_issue_id TEXT", "parent_lane TEXT"] as const;
+const LANE_TABLE_V12_SQL = LANE_TABLE_V6_SQL.replace("archived_at INTEGER\n", `archived_at INTEGER,\n  ${LANE_TASK_COLUMNS.join(",\n  ")}\n`);
+
+const LANE_INDEX_SQL = `
 -- An address identifies a lane only among the lanes still in service. That is what lets an
 -- archived address be used again while the archived lane keeps its own row and its own history;
 -- the same shape as binding_active_lane_idx below, which has guarded one active binding per lane
@@ -248,12 +259,15 @@ CREATE UNIQUE INDEX lane_live_address_idx ON lane(address) WHERE archived_at IS 
 CREATE INDEX lane_project_address_idx ON lane(project,address);
 `;
 
+const ROUTER_SCHEMA_PREFIX = `${LANE_TABLE_V12_SQL}${LANE_INDEX_SQL}`;
+const ROUTER_SCHEMA_V6_PREFIX = `${LANE_TABLE_V6_SQL}${LANE_INDEX_SQL}`;
+
 /**
  * Exactly the version 6 shape, for the version 5 migration. It used to build "whatever the current
  * schema is", which was right only while the current schema was version 6; from version 7 on it
  * would have built later tables and stamped them version 6.
  */
-const ROUTER_SCHEMA_V6_SQL = `${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V6_SQL}${MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V6_SQL}`;
+const ROUTER_SCHEMA_V6_SQL = `${ROUTER_SCHEMA_V6_PREFIX}${BINDING_TABLE_V6_SQL}${MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${MESSAGE_ARCHIVE_TABLE_V6_SQL}`;
 
 const BINDING_TABLE_V11_SQL = BINDING_TABLE_V8_SQL.replace("'claude','codex','dsh','zcode'", "'claude','codex','dsh','zcode','native-codex'");
 
@@ -315,12 +329,13 @@ function assertSharedSchema(database: Database.Database, current = false): void 
   const known = [base, [...base, "dsh"], [...base, "dsh", "zcode"], [...base, "dsh", "native-codex"], [...base, "dsh", "zcode", "native-codex"]].map(vocabulary);
   if (!values || !known.includes(values)) throw new Error("Router database schema shape is not supported");
   const labeled = messageHasSenderLabel(database);
-  if (current && (!bindingAllowsEveryBackend(database) || !labeled || !hasTable(database, "lane_set"))) {
+  const finishable = laneHasFinishedAt(database);
+  if (current && (!bindingAllowsEveryBackend(database) || !labeled || !hasTable(database, "lane_set") || !finishable)) {
     throw new Error("Router database schema shape is not supported");
   }
   const reference = new Database(":memory:");
   try {
-    reference.exec(`${ROUTER_SCHEMA_PREFIX}${BINDING_TABLE_V11_SQL}${labeled ? MESSAGE_TABLE_V9_SQL : MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${labeled ? MESSAGE_ARCHIVE_TABLE_V9_SQL : MESSAGE_ARCHIVE_TABLE_V6_SQL}${hasTable(database, "lane_set") ? LANE_SET_TABLES_SQL : ""}`);
+    reference.exec(`${finishable ? ROUTER_SCHEMA_PREFIX : ROUTER_SCHEMA_V6_PREFIX}${BINDING_TABLE_V11_SQL}${labeled ? MESSAGE_TABLE_V9_SQL : MESSAGE_TABLE_V6_SQL}${MESSAGE_INDEX_V6_SQL}${labeled ? MESSAGE_ARCHIVE_TABLE_V9_SQL : MESSAGE_ARCHIVE_TABLE_V6_SQL}${hasTable(database, "lane_set") ? LANE_SET_TABLES_SQL : ""}`);
     if (JSON.stringify(schemaShape(database)) !== JSON.stringify(schemaShape(reference))) throw new Error("Router database schema shape is not supported");
   } finally { reference.close(); }
 }
@@ -332,7 +347,8 @@ function assertSharedSchema(database: Database.Database, current = false): void 
  * therefore either one. Each step is decided by the shape it produces, and the number is written
  * once, when every step is in place. Version 10's lane set tables are one more step of the same
  * kind. Version 11 also admits the native Host backend from the Company branch without dropping
- * either its bindings or the main branch's sender labels and lane sets.
+ * either its bindings or the main branch's sender labels and lane sets. Version 12 adds the lane's
+ * task columns: when a task lane said it was done, and the issue and parent it was opened for.
  *
  * One transaction for all of it: a failure anywhere leaves the database exactly as it was opened,
  * so the next start decides again from the same shape.
@@ -342,8 +358,9 @@ function assertSharedSchema(database: Database.Database, current = false): void 
  *   2. binding 的 CHECK 缺任一后端就按 version 11 的表重建，逐记录核对
  *   3. message 没有 sender_label 列就重建两张消息表
  *   4. 没有 lane_set 表就建两张 set 表 —— 纯加法，不碰任何已有的行
- *   5. 置当前版本并复查结构与外键完整性 —— 与 2、3、4 同一个事务，任何一步失败整体回滚
- *   6. 恢复外键开关
+ *   5. lane 没有 finished_at 列就加上三列任务列 —— 纯加法，旧行都是未完成
+ *   6. 置当前版本并复查结构与外键完整性 —— 与 2 到 5 同一个事务，任何一步失败整体回滚
+ *   7. 恢复外键开关
  */
 function completeFromVersion6(database: Database.Database): void {
   assertSharedSchema(database);
@@ -355,6 +372,7 @@ function completeFromVersion6(database: Database.Database): void {
       if (!bindingAllowsEveryBackend(database)) rebuildBindingWithEveryBackend(database);
       if (!messageHasSenderLabel(database)) addMessageSenderLabel(database);
       if (!hasTable(database, "lane_set")) database.exec(LANE_SET_TABLES_SQL);
+      if (!laneHasFinishedAt(database)) for (const column of LANE_TASK_COLUMNS) database.exec(`ALTER TABLE lane ADD COLUMN ${column}`);
       assertSharedSchema(database, true);
       database.pragma(`user_version = ${ROUTER_SCHEMA_VERSION}`);
       assertForeignKeys(database);
@@ -376,6 +394,10 @@ function bindingAllowsEveryBackend(database: Database.Database): boolean {
 
 function messageHasSenderLabel(database: Database.Database): boolean {
   return (database.pragma("table_info(message)") as Array<{ name: string }>).some((column) => column.name === "sender_label");
+}
+
+function laneHasFinishedAt(database: Database.Database): boolean {
+  return (database.pragma("table_info(lane)") as Array<{ name: string }>).some((column) => column.name === "finished_at");
 }
 
 function hasTable(database: Database.Database, name: string): boolean {

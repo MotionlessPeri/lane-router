@@ -4,6 +4,7 @@ export const LANE_TOOL_NAMES = [
   "lane_send",
   "lane_ack",
   "lane_restore_project",
+  "lane_finish",
 ] as const;
 
 export type LaneToolName = (typeof LANE_TOOL_NAMES)[number];
@@ -25,6 +26,9 @@ export const LANE_TOOLS: readonly LogicalToolDefinition[] = [
   { name: "lane_send", description: "Write an immutable message to another lane's pending mailbox. Use cc to address the same body to several lanes: each named lane receives its own copy, which it reads and acks independently, and every copy names the whole recipient list. Naming other lanes in the body instead does nothing — the Router never reads it. Use correction with reply_to to amend an earlier message. Returns one record per recipient, whose notificationState says what the delivery actually did.", mutating: true },
   { name: "lane_ack", description: "Resolve one or more pending mailbox messages after the current lane has processed them.", mutating: true },
   { name: "lane_restore_project", description: "Open visible terminal windows that resume existing offline conversations for other lanes in the current lane's project. Call when you need to reach offline peer lanes for the current task; wake only the lanes you actually need, not speculatively in bulk. Omit lanes to consider every lane in the project; provide lanes to restore only that subset. A lane in another project is not out of reach, it is just outside this tool: open it from a shell with `lane-router-lane open <project>/<lane>`.", mutating: true },
+  // No address: a lane finishes itself and nothing else, and a role lane cannot finish at all, since
+  // what follows is archiving, which is permanent.
+  { name: "lane_finish", description: "Finish the current task lane. Only a lane whose role description begins with 「任务 lane：」 can call it. First deliver the work, report it in the issue the lane was opened for, read and lane_ack every message, and answer or close the lane's own 问答 issues; the call is refused while anything is left and says what. Once it succeeds the lane takes no more mail, and when this turn ends the Router closes its window and archives it. Call no more tools after it and end the turn.", mutating: true },
 ];
 
 export const LANE_ROUTER_INSTRUCTIONS = `Use lane_directory to inspect roles before proposing a topology change. ${ATTACH_CONFIRMATION} When notified, read the pending mailbox files directly, process related messages together when useful, then call lane_ack with every processed message ID.`;

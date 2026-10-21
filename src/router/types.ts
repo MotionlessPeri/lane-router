@@ -39,6 +39,14 @@ export interface LaneRecord {
   readonly model: string | null;
   /** When this lane left service, or null while it is in service. Archiving never deletes a row. */
   readonly archivedAt: number | null;
+  /**
+   * When a task lane said it was done, or null. A finished lane takes no more mail and is archived
+   * once its conversation is gone; the moment stays on the row after that.
+   */
+  readonly finishedAt: number | null;
+  /** The 问答 issue and parent lane a task lane's role names, taken as it finished; null otherwise. */
+  readonly parentIssueId: string | null;
+  readonly parentLane: string | null;
 }
 
 /**

@@ -75,6 +75,14 @@ export class SqliteIssueStore implements IssueStore {
     }) as IssueListRow[];
   }
 
+  waitingThreads(ownerLaneId: string): readonly { readonly id: string; readonly title: string; readonly waitingUser: number; readonly waitingLane: number }[] {
+    return this.database.prepare(`SELECT t.id,t.title,
+      (SELECT count(*) FROM issue_question q WHERE q.issue_id=t.id AND q.status='waiting_user') AS waitingUser,
+      (SELECT count(*) FROM issue_question q WHERE q.issue_id=t.id AND q.status='waiting_lane') AS waitingLane
+      FROM issue_thread t WHERE t.owner_lane_id=? AND EXISTS (SELECT 1 FROM issue_question q WHERE q.issue_id=t.id AND q.status IN ('waiting_user','waiting_lane'))
+      ORDER BY t.id`).all(ownerLaneId) as { id: string; title: string; waitingUser: number; waitingLane: number }[];
+  }
+
   entry(issueId: string, id: string): IssueEntry | null {
     return this.database.prepare(`SELECT ${ENTRY} FROM issue_entry WHERE issue_id=? AND id=?`).get(issueId, id) as IssueEntry | undefined ?? null;
   }

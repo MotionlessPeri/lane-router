@@ -24,6 +24,8 @@ const USAGE = [
   "  lane-router-lane open <project>/<lane> [--cwd <dir>] [--terminal <wt|powershell|cmd>]",
   "  lane-router-lane archive <project>/<lane>",
   "  lane-router-lane list-archived [<project>]",
+  "  lane-router-lane finish",
+  "  lane-router-lane close <project>/<lane>",
   "  lane-router-lane tell <project>/<lane> --origin <origin> --subject \"<one line>\" [--link <http(s) url>]",
   "  lane-router-lane issue <publish|read|append|update|record-tui-close> --json-file <path>",
   "  lane-router-lane graph <create|read|lock|apply> --json-file <path>",
@@ -47,6 +49,7 @@ export interface LaneLaunchDependencies {
   readonly queryDirectory?: (project: string) => Promise<ReadonlyArray<{ address: string }>>;
   readonly queryResumeInfo?: (address: string) => Promise<ResumeInfo>;
   readonly archiveLane?: (address: string) => Promise<unknown>;
+  readonly closeTaskLane?: (address: string) => Promise<unknown>;
   readonly listArchivedLanes?: (project: string | undefined) => Promise<ReadonlyArray<{ address: string; archivedAt: number | null }>>;
   readonly tell?: (input: TellInput) => Promise<TellResult>;
   readonly spawnZcodeLane?: (input: { address: string; role: string; cwd: string; model?: string }) => Promise<{ address: string; sessionId: string }>;
@@ -85,6 +88,7 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     client: dependencies.knowledgeClient ?? new LocalRouterClient(() => routerUrl(dataRoot)),
     env: dependencies.env, cwd: dependencies.cwd, readJsonFile: dependencies.readKnowledgeJsonFile, write: dependencies.write,
   });
+  if (args[0] === "finish") return finish(args.slice(1), dependencies, dataRoot);
 
   // Step 1: Parse the invocation before touching Router or terminal state.
   const invocation = parseInvocation(args);
@@ -105,6 +109,13 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
     await (dependencies.archiveLane ?? ((current: string) => archiveLaneDefault(dataRoot, current)))(address);
     write(`  archived ${address}
 `);
+    return;
+  }
+  if (invocation.verb === "close") {
+    // A parent ending a task lane: the Router says whether it ended the process now, will at the
+    // end of the running turn, archived it, or left it for unread mail, and that is what prints.
+    const result = await (dependencies.closeTaskLane ?? ((current: string) => closeTaskLaneDefault(dataRoot, current)))(invocation.address!.address);
+    (dependencies.write ?? ((text: string) => { process.stdout.write(text); }))(`${JSON.stringify(result)}\n`);
     return;
   }
 
@@ -202,7 +213,7 @@ export async function launchLane(args: readonly string[], dependencies: LaneLaun
 }
 
 interface ParsedInvocation {
-  readonly verb: "new" | "open" | "archive" | "list-archived";
+  readonly verb: "new" | "open" | "archive" | "list-archived" | "close";
   /** Absent only for `list-archived`, whose argument is a project rather than a lane. */
   readonly address: LaneAddress | undefined;
   readonly project: string | undefined;
@@ -214,7 +225,7 @@ interface ParsedInvocation {
   readonly terminal: TerminalChoice | undefined;
 }
 
-const WINDOWLESS_VERBS = ["archive", "list-archived"] as const;
+const WINDOWLESS_VERBS = ["archive", "list-archived", "close"] as const;
 
 function parseInvocation(args: readonly string[]): ParsedInvocation {
   const [verb, rawAddress, ...rest] = args;
@@ -283,6 +294,28 @@ async function tell(args: readonly string[], dependencies: LaneLaunchDependencie
   return result.delivered ? 0 : 2;
 }
 
+/**
+ * A task lane finishing itself from a shell, for a conversation that has no lane_finish tool (a
+ * Codex session opened before the tool existed). It acts as the conversation it runs in, found the
+ * way the issue commands find it, and takes no address: there is no other lane it could finish.
+ */
+async function finish(args: readonly string[], dependencies: LaneLaunchDependencies, dataRoot: string): Promise<number> {
+  if (args.length > 0) throw new Error(USAGE);
+  const env = dependencies.env ?? process.env;
+  const cwd = dependencies.cwd ?? process.cwd();
+  const requestKey = `finish:${randomUUID()}`;
+  const context = env.CODEX_THREAD_ID?.trim()
+    ? { backend: "codex" as const, conversationId: env.CODEX_THREAD_ID, cwd, requestKey }
+    : env.CLAUDE_CODE_SESSION_ID?.trim()
+      ? { backend: "claude" as const, conversationId: env.CLAUDE_CODE_SESSION_ID, cwd, requestKey, ...(env.CLAUDE_PID ? { joinKey: env.CLAUDE_PID } : {}) }
+      : undefined;
+  if (!context) throw new Error("finish runs inside the lane's own conversation: CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID is required");
+  const client = dependencies.issueClient ?? new LocalRouterClient(() => routerUrl(dataRoot));
+  const result = await client.call("lane_finish", {}, context);
+  (dependencies.write ?? ((text: string) => { process.stdout.write(text); }))(`${JSON.stringify(result)}\n`);
+  return 0;
+}
+
 function zcodeIntroPrompt(address: string, role: string): string {
   // The spawner binds the lane Router-side, so the intro must NOT instruct lane_attach_current
   // (the session's own MCP identity is not the binding's): it only sets the scene for a session
@@ -327,6 +360,16 @@ async function archiveLaneDefault(dataRoot: string, address: string): Promise<un
   const response = await fetch(`${await routerUrl(dataRoot)}/lanes/archive`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address }),
   });
+  const body = await response.json() as { result?: unknown; error?: string };
+  if (!response.ok) throw new Error(body.error ?? `Router request failed (${response.status})`);
+  return body.result;
+}
+
+async function closeTaskLaneDefault(dataRoot: string, address: string): Promise<unknown> {
+  const response = await fetch(`${await routerUrl(dataRoot)}/lanes/close`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address }),
+  });
+  if (response.status === 404) throw new Error("The running Router has no close route; restart it on a build with task lanes");
   const body = await response.json() as { result?: unknown; error?: string };
   if (!response.ok) throw new Error(body.error ?? `Router request failed (${response.status})`);
   return body.result;

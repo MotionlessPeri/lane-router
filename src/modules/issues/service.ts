@@ -136,6 +136,20 @@ export class IssuesService {
     }, true);
   }
 
+  /**
+   * What in a lane's issues still waits on someone, one sentence per issue, for the core to name
+   * when a task lane tries to finish: an issue left waiting would be stranded once its lane is gone.
+   */
+  waitingIssues(laneId: string): string[] {
+    return this.store.waitingThreads(laneId).map((thread) => {
+      const waits = [
+        ...(thread.waitingUser > 0 ? [`${thread.waitingUser} 个问题等用户回答`] : []),
+        ...(thread.waitingLane > 0 ? [`${thread.waitingLane} 个问题等 lane 答复`] : []),
+      ];
+      return `问答 \`${thread.id}\`（${thread.title}）：${waits.join("，")}`;
+    });
+  }
+
   listForLane(context: CallerContext, query: IssueListQuery = {}): IssueList {
     const actor = this.options.lanes.resolveCaller(context);
     return this.listOwned({ ...query, filter: query.filter ?? "all" }, actor.laneId);

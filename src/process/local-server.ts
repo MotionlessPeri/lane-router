@@ -72,6 +72,13 @@ export interface RenotifyEvent {
 
 export type RenotifyEventSink = (event: RenotifyEvent) => void;
 
+/** One lifecycle report as the hub applied it; joinKey is the claude.exe pid the channel carries. */
+export interface ChannelLifecycleReport {
+  readonly conversationId: string;
+  readonly event: "Stop" | "UserPromptSubmit";
+  readonly joinKey: string | undefined;
+}
+
 /**
  * The moments the two halves of a join meet, or fail to. `at` is when this process saw the event;
  * `deltaMs` is the gap to the other half whenever one exists, so a post-mortem of a first-turn
@@ -114,6 +121,8 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
   private readonly connections = new Map<string, ChannelConnection>();
   private readonly bindings = new Map<string, BindingRecord>();
   private readonly attentionHandlers = new Set<(binding: BindingRecord) => void>();
+  private readonly lifecycleHandlers = new Set<(report: ChannelLifecycleReport) => void>();
+  private readonly closedHandlers = new Set<(conversationId: string) => void>();
   private readonly waiters = new Map<string, Set<() => void>>();
 
   /**
@@ -165,6 +174,7 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
       this.connections.delete(current);
       this.forgetJoinKey(joinKey);
       this.signal(current);
+      for (const handler of this.closedHandlers) handler(current);
     });
     socket.on("error", () => undefined);
     const placed = this.placeEarlierReport(key, joinKey) ?? key;
@@ -361,6 +371,25 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     return () => this.attentionHandlers.delete(handler);
   }
 
+  /** Every lifecycle report a channel took, after the hub has applied it. */
+  onLifecycle(handler: (report: ChannelLifecycleReport) => void): () => void {
+    this.lifecycleHandlers.add(handler);
+    return () => this.lifecycleHandlers.delete(handler);
+  }
+
+  /** A conversation's channel closed; it may connect again, so this is a fact, not a verdict. */
+  onChannelClosed(handler: (conversationId: string) => void): () => void {
+    this.closedHandlers.add(handler);
+    return () => this.closedHandlers.delete(handler);
+  }
+
+  /** The open channel's process key, and whether a turn is running in it, or undefined with no channel. */
+  session(conversationId: string): { readonly joinKey: string | undefined; readonly turnRunning: boolean } | undefined {
+    const connection = this.connections.get(conversationId);
+    if (!connection || connection.socket.readyState !== connection.socket.OPEN) return undefined;
+    return { joinKey: connection.joinKey, turnRunning: connection.lastLifecycleEvent === "UserPromptSubmit" };
+  }
+
   reportLifecycle(conversationId: string, event: "Stop" | "UserPromptSubmit", joinKey?: string): boolean {
     const at = this.now();
     if (joinKey !== undefined) this.identityByJoinKey.set(joinKey, { conversationId, at });
@@ -387,6 +416,8 @@ export class ClaudeChannelHub implements ClaudeChannelPort {
     // A turn took the frame: the cycle ends here, and a Stop's own offer below starts the next.
     this.stopRenotify(connection);
     if (event === "Stop") this.signal(conversationId);
+    // The channel's own key first: it is what the MCP process said, so it names its claude.exe.
+    for (const handler of this.lifecycleHandlers) handler({ conversationId, event, joinKey: connection.joinKey ?? joinKey });
     return true;
   }
 
@@ -510,6 +541,11 @@ export class LocalRouterServer {
      * same reason as `resumeInfo` — a Router surface for the lane CLI, invisible to agents.
      */
     readonly archiveLane?: (address: string) => Promise<unknown>;
+    /**
+     * A parent ending a task lane that never finished, or is stuck (task-lane-closer.ts). Loopback
+     * like archiving: it ends a process and archives a lane, so a web page must not reach it.
+     */
+    readonly closeTaskLane?: (address: string) => Promise<unknown>;
     readonly listArchivedLanes?: (project: string | undefined) => unknown;
     /**
      * Telling a lane something from outside every lane, for the lane CLI's `tell`. Not a sixth
@@ -700,6 +736,18 @@ export class LocalRouterServer {
         // A refusal is an answer the CLI has to print, not a crash: 409 says the Router declined,
         // and the body carries the sentence naming which precondition and by how much.
         catch (error) { return json(response, 409, { error: error instanceof Error ? error.message : "archiving refused" }); }
+      }
+      if (request.method === "POST" && request.url === "/lanes/close") {
+        const handler = this.options.closeTaskLane;
+        if (!handler) return json(response, 404, { error: "not found" });
+        if (refuseWebPage(request, response)) return;
+        const body = await readJson(request) as { address?: unknown };
+        if (typeof body.address !== "string" || body.address.trim() === "") return json(response, 400, { error: "address is required" });
+        try { return json(response, 200, { result: await handler(body.address) }); }
+        catch (error) {
+          const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : undefined;
+          return json(response, 409, { error: error instanceof Error ? error.message : "close refused", ...(code === undefined ? {} : { code }) });
+        }
       }
       if (request.method === "POST" && request.url === "/zcode/spawn") {
         const spawn = this.options.zcodeSpawnLane;

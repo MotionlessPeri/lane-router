@@ -1483,6 +1483,53 @@ curl.exe http://127.0.0.1:<port>/dashboard/state
 4. ✓ 一个无绑定的新会话被要求 attach 到仍 live 的 probe-b 并换掉它的角色说明：查目录后停下，在窗口里向用户说明「接替仍 live 的别的 lane」「修改已有 lane 的角色说明」两道闸都要确认，没调 `lane_attach_current`。
 5. ✓ design 在 probe-b 空闲（最近 lifecycle 是 `Stop`）时结束了它的 claude.exe（transcript 1,003,804 B / 216 行、末行完整，杀前后一致），它 5 秒内变 `no_channel` / offline，没留下孤儿 MCP 进程；信箱里 2 封信（04:04:38 / 04:04:42）、手上有 design 03:52 派的「收到 N 回 N+1」任务（那封它已 ack，只存在于它的会话记录里）。第 2 步的 `lane_restore_project` 04:05:51 开出恢复窗口（`--resume e4a19414…`）；用户 09:13 才点开发通道确认，之后没人打字：09:13:26.976 频道连上 → 09:13:41.984 `channel.renotify attempt 1`（首帧没起回合）→ 09:13:43.372 `UserPromptSubmit` → 读完两封 pending、按旧任务回「42、generation 1、频道通知唤醒」→ ack 两封（pending 0）→ 09:14:31 `Stop`。它在回信里逐字引用了 03:52 那封派任务信的正文，依据是恢复后的会话记录（transcript 从 216 行续到 272 行）——说明从外部结束空闲的 claude.exe 不损记录，`--resume` 能完整接上（LR-27 第三节待取证项由此核销）。
 
+### TC-TASK-LANE：任务 lane 做完自己 finish，Router 关窗并归档
+
+**依据：** 设计稿 `docs/superpowers/specs/2026-10-21-task-lane.md`（验收第 10 条）。用户在问答 `25c76c8a` 定的口径：窗口不要用户关，父 lane 负责关。
+
+**改了什么：**
+- 新工具 `lane_finish`（无参数）和 CLI `lane-router-lane finish`：只认角色说明以「任务 lane：」开头的 lane；有未 ack 的信、或名下问答还有等用户 / 等 lane 的问题时拒绝（`LANE_FINISH_BLOCKED`，列出还剩什么）。通过后记 `finished_at`，并从角色首句取出原问答和父 lane 存下来。
+- finish 之后拒收：`lane_send`（含抄送）报 `LANE_FINISHED`，信息里写追问去哪（原问答、父 lane），归档以后也是这句；用户的信、问答投递、`tell` 都不投（目标状态 `finished`）。
+- Router 关窗（`src/process/task-lane-closer.ts`）：Claude 任务 lane finish 后，等它这一回合的 `Stop`，先写 `<数据根>/close-requests/<claude.exe pid>`，再结束该进程，每个绑定只做一次。频道断开后等 30 秒，仍离线、无未读就归档；每 60 秒扫一遍兜底（Codex 走这条）。
+- 开窗的壳认退出码 75：terminal-child 发现自己 CLI 的 pid 在 `close-requests` 里，就删掉标记、以 75 退出；PowerShell 档（含 wt）和 cmd 档的命令都在 75 时让壳以 0 退出，Windows Terminal 才会关标签。PowerShell 档改用 `-EncodedCommand`，因为 wt 会把命令行里的 `;` 当自己的分隔符。
+- 父 lane 兜底：`lane-router-lane close <项目>/<lane>`（本机路由 `/lanes/close`，带 Origin 的请求拒绝）。只对任务 lane 有效（常驻 lane 报 `LANE_NOT_A_TASK_LANE`）；目标空闲就立即结束，回合中就等 `Stop`；目标已离线就直接归档，有未读则不归档、报未读数。`close` 不要求目标已 finish。
+- `lane-mcp-server` 的 stdin 一结束（`end` / `close`）就关频道并退出，防孤儿进程让 lane 看起来一直在线。
+- 看板 lane 表的「可达」一格：已 finish、还没归档的 lane 显示「已完成，有 N 封未读」「已完成，待关窗」或「已完成」。
+- 库 schema 11 → 12：`lane` 表加 `finished_at`、`parent_issue_id`、`parent_lane` 三列。
+
+**生效条件：**
+- Router 核心重启后库会升到 v12，旧构建打不开 v12 的库。重启前先备份 `~/.lane-router/router.sqlite`，回滚靠这份备份。
+- 关窗只对部署后新开的窗口生效：旧窗口的 terminal-child 不认标记，进程照样被结束、lane 照样归档，只是标签停在提示符上，30 秒后 Router 删掉没人消费的标记。
+- MCP 侧的 stdin 退出只对部署后新起的 lane MCP 进程生效。
+- Codex 会话要带 `-CodexHost` 部署才看得到 `lane_finish`；规范要求任务 lane 首版只用 Claude 后端。
+
+**自动测试：**
+- `tests/router/task-lane-state.test.ts`、`tests/router/task-lane-core.test.ts`：准入、拒收（含归档后）、`finished_at` 持久、读给问答模块的 lane 事实。
+- `tests/modules/issues/task-lane-blockers.test.ts`：名下问答还在等谁。
+- `tests/tools/task-lane-tool.test.ts`：工具 schema 无地址参数、走调用者自己的绑定。
+- `tests/process/task-lane-closer.test.ts`：同一回合不杀、`Stop` 后先写标记再杀且只杀一次、进程已不在不报错、30 秒宽限与重连、未读不归档、Codex 不杀、扫描兜底、没人消费的标记 30 秒后删。
+- `tests/process/task-lane-routes.test.ts`、`tests/process/terminal-close.test.ts`：`close` 的准入与三种情形、Origin 拒绝；terminal-child 的 75 和三种开窗命令里的「75 ⇒ 壳退出 0」。
+- `tests/mcp/stdio-parent-gone.test.ts`：stdin 结束即关频道、只退出一次。
+- `tests/router/dashboard-state.test.ts`、`tests/process/dashboard-render.test.ts`：快照带 `finishedAt`，页面按未读 / 在线标三种文字。
+- 变异 32 项，杀掉 31 项，覆盖规范第七节的清单，外加标记先于杀进程、标记 30 秒后清、慢退出的进程再报 `Stop` 不二次杀、壳只认 75、stdin 退出只一次、看板三种文字、`/lanes/close` 拒网页、工具不收地址、问答「等 lane 答复」也算阻塞。
+  - 存活的一项是「对在线的 Codex 任务 lane 也杀进程」：去掉后端判断后行为不变，因为杀进程要 claude.exe 的 pid，只有 Claude 频道带。判断留着，标明意图。
+  - 第七节「finish 当场就杀」没有可变的代码：`finishLane` 走不到杀进程的路径，杀进程只挂在 `Stop` 上。最接近的变异是「回合开始时杀、不等 `Stop`」，已杀掉。
+- 「75 才退 0」2026-10-21 在本机用假 CLI（按环境变量退出）实测过两种壳：
+  - cmd：判断部分加括号、后接 `exit 9` 作没退出的标记，用 `cmd /c` 跑。退出码 75 时壳以 0 退出；3、76、0 时落到 `exit 9`。
+  - PowerShell：同一段脚本后接 `exit 9`，退出码 75 时壳以 0 退出，3、76、0 时落到 `exit 9`；按生产参数 `-NoExit -EncodedCommand`（不加标记）再跑，75 时壳以 0 退出，3 时壳 45 秒后还开着。
+  - 没在真 Windows Terminal 标签里看关不关，那是第 4 步。
+
+**步骤：**（部署后新开的窗口里做）
+1. 让一条角色 lane 为一条真实小需求开任务 lane：先在原问答里说「开了 `<地址>` 去做，原因…」，再 `lane-router-lane new <项目>/<名字> --role "任务 lane：为问答 \`<id>\` 开，归属 \`<父 lane>\`，完成条件：…"`。
+2. 任务 lane 在自己的问答里和用户澄清，然后交付，回原问答报告。
+3. 任务 lane 把信 ack 完、自己的问答关掉，调 `lane_finish`。若还有剩余，应被拒并列出剩什么。
+4. 这一回合结束后，它的窗口自己关掉，用户不碰。关掉之前看板「可达」一格是「已完成，待关窗」。
+5. 30 秒后 `lane-router-lane list-archived <项目>` 列出它，看板 lane 表不再显示它；从另一条 lane 给它发信，得到 `LANE_FINISHED`，信息里有原问答和父 lane。
+6. 再开一条任务 lane，故意不让它 finish，由父 lane 跑 `lane-router-lane close <项目>/<名字>`：窗口关掉、lane 归档。对一条常驻 lane 跑同样的命令，应报 `LANE_NOT_A_TASK_LANE`，什么都不动。
+
+**预期：** 六步都成立。第 4 步若标签停在提示符上，先看该窗口是不是部署前开的；是新窗口仍不关，查 `close-requests` 下的标记有没有被 terminal-child 消费。
+**最后验证：** 尚未执行（等部署）。
+
 ## 产品工具的参数 schema：union 工具发平表根
 
 需求与设计见 `docs/superpowers/specs/2026-10-19-tool-schema-flat-root.md`。参数有几种填法的工具（`lane_issue_publish`、`lane_issue_read`、`lane_issue_update`、`lane_graph_read`、`lane_graph_lock`），以前发出去的根节点是 `anyOf`/`oneOf`，Claude Code 把它改写成每个字段只剩第一种填法的取值。现在 `jsonTools()` 把这类根节点压成一个 object：同名字段的取值合并成 `enum`，`required` 只留每种填法都要的字段，`additionalProperties: false`；哪个取值要带哪些字段，逐行写在说明末尾的「Argument combinations (use exactly one):」里。解析仍按原来的 Zod union，嵌套的 union（如 `lane_graph_apply` 的 `changes`）不动。

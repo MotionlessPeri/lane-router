@@ -596,6 +596,8 @@ describe("router schema from version 6 on", () => {
           .toEqual(shape.laneSets ? [{ id: "set-1", name: "research", created_at: 20, updated_at: 21 }] : []);
         expect(database.prepare("SELECT lane_id,set_id,added_at FROM lane_set_member").all())
           .toEqual(shape.laneSets ? [{ lane_id: "lane-a", set_id: "set-1", added_at: 22 }] : []);
+        // Version 12: no lane was ever finished before the column existed.
+        expect(database.prepare("SELECT count(*) AS finished FROM lane WHERE finished_at IS NOT NULL").get()).toEqual({ finished: 0 });
         expect(database.pragma("foreign_key_check")).toEqual([]);
         expect(database.pragma("foreign_keys", { simple: true })).toBe(1);
         for (const leftover of ["binding_legacy", "message_legacy", "message_archive_legacy"]) {
@@ -605,18 +607,47 @@ describe("router schema from version 6 on", () => {
     });
   }
 
-  it("upgrades version 10 without changing records or non-binding schema", () => {
+  it("upgrades version 10 without changing records, and changes no schema but the binding check and the lane's one new column", () => {
     const path = writeStartingShape(STARTING_SHAPES.v10);
-    const schemaOf = (database: Database.Database) => database.prepare("SELECT type,name,sql FROM sqlite_master WHERE name <> 'binding' ORDER BY name").all()
+    const schemaOf = (database: Database.Database) => database.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT IN ('binding','lane') ORDER BY name").all()
       .map(row => { const item = row as { type: string; name: string; sql: string | null }; return { ...item, sql: item.sql?.replace(/\s+/g, " ") ?? null }; });
+    const laneColumns = (database: Database.Database) => (database.pragma("table_info(lane)") as Array<{ name: string; type: string; notnull: number }>)
+      .map(({ name, type, notnull }) => ({ name, type, notnull }));
     const raw = new Database(path, { readonly: true });
-    const before = { schema: schemaOf(raw), rows: rowCounts(raw, [...TABLES_BEFORE_SETS, "lane_set", "lane_set_member"]) };
+    const before = { schema: schemaOf(raw), rows: rowCounts(raw, [...TABLES_BEFORE_SETS, "lane_set", "lane_set_member"]), lane: laneColumns(raw) };
     raw.close();
     const database = openRouterDatabase(path);
     try {
       expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
-      expect({ schema: schemaOf(database), rows: rowCounts(database, [...TABLES_BEFORE_SETS, "lane_set", "lane_set_member"]) }).toEqual(before);
+      expect({ schema: schemaOf(database), rows: rowCounts(database, [...TABLES_BEFORE_SETS, "lane_set", "lane_set_member"]) })
+        .toEqual({ schema: before.schema, rows: before.rows });
+      expect(laneColumns(database)).toEqual([...before.lane,
+        { name: "finished_at", type: "INTEGER", notnull: 0 }, { name: "parent_issue_id", type: "TEXT", notnull: 0 }, { name: "parent_lane", type: "TEXT", notnull: 0 }]);
     } finally { database.close(); }
+  });
+
+  // Version 12 is three columns on lane: when a task lane said it was finished, and the issue and
+  // parent it was opened for. The step is an addition, so an upgraded database is the old one with
+  // those columns, every row unfinished.
+  it("upgrades version 11 by adding the lane's task columns and touching nothing else", () => {
+    const root = mkdtempSync(join(tmpdir(), "lane-router-migration-"));
+    roots.push(root);
+    const path = join(root, "router.sqlite");
+    // A version 11 database is today's shape without the columns.
+    const fresh = openRouterDatabase(path);
+    for (const column of ["parent_lane", "parent_issue_id", "finished_at"]) fresh.exec(`ALTER TABLE lane DROP COLUMN ${column}`);
+    fresh.pragma("user_version = 11");
+    fresh.prepare("INSERT INTO lane(id,address,project,role_description,created_at,updated_at,model,archived_at) VALUES('lane-x','alpha/x','alpha','X.',1,2,NULL,NULL)").run();
+    fresh.close();
+    const database = openRouterDatabase(path);
+    try {
+      expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
+      expect(database.prepare("SELECT id,address,role_description,created_at,updated_at,archived_at,finished_at,parent_issue_id,parent_lane FROM lane").all())
+        .toEqual([{ id: "lane-x", address: "alpha/x", role_description: "X.", created_at: 1, updated_at: 2, archived_at: null, finished_at: null, parent_issue_id: null, parent_lane: null }]);
+    } finally { database.close(); }
+    // And it opens again as current, so the upgraded shape is the one a new database has.
+    const again = openRouterDatabase(path);
+    again.close();
   });
 
   // The set step is the third in the same transaction as the two rebuilds. Failing it must take
@@ -722,7 +753,7 @@ describe("lane set tables", () => {
   it("builds a new database with native bindings and both lane set tables", () => {
     const database = openRouterDatabase(freshDatabasePath());
     try {
-      expect(ROUTER_SCHEMA_VERSION).toBe(11);
+      expect(ROUTER_SCHEMA_VERSION).toBe(12);
       expect(database.pragma("user_version", { simple: true })).toBe(ROUTER_SCHEMA_VERSION);
       expect(rowCounts(database, ["lane_set", "lane_set_member"])).toEqual({ lane_set: 0, lane_set_member: 0 });
     } finally { database.close(); }

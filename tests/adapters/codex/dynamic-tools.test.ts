@@ -3,10 +3,10 @@ import { expect, test, vi } from "vitest";
 import { LANE_TOOL_NAMES } from "../../../src/tools/tool-contract.js";
 import { CodexDynamicToolDispatcher, codexDynamicTools, UnknownCodexThreadError } from "../../../src/adapters/codex/dynamic-tools.js";
 
-test("exports exactly five strict shared logical schemas", () => {
+test("exports exactly six strict shared logical schemas", () => {
   const tools = codexDynamicTools();
   expect(tools.map((tool) => tool.name)).toEqual(LANE_TOOL_NAMES);
-  expect(tools).toHaveLength(5);
+  expect(tools).toHaveLength(6);
   for (const tool of tools) expect(tool.inputSchema).toMatchObject({ type: "object", additionalProperties: false });
   expect(tools.find((tool) => tool.name === "lane_attach_current")?.description).toMatch(/explicit confirmation/i);
 });

@@ -23,6 +23,9 @@ interface LaneRow {
   updated_at: number;
   model: string | null;
   archived_at: number | null;
+  finished_at: number | null;
+  parent_issue_id: string | null;
+  parent_lane: string | null;
 }
 
 interface BindingRow {
@@ -160,6 +163,21 @@ export class RouterStateStore {
       this.database.prepare("DELETE FROM lane_set_member WHERE lane_id=?").run(lane.id);
     })();
     return this.requireLaneById(lane.id);
+  }
+
+  /**
+   * Records once that a task lane is done, with the issue and parent its role named; a second call
+   * keeps the first moment and what was recorded with it.
+   */
+  finishLane(id: string, now: number, origin: { readonly issue: string | null; readonly parent: string | null }): LaneRecord {
+    this.database.prepare("UPDATE lane SET finished_at=?,parent_issue_id=?,parent_lane=?,updated_at=? WHERE id=? AND finished_at IS NULL")
+      .run(now, origin.issue, origin.parent, now, id);
+    return this.requireLaneById(id);
+  }
+
+  /** Finished lanes still in service: the ones the Router has yet to archive. */
+  finishedLanes(): LaneRecord[] {
+    return (this.database.prepare(`${LANE_SELECT} WHERE finished_at IS NOT NULL AND archived_at IS NULL ORDER BY address`).all() as LaneRow[]).map(mapLane);
   }
 
   /** The archived ones, which `listLanes` deliberately no longer returns. All projects when omitted. */
@@ -594,7 +612,7 @@ export class RouterStateStore {
 }
 
 const LANE_SELECT = `
-  SELECT id,address,project,role_description,created_at,updated_at,model,archived_at
+  SELECT id,address,project,role_description,created_at,updated_at,model,archived_at,finished_at,parent_issue_id,parent_lane
   FROM lane
 `;
 
@@ -639,6 +657,9 @@ function mapLane(row: LaneRow): LaneRecord {
     updatedAt: row.updated_at,
     model: row.model,
     archivedAt: row.archived_at,
+    finishedAt: row.finished_at,
+    parentIssueId: row.parent_issue_id,
+    parentLane: row.parent_lane,
   };
 }
 
