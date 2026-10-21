@@ -198,12 +198,16 @@ test("5: each row's card opens in a new window, its issue becomes an issue link,
   answers.push(ok([board("lane-router", [
     card(1, "doing", "lane-router/impl", 30_000, { sourceIssue: p.issue.issueId }), card(2, "doing", "lane-router/impl", 5 * MINUTE),
     card(3, "doing", "lane-router/impl", 3 * HOUR), card(4, "doing", "lane-router/impl", 2 * DAY), card(5, "doing", "lane-router/impl", 40 * DAY, { identifier: null }),
+    // The Router gives null where Vikunja gave no time: no time shown, last in its segment, and never live this week.
+    card(6, "doing", "lane-router/impl", 0, { updatedAt: null }), card(7, "live", "lane-router/impl", 0, { updatedAt: null }),
   ])]));
   await p.toProgress();
+  expect(p.all('#progress-list .todo-segment[data-segment="doing"] li.todo-row').map(row => Number(row.dataset.card))).toEqual([1, 2, 3, 4, 5, 6]);
+  expect(p.query('#progress-list li[data-card="7"]')).toBeNull();
   const link = p.query('#progress-list li[data-card="1"] a.todo-card');
   expect([link.textContent, link.getAttribute("href"), link.getAttribute("target"), link.getAttribute("rel")]).toEqual(["LR-1", "http://localhost:3456/tasks/1", "_blank", "noopener noreferrer"]);
   expect(p.query('#progress-list li[data-card="5"] a.todo-card').textContent).toBe("#5");
-  expect(p.all("#progress-list .todo-time").map(time => time.textContent)).toEqual(["刚刚", "5 分钟前", "3 小时前", "2 天前", `${new Date(NOW - 40 * DAY).getMonth() + 1}/${new Date(NOW - 40 * DAY).getDate()}`]);
+  expect(p.all("#progress-list .todo-time").map(time => time.textContent)).toEqual(["刚刚", "5 分钟前", "3 小时前", "2 天前", `${new Date(NOW - 40 * DAY).getMonth() + 1}/${new Date(NOW - 40 * DAY).getDate()}`, ""]);
   await vi.waitFor(() => expect(p.query('#progress-list li[data-card="1"] a.issue-ref')).not.toBeNull());
   expect(p.query('#progress-list li[data-card="1"] a.issue-ref').textContent).toBe(p.issue.issueId.slice(0, 8));
   expect(p.query('#progress-list li[data-card="1"] .issue-ref-title').textContent).toBe("（Choose）");

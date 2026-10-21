@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { ProgressBoardSource } from "../../../src/process/progress-board.js";
+import { ProgressFeed } from "../../../src/process/progress-feed.js";
 import { LocalRouterServer } from "../../../src/process/local-server.js";
 import { BackendRegistry, type Notification, type PlatformBackend } from "../../../src/router/backend.js";
 import { ContinueAfterSwitch, continueLanes } from "../../../src/router/continue-after-switch.js";
@@ -19,7 +20,8 @@ import { publishQuestion, setupIssues } from "./setup.js";
 /**
  * A Router as it serves the 问答 page, wired as `main.ts` wires it: a core with real mailboxes over
  * two stand-in backends, the continue-after-switch action, the progress board read from the data
- * root, the board state the running Router builds, and the issues module. A lane is added with its
+ * root, the board state the running Router builds, the todo list read through it from whatever
+ * Vikunja the file names, and the issues module. A lane is added with its
  * backend and whether its window is open; `frames` holds the notification frames actually sent.
  */
 export async function startPageRouter() {
@@ -46,12 +48,14 @@ export async function startPageRouter() {
   const core = new RouterCore({ state, mailbox, backends, pump: new NotificationPump(state, mailbox, backends), newId: () => randomUUID(), now: Date.now });
   const continuer = new ContinueAfterSwitch({ delivery: core, lanes: () => continueLanes(core) });
   const progressBoard = new ProgressBoardSource({ dataRoot: root, log: () => undefined });
+  const progressFeed = new ProgressFeed({ config: () => progressBoard.config(), log: () => undefined });
   const issues = setupIssues();
   publishQuestion(issues);
   const server = new LocalRouterServer({
     tools: { call: async () => { throw new Error("no tools here"); } } as never, instanceId: randomUUID(), issues: { service: issues.service },
     dashboardState: (router) => dashboardSnapshot({ state, mailbox, backends, now: Date.now, progressBoard: () => progressBoard.read() }, router),
     continueAfterSwitch: (name) => continuer.continue(name),
+    dashboardProgress: (fresh) => progressFeed.read({ fresh }),
   });
   const { url } = await server.start();
   let lanes = 0;

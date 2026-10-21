@@ -565,21 +565,38 @@ lane-router-lane kb record --json-file record.json
 - `tests/modules/issues/continue-after-switch-browser.test.ts`（浏览器组）：真 Edge 按真的看板路由，后面是和 `main.ts` 一样接起来的 Router（夹具 `tests/fixtures/issues/page-router.ts`：真信箱，两个后端用替身）。核对信进了开着和没开着的 Claude lane 的信箱、Codex lane 没收到、只有开着的窗口收到通知帧；页面依次写出三类结果、60 秒内重复、Codex 那一轮，以及路由拒收时的原因。
 - 去掉结果里的「没开着」一类、请求不带 `actionToken`、等回答时按钮不禁用，三个变异各让 happy-dom 用例变红；前两个也让浏览器组那条变红。
 
-### 进度：问答页里看 Vikunja 看板
+### 进度：按 lane 分组的待办表
 
-需求与设计见 `docs/superpowers/specs/2026-10-21-progress-tab.md`（4.2 标签页、验收第 2、4 条）。看板地址的配置和 `/dashboard/state.progressBoard` 归 impl。
+需求与设计见 `docs/superpowers/specs/2026-10-21-progress-list.md`（4.4）和页面补充稿 `docs/superpowers/specs/2026-10-21-progress-list-page.md`（LR-56）。Router 的 `GET /dashboard/progress` 和 `progress-board.json` 的 `token`、`boards` 归 impl。最早的「进度」是嵌 Vikunja 看板的 iframe（`docs/superpowers/specs/2026-10-21-progress-tab.md`），已经换成这张待办表。
 
-- 左栏标题行下面单独一行「问答｜进度」，选中的那项下面有一道线。点「进度」，右边的内容区换成 Vikunja 看板（iframe）；点「问答」换回来。看板只是藏起来，不会重建，滚动位置和筛选都还在。在「进度」时点左栏的某条问答或「新问答」，会自动回到「问答」。
-- 宽屏上看板占满内容区；窄屏（≤680px）内容区在列表下面，看板固定高 80vh，点「进度」时页面滚到看板那里。
-- 看板上面一行小字：「这是 Vikunja 看板，拖动卡片、点开卡片都在里面做；在新窗口打开 ↗」。
-- 第一次点「进度」时，页面读一次 `GET /dashboard/state`，只取 `progressBoard`。读到地址就建 iframe，以后不再读。没配置时显示「进度板还没配置：在 ~/.lane-router/progress-board.json 写 { "url": "<Vikunja 看板地址>" }，写好后再点一次「进度」。」每次再点「进度」都会重读；读失败也是这样。页面自己也只接受本机地址（`http://localhost`、`http://127.0.0.1`）。
-- 这次读取用单独的 `fetch`，不经过页面的 `request()`，所以不会改动页面写操作用的 `actionToken`。
-- 2026-10-21 在真 Edge 155 里实测过：`127.0.0.1` 的页面嵌 `localhost` 的 iframe，iframe 能读到那个源自己的 localStorage（Vikunja 的登录令牌就存在那里）。所以浏览器里已经登录 Vikunja 的话，iframe 里也是登录状态。
+- 左栏标题行下面单独一行「问答｜进度」，选中的那项下面有一道线。在「进度」时点左栏的某条问答或「新问答」，会自动回到「问答」。窄屏（≤680px）内容区在列表下面，点「进度」时页面滚到那里。
+- 头一行：「数据来自 Vikunja，<相对时间>更新 · 刷新 · 在 Vikunja 里打开看板 ↗」。读的过程中写「正在读取…」；请求失败写「待办表没读到：原因」，下面照旧是上一份；没配置 `token` 写「待办表还没配置：在 ~/.lane-router/progress-board.json 加 token（Vikunja 只读 API 令牌），写好以后再点一次「进度」。」看板链接取启动时从 `/dashboard/state` 读到的 `progressBoard.url`（没有就不显示；进「进度」时还没有，就再读一次）。
+- 读取：切到「进度」时，还没有数据、上一份超过 60 秒、或者上次是「没配置」，才 `GET /dashboard/progress`；「刷新」带 `?fresh=1`；不轮询，页面启动不读，同一时间只发一个。用单独的 `fetch`，不动页面的 `actionToken`。
+- 最上面「等你决定」：所有看板里这一列的卡，按更新时间从新到旧，不分 lane；每行有负责 lane 和「去问答 ↩」（卡上有来源问答时），点了在本页打开那条问答，后退回到「进度」。
+- 下面按看板分组（只有一个看板时不显示看板标题），看板里按负责 lane 的地址排序，没定负责 lane 的放最后；每条 lane 依次是「正在做」「做完待部署」「已上线」（只列 7 天内的）和其他列，空的不显示。某个看板读失败时，这一组最上面写「Vikunja 没读到：原因（时刻），下面是上一份数据」。每个看板末尾「搁置 N 件」默认收起。
+- 每行：卡号（新窗口开 Vikunja 里的卡）· 标题（按文字写入）· 来源问答（走问答链接，显示前 8 位和标题）· 相对时间（刚刚 / N 分钟前 / N 小时前 / N 天前 / M/D，悬停是完整时间；Vikunja 没给时间的卡不写时间、排在最后、也不算 7 天内上线）。lane 名可以点，左栏变成「只看 <lane>」，标签页留在「进度」。
+- 历史记录：每条记录记着当时在哪个标签页，所以从「进度」点「去问答」再后退，回到的是「进度」。
 
 自动测试：
-- `tests/modules/issues/progress-tab.test.ts`（happy-dom，`/dashboard/state` 用替身，iframe 不真加载）覆盖验收第 2 条。
-- `tests/modules/issues/progress-tab-browser.test.ts`（浏览器组）覆盖验收第 4 条：真 Edge、和 `main.ts` 一样接起来的 Router，数据根里先没有 `progress-board.json`（看到说明），写上一份指向本机替身页的再点「进度」，iframe 里加载出那一页；切走再切回，还是同一个 iframe。
-- 稿子第七节归页面的四个变异各让 happy-dom 用例变红：切回「问答」时销毁 iframe、`null` 仍渲染 iframe、读 state 时覆盖了页面的 `actionToken`、`null` 之后再点不重读。第一个和最后一个也让浏览器组那条变红。
+- `tests/modules/issues/progress-list.test.ts`（happy-dom，两个 dashboard 路由用替身，时间固定）覆盖页面补充稿验收第 1–9 条。
+- `tests/modules/issues/progress-list-browser.test.ts`（浏览器组）覆盖第 10 条：真 Edge、和 `main.ts` 一样接起来的 Router（夹具里加了真的 `ProgressFeed`），`progress-board.json` 指向本机一个只认那枚令牌的 Vikunja 替身；核对表出来了、`done` 的卡不出现、令牌不出现在 `/dashboard/state` 和 `/dashboard/progress` 里、卡号开新窗口、「去问答」切过去后退回到「进度」、1280 / 999 / 681 / 390 四个宽度没有横向滚动，标题行和标签行都是一行。
+- `tests/modules/issues/progress-tab.test.ts`：只针对 iframe 的三条改写了（看板链接代替 iframe），「去问答」那条去掉了 iframe 的断言；`progress-tab-browser.test.ts` 删掉，由上面那条浏览器用例代替。
+- 页面补充稿第五节的十一个变异都让 happy-dom 用例变红；「出错时丢掉快照」两条路（看板出错、整个请求失败）各试了一次。「未配置时也渲染表」：没配置时 `boards` 本来就是空的，表画不出东西，所以试的是把配置说明换成「数据来自 Vikunja」那行。另外「卡号不开新窗口」「后退不回进度」两个变异也让浏览器组那条变红。
+
+#### TC-ISSUES-TODO-1：在真实问答页上看待办表（尚未执行）
+
+**前提：** 含此改动的版本已部署；vikunja/main 已经把只读令牌写进 `~/.lane-router/progress-board.json`。
+
+1. 打开问答页，点「进度」。
+2. 点一张卡的卡号，再点「等你决定」里某张卡的「去问答 ↩」，然后按浏览器的后退。
+3. 点一个 lane 名。
+4. 在 Vikunja 里挪一张卡，回问答页点「刷新」。
+
+**预期：**
+- 第 1 步：表按 lane 分好，「等你决定」在最上面，头一行写着几分钟前更新。
+- 第 2 步：卡在新窗口打开；「去问答」打开那条问答，后退回到「进度」。
+- 第 3 步：左栏只剩这个 lane 的问答，标签页还在「进度」。
+- 第 4 步：表里那张卡换到新的段里。
 
 #### TC-ISSUES-GROUP-1：在真实问答页上按项目看（第 1 步部署后已核对，第 2–4 步尚未执行）
 

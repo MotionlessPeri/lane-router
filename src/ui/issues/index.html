@@ -1818,7 +1818,8 @@
     list.replaceChildren(...(progress && !progress.unconfigured ? progressSections(progress.boards ?? []) : []));
     void resolveIssueRefs();
   }
-  const newestFirst = (a, b) => b.updatedAt - a.updatedAt;
+  // A card Vikunja gave no time for (the Router says null) goes last, and is never live this week.
+  const newestFirst = (a, b) => (b.updatedAt ?? -Infinity) - (a.updatedAt ?? -Infinity) || 0;
   const WEEK = 7 * 24 * 60 * 60 * 1000;
   /**
    * What waits on the user first, from every board; then each board's lanes in address order, the
@@ -1846,7 +1847,7 @@
       for (const address of order) {
         const items = lanes.get(address), segments = [];
         for (const [kind, title] of [["doing", "正在做"], ["deploy", "做完待部署"], ["live", "已上线"]]) {
-          const rows = items.filter(item => item.column?.kind === kind && (kind !== "live" || Date.now() - item.updatedAt <= WEEK));
+          const rows = items.filter(item => item.column?.kind === kind && (kind !== "live" || (item.updatedAt != null && Date.now() - item.updatedAt <= WEEK)));
           if (rows.length) segments.push([kind, title, rows]);
         }
         const others = items.filter(item => !["doing", "deploy", "live"].includes(item.column?.kind));
@@ -1893,7 +1894,8 @@
       const ref = node("span", "issue-ref-candidate", item.sourceIssue.slice(0, 8)); ref.dataset.ref = item.sourceIssue.toLowerCase();
       row.append(ref);
     }
-    const when = node("span", "todo-time", ago(item.updatedAt)); when.title = time(item.updatedAt);
+    const when = node("span", "todo-time", item.updatedAt == null ? "" : ago(item.updatedAt));
+    if (item.updatedAt != null) when.title = time(item.updatedAt);
     row.append(when);
     if (go && item.sourceIssue) {
       const button = node("button", "todo-go", "去问答 ↩"); button.type = "button";

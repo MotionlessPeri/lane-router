@@ -1,12 +1,13 @@
-import { chromium, type Browser, type Route } from "@playwright/test";
+import { createServer, type Server } from "node:http";
+import { chromium, type Browser } from "@playwright/test";
 import { afterAll, afterEach, expect, test, vi } from "vitest";
 import { startPageRouter } from "../../fixtures/issues/page-router.js";
 
 /**
- * Spec 2026-10-21-progress-list-page.md, acceptance 10: the 进度 tab's todo list in a real browser.
- * Until the Router's /dashboard/progress is on master the browser answers it with the shape 4.3 of
- * 2026-10-21-progress-list.md gives; everything else is a Router wired as main.ts wires it. Browser
- * selection and skipping follow layout-browser.test.ts.
+ * Spec 2026-10-21-progress-list-page.md, acceptance 10, and 2026-10-21-progress-list.md, acceptance 5:
+ * the 进度 tab's todo list in a real browser, from a Router wired as main.ts wires it, reading a board
+ * through the real /dashboard/progress from a stand-in for Vikunja on this machine. Browser selection
+ * and skipping follow layout-browser.test.ts.
  */
 const BROWSER = process.env.LANE_ROUTER_TEST_BROWSER ?? "msedge";
 let browser: Browser | undefined;
@@ -20,33 +21,54 @@ vi.setConfig({ testTimeout: 90_000 });
 
 const cleanup: Array<() => unknown | Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
-const BOARD = "http://localhost:3456/projects/12/48";
+const TOKEN = "read-only-probe-token";
+
+/**
+ * Stands in for Vikunja: its v1 board API answers buckets with their tasks to the right token only,
+ * and a card's own page says which card it is.
+ */
+async function vikunja(buckets: () => unknown) {
+  const server: Server = createServer((request, response) => {
+    if (request.url === "/api/v1/projects/12/views/48/tasks") {
+      if (request.headers.authorization !== `Bearer ${TOKEN}`) { response.writeHead(401); response.end(); return; }
+      response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(buckets())); return;
+    }
+    const card = /^\/tasks\/(\d+)$/u.exec(request.url ?? "");
+    response.writeHead(card ? 200 : 404, { "content-type": "text/html; charset=utf-8" });
+    response.end(card ? `<!doctype html><title>card</title><h1 id="card">卡 ${card[1]}</h1>` : "");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  return `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+}
 
 test.skipIf(!browser)("10: 进度 shows the todo list; a card opens a new window; 去问答 goes to its issue and back returns; no width scrolls sideways", async () => {
   const router = await startPageRouter(); cleanup.push(() => router.close());
-  router.writeBoard(JSON.stringify({ url: BOARD }));
+  let issueId = "";
+  const hourAgo = new Date(Date.now() - 3_600_000).toISOString(), justNow = new Date().toISOString();
+  const origin = await vikunja(() => [
+    { id: 34, title: "正在做", tasks: [{ id: 56, identifier: "LR-56", title: "一张很长很长的卡片标题，用来看窄屏上会不会把一行撑出横向滚动条来，再长一点再长一点", done: false, owner_lane: "alpha/one", updated: hourAgo }] },
+    { id: 85, title: "等你决定", tasks: [{ id: 57, identifier: "LR-57", title: "这件要你定", done: false, owner_lane: "alpha/one", source_issue: issueId, updated: justNow }] },
+    { id: 36, title: "已上线", tasks: [{ id: 58, identifier: "LR-58", title: "做完了", done: true, owner_lane: "alpha/one", updated: justNow }] },
+  ]);
+  router.writeBoard(JSON.stringify({ url: `${origin}/projects/12/48`, token: TOKEN }));
   const page = await browser!.newPage({ viewport: { width: 1280, height: 900 } }); cleanup.push(() => page.close());
   await page.goto(`${router.url}/issues`);
   await page.waitForSelector("#thread-list [data-issue-id]");
-  const issueId = (await page.getAttribute("#thread-list [data-issue-id]", "data-issue-id"))!;
-  const column = (id: number, title: string, kind: string) => ({ id, title, kind });
-  const item = (id: number, title: string, kind: [number, string, string], extra: Record<string, unknown> = {}) => ({
-    id, identifier: `LR-${id}`, title, column: column(...kind), ownerLane: "alpha/one", sourceLane: "alpha/one", sourceIssue: null,
-    labels: [], updatedAt: Date.now() - 3_600_000, cardUrl: `${router.url}/issues?card=${id}`, ...extra,
-  });
-  const answer = { result: { fetchedAt: Date.now() - 60_000, boards: [{ project: "alpha", boardUrl: BOARD, error: null, columns: [], items: [
-    item(56, "一张很长很长的卡片标题，用来看窄屏上会不会把一行撑出横向滚动条来，再长一点再长一点", [34, "正在做", "doing"]),
-    item(57, "这件要你定", [85, "等你决定", "decide"], { sourceIssue: issueId, updatedAt: Date.now() }),
-  ] }] } };
-  await page.route("**/dashboard/progress*", (route: Route) => route.fulfill({ json: answer }));
+  issueId = (await page.getAttribute("#thread-list [data-issue-id]", "data-issue-id"))!;
 
   await page.click("#tab-progress");
   await page.waitForSelector('#progress-list li[data-card="56"]');
-  expect(await page.textContent("#progress-text")).toBe("数据来自 Vikunja，1 分钟前更新");
+  expect(await page.textContent("#progress-text")).toBe("数据来自 Vikunja，刚刚更新");
+  expect(await page.getAttribute("#progress-open", "href")).toBe(`${origin}/projects/12/48`);
+  expect(await page.locator('#progress-list li[data-card="58"]').count()).toBe(0);
+  // The token went to the stand-in and to nothing the page reads.
+  expect(JSON.stringify(await (await page.request.get(`${router.url}/dashboard/state`)).json())).not.toContain(TOKEN);
+  expect(JSON.stringify(await (await page.request.get(`${router.url}/dashboard/progress`)).json())).not.toContain(TOKEN);
 
   const [popup] = await Promise.all([page.waitForEvent("popup"), page.click('#progress-list li[data-card="56"] a.todo-card')]);
-  await popup.waitForLoadState();
-  expect(popup.url()).toBe(`${router.url}/issues?card=56`);
+  await popup.waitForSelector("#card");
+  expect(popup.url()).toBe(`${origin}/tasks/56`);
   await popup.close();
 
   await page.click('#progress-list li[data-card="57"] .todo-go');
