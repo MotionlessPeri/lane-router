@@ -132,27 +132,41 @@ test("2: 等你决定 lists every decision newest first, across lanes and boards
   expect(p.decide()).toEqual([10, 20, 11]);
   expect(p.all("#progress-list .todo-decide .lane-ref").map(button => button.textContent)).toEqual(["lane-router/impl", "mocap/main", "lane-router/design"]);
   expect(p.all("#progress-list .todo-lane li.todo-row").map(row => Number(row.dataset.card))).toEqual([12]);
-  // With no issue behind a decision there is nowhere to go.
-  expect(p.query('#progress-list li[data-card="10"] .todo-go')).toBeNull();
+  // With no issue behind a decision there is nowhere to go: its title is text.
+  expect(p.query('#progress-list li[data-card="10"] .todo-title').tagName).toBe("SPAN");
 
   const none = await open([ok([board("lane-router", [card(40, "doing", "lane-router/design", MINUTE)])])]);
   await none.toProgress();
   expect(none.decide()).toBeNull();
 });
 
-test("2: 去问答 opens the decision's issue on the 问答 tab, and back returns", async () => {
+// The user asked on c5c595d9 (16:23) to go from the list straight to an issue; the short ID alone went unnoticed.
+test("2: a card's title opens the issue it came from on the 问答 tab, and back returns; it names that issue on hover", async () => {
   const answers: Answer[] = [];
   const p = await open(answers);
-  answers.push(ok([board("lane-router", [card(50, "decide", "lane-router/design", MINUTE, { sourceIssue: p.issue.issueId })])]));
+  const unknown = randomUUID();
+  answers.push(ok([board("lane-router", [
+    card(50, "decide", "lane-router/design", MINUTE, { sourceIssue: p.issue.issueId }),
+    card(51, "doing", "lane-router/design", MINUTE, { sourceIssue: unknown }),
+    card(52, "doing", "lane-router/design", 2 * MINUTE),
+  ])]));
   await p.toProgress();
+  // Nothing besides the title goes there: the short ID says which issue, and that is all.
+  expect(p.all("#progress-list button.todo-go")).toEqual([]);
+  expect(p.query('#progress-list li[data-card="52"] .todo-title').tagName).toBe("SPAN");
+  const title = p.query('#progress-list li[data-card="50"] a.todo-title');
+  expect([title.textContent, title.getAttribute("href"), title.getAttribute("target")]).toEqual(["卡 50", `?issue=${p.issue.issueId}`, null]);
+  await vi.waitFor(() => expect(title.title).toBe("Choose"));
+  // An issue the Router does not know is still where the card points; the hover says only where.
+  expect(p.query('#progress-list li[data-card="51"] a.todo-title').title).toBe("打开来源问答");
+
   const before = p.window.history.length;
-  p.query('#progress-list li[data-card="50"] .todo-go').click();
+  title.click();
   await vi.waitFor(() => expect(p.query("#issue-detail").getAttribute("data-issue-id")).toBe(p.issue.issueId));
   expect(p.query("#tab-issues").getAttribute("aria-selected")).toBe("true");
   expect(p.query("#progress-view").hidden).toBe(true);
   expect(p.window.location.search).toBe(`?issue=${p.issue.issueId}`);
   expect(p.window.history.length).toBe(before + 1);
-  expect(p.query('#progress-list li[data-card="50"] .todo-go').textContent).toBe("去问答 ↩");
   // Back returns to 进度, where the click was.
   p.window.history.back();
   await vi.waitFor(() => expect(p.query("#tab-progress").getAttribute("aria-selected")).toBe("true"));
@@ -261,6 +275,11 @@ test("9: a card's title is text, whatever it holds", async () => {
   const p = await open([ok([board("lane-router", [card(1, "doing", "lane-router/impl", HOUR, { title: "<img src=x onerror=window.__pwned=1>" })])])]);
   await p.toProgress();
   expect(p.query('#progress-list li[data-card="1"] .todo-title').textContent).toBe("<img src=x onerror=window.__pwned=1>");
+  // A title that opens its issue is text the same way.
+  const linked = await open([ok([board("lane-router", [card(2, "doing", "lane-router/impl", HOUR, { title: "<b>粗</b>", sourceIssue: randomUUID() })])])]);
+  await linked.toProgress();
+  expect(linked.query('#progress-list li[data-card="2"] a.todo-title').textContent).toBe("<b>粗</b>");
+  expect(linked.query("#progress-list b")).toBeNull();
   expect(p.query("#progress-list img")).toBeNull();
   expect((p.window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
 });

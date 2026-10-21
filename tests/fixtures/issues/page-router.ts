@@ -49,7 +49,8 @@ export async function startPageRouter() {
   const continuer = new ContinueAfterSwitch({ delivery: core, lanes: () => continueLanes(core) });
   const progressBoard = new ProgressBoardSource({ dataRoot: root, log: () => undefined });
   const progressFeed = new ProgressFeed({ config: () => progressBoard.config(), log: () => undefined });
-  const issues = setupIssues();
+  // Whole IDs, as the Router makes them: the page links only what reads as one.
+  const issues = setupIssues({ newId: () => randomUUID() });
   publishQuestion(issues);
   const server = new LocalRouterServer({
     tools: { call: async () => { throw new Error("no tools here"); } } as never, instanceId: randomUUID(), issues: { service: issues.service },

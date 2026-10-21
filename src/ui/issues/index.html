@@ -69,9 +69,13 @@
   .todo-segment h5 { margin: 0; color: var(--muted); font-size: 12px; font-weight: 500; }
   .todo-decide ul, .todo-segment ul, .todo-shelved ul { display: grid; gap: 3px; margin: 2px 0 0; padding: 0; list-style: none; }
   .todo-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; font-size: 13px; }
-  .todo-title { min-width: 0; overflow-wrap: anywhere; }
+  /* The title takes the room beside the card number and wraps there, so a long one does not drop whole
+     under the number; the lane, issue and time follow it, on a line of their own if need be. */
+  .todo-title { flex: 1 1 16em; min-width: 0; overflow-wrap: anywhere; }
+  /* One that opens its issue here reads as a link, quieter than the card number, which leaves for Vikunja. */
+  a.todo-title { color: inherit; text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
+  a.todo-title:hover { color: var(--blue); }
   .todo-time { color: var(--muted); font-size: 12px; }
-  .todo-go { padding: 0 6px; font-size: 12px; }
   .todo-board-error { margin: 0; font-size: 12px; }
   .todo-shelved summary { cursor: pointer; color: var(--muted); font-size: 12px; }
   /* A group's head reads as a label over its issues: the project, how many, and what waits on the user,
@@ -471,6 +475,24 @@
       link.append(...span.childNodes); span.replaceWith(link);
     }
   }
+  /**
+   * The card an issue's work is on, beside its title (spec 2026-10-21-issue-task-ref.md, 2.5): an LR
+   * card links into Vikunja as any card number does, another project's is text; then the column it
+   * stands in, when the todo list's snapshot has it.
+   */
+  function taskNode(task, column) {
+    const span = node("span", "detail-task"), number = WHOLE_CARD.exec(task);
+    if (number) { const candidate = node("span", "card-ref-candidate", task); candidate.dataset.card = number[1]; span.append(candidate); }
+    else span.append(task);
+    if (column) span.append(" · " + column);
+    return span;
+  }
+  /** The column a card stands in on the snapshot 进度 last read; null with no snapshot, or the card not on it. */
+  function taskColumn(task) {
+    if (!progress || progress.unconfigured) return null;
+    for (const each of progress.boards ?? []) for (const item of each.items ?? []) if (item.identifier === task) return item.column?.title ?? null;
+    return null;
+  }
   // A lane address standing alone, <project>/<lane> by the address rule; a dot it ends with is the
   // sentence's. Only the Router says whether one exists (spec 2026-10-21-issue-page-usability.md, six).
   const LANE_REF = /(?<![\w.%~\/-])[A-Za-z0-9][A-Za-z0-9._%~-]*\/[A-Za-z0-9][A-Za-z0-9._%~-]*(?![\w%~\/-])/g;
@@ -555,6 +577,11 @@
       });
       const characters = [...item.title];
       span.replaceWith(link, node("span", "issue-ref-title", "（" + (characters.length > 24 ? characters.slice(0, 24).join("") + "…" : item.title) + "）"));
+    }
+    // A todo title that opens its issue names it on hover, and goes by its whole ID.
+    for (const link of document.querySelectorAll("a.todo-title[data-ref]")) {
+      const item = issueRefs.get(link.dataset.ref);
+      if (item) { link.title = item.title; link.setAttribute("href", "?issue=" + item.id); }
     }
   }
   // A whole drive-letter absolute path, X:\… or X:/…; network, device and relative paths never match.
@@ -709,7 +736,7 @@
   function renderList() {
     const host = byId("thread-list"), panel = host.closest(".list-panel");
     const items = keepingSelected();
-    const signature = JSON.stringify([selectedId, projectCounts, laneFilter, [...collapsed], items.map(item => [item.id, item.kept, item.title, item.status, item.closedBy, item.attentionReasons, item.waitingLaneCount, ownerText(item.owner), item.owner.project, item.owner.presence, item.updatedAt])]);
+    const signature = JSON.stringify([selectedId, projectCounts, laneFilter, [...collapsed], items.map(item => [item.id, item.kept, item.title, item.status, item.closedBy, item.attentionReasons, item.waitingLaneCount, ownerText(item.owner), item.owner.project, item.owner.presence, item.updatedAt, item.task])]);
     if (signature !== renderedList) { renderedList = signature; const scrollTop = panel.scrollTop; renderTopics(host, items); panel.scrollTop = scrollTop; }
     shownTopics = items;
     byId("load-threads").hidden = !listCursor; byId("load-threads").disabled = listLoading;
@@ -791,6 +818,8 @@
     }
     // A closed issue waits on nobody, whatever its last round left open.
     if (item.status !== "closed" && item.waitingLaneCount > 0) button.append(node("span", "badge", "等待 lane"));
+    // Its card, as text: the whole row already opens the issue.
+    if (item.task) button.append(node("span", "badge task-badge", item.task));
     const owner = node("span", "topic-meta"); owner.append(...ownerNodes(item.owner));
     button.append(node("span", "topic-title", item.title), owner, node("span", "topic-meta", time(item.updatedAt)));
     button.addEventListener("click", () => selectIssue(item.id));
@@ -855,9 +884,10 @@
     // Where the reader was in the issue being left, to come back to.
     if (selectedId && byId("issue-detail").dataset.issueId === selectedId) viewFor(selectedId).scrollTop = region.scrollTop;
     selectedId = id; renderList();
-    // The meta line is drawn anew, so its 复制 reads 复制 again.
+    // The meta line is drawn anew, so its 复制 reads 复制 again, and its card's column is looked up again.
     byId("detail-meta").dataset.signature = "";
     const view = viewFor(id);
+    view.progressAsked = false;
     view.positioning = view.detail ? "return" : "open";
     view.pickTarget = true; view.targetChosen = false;
     historyFor = null;
@@ -994,13 +1024,17 @@
     byId("detail-empty").hidden = true; byId("detail-content").hidden = false;
     byId("detail-title").textContent = detail.thread.title;
     // Lanes refer to an issue by the first eight characters of its ID; the whole ID is on hover.
-    const meta = byId("detail-meta"), metaSignature = JSON.stringify([detail.owner, closed, detail.thread.closedBy, id]);
+    const task = detail.thread.task ?? null, column = task ? taskColumn(task) : null;
+    const meta = byId("detail-meta"), metaSignature = JSON.stringify([detail.owner, closed, detail.thread.closedBy, id, task, column]);
     if (meta.dataset.signature !== metaSignature) {
       const shortId = node("span", "issue-id", id.slice(0, 8)); shortId.title = id;
       const state = closed ? "已结束（" + (detail.thread.closedBy === "lane" ? "lane 结束的" : "你结束的") + "）" : "进行中";
-      meta.replaceChildren(...ownerLink(detail.owner), " · " + state + " · ", shortId, " ", copyIdButton(id));
+      meta.replaceChildren(...ownerLink(detail.owner), " · " + state + " · ", ...(task ? [taskNode(task, column), " · "] : []), shortId, " ", copyIdButton(id));
+      upgradeCardRefs(meta);
       meta.dataset.signature = metaSignature;
     }
+    // Where its card stands is in the todo list's snapshot: read once on opening, as 进度 reads it.
+    if (task && !view.progressAsked) { view.progressAsked = true; void loadProgress(false).then(() => renderDetail(id)); }
     byId("detail-status").textContent = view.loadError;
     byId("close-issue").hidden = closed; byId("close-issue").disabled = Boolean(view.operation);
     renderQuestions(id, view, detail);
@@ -1827,7 +1861,7 @@
     const decisions = boards.flatMap(each => each.items.filter(item => item.column?.kind === "decide")).sort(newestFirst);
     if (decisions.length) {
       const section = node("section", "todo-decide");
-      section.append(node("h3", null, "等你决定"), todoList(decisions, { lane: true, go: true }));
+      section.append(node("h3", null, "等你决定"), todoList(decisions, { lane: true }));
       sections.push(section);
     }
     for (const each of boards) {
@@ -1876,15 +1910,16 @@
     return list;
   }
   /**
-   * A card: its number, opening it in Vikunja; its title, as text; its lane where the section does not
-   * say it; the issue it came from, linked once the Router knows it; and how long ago it moved.
+   * A card: its number, opening it in Vikunja; its title, opening the issue it came from here; its lane
+   * where the section does not say it; that issue's short ID, linked once the Router knows it; and how
+   * long ago it moved.
    */
-  function todoRow(item, { lane, go }) {
+  function todoRow(item, { lane }) {
     const row = node("li", "todo-row"); row.dataset.card = String(item.id);
     const card = node("a", "todo-card", item.identifier || "#" + item.id);
     if (/^https?:\/\//i.test(item.cardUrl ?? "")) card.setAttribute("href", item.cardUrl);
     card.target = "_blank"; card.rel = "noopener noreferrer";
-    row.append(card, node("span", "todo-title", item.title));
+    row.append(card, todoTitle(item));
     if (lane && item.ownerLane) row.append(laneButton(item.ownerLane, item.ownerLane.split("/")[0]));
     if (item.sourceIssue && WHOLE_REF.test(item.sourceIssue)) {
       const ref = node("span", "issue-ref-candidate", item.sourceIssue.slice(0, 8)); ref.dataset.ref = item.sourceIssue.toLowerCase();
@@ -1893,12 +1928,22 @@
     const when = node("span", "todo-time", item.updatedAt == null ? "" : ago(item.updatedAt));
     if (item.updatedAt != null) when.title = time(item.updatedAt);
     row.append(when);
-    if (go && item.sourceIssue) {
-      const button = node("button", "todo-go", "去问答 ↩"); button.type = "button";
-      button.addEventListener("click", () => selectIssue(item.sourceIssue, "push"));
-      row.append(button);
-    }
     return row;
+  }
+  /**
+   * A card with an issue behind it has a title that opens that issue here, a step back can undo; on
+   * hover, the issue's title once the Router has named it (upgradeIssueRefs). Any other title is text.
+   */
+  function todoTitle(item) {
+    if (!item.sourceIssue || !WHOLE_REF.test(item.sourceIssue)) return node("span", "todo-title", item.title);
+    const ref = item.sourceIssue.toLowerCase(), named = () => issueRefs.get(ref);
+    const link = node("a", "todo-title", item.title); link.dataset.ref = ref;
+    link.setAttribute("href", "?issue=" + (named()?.id ?? ref)); link.title = named()?.title ?? "打开来源问答";
+    link.addEventListener("click", event => {
+      if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      event.preventDefault(); selectIssue(named()?.id ?? ref, "push");
+    });
+    return link;
   }
   /** How long ago, coarsely, as the list is drawn; never kept current by a timer. */
   function ago(at) {

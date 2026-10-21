@@ -42,12 +42,14 @@ async function vikunja(buckets: () => unknown) {
   return `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 }
 
-test.skipIf(!browser)("10: 进度 shows the todo list; a card opens a new window; 去问答 goes to its issue and back returns; no width scrolls sideways", async () => {
+test.skipIf(!browser)("10: 进度 shows the todo list; a card opens a new window; its title goes to its issue and back returns; no width scrolls sideways", async () => {
   const router = await startPageRouter(); cleanup.push(() => router.close());
   let issueId = "";
   const hourAgo = new Date(Date.now() - 3_600_000).toISOString(), justNow = new Date().toISOString();
+  // Long enough to wrap even at 1280, where it once dropped whole under its card number (inbox, 16:20).
+  const long = "一张很长很长的卡片标题，" + "用来看窄屏上会不会把一行撑出横向滚动条来，也看宽屏上卡号和标题开头是不是还在同一行，".repeat(4);
   const origin = await vikunja(() => [
-    { id: 34, title: "正在做", tasks: [{ id: 56, identifier: "LR-56", title: "一张很长很长的卡片标题，用来看窄屏上会不会把一行撑出横向滚动条来，再长一点再长一点", done: false, owner_lane: "alpha/one", updated: hourAgo }] },
+    { id: 34, title: "正在做", tasks: [{ id: 56, identifier: "LR-56", title: long, done: false, owner_lane: "alpha/one", updated: hourAgo }] },
     { id: 85, title: "等你决定", tasks: [{ id: 57, identifier: "LR-57", title: "这件要你定", done: false, owner_lane: "alpha/one", source_issue: issueId, updated: justNow }] },
     { id: 36, title: "已上线", tasks: [{ id: 58, identifier: "LR-58", title: "做完了", done: true, owner_lane: "alpha/one", updated: justNow }] },
   ]);
@@ -71,7 +73,21 @@ test.skipIf(!browser)("10: 进度 shows the todo list; a card opens a new window
   expect(popup.url()).toBe(`${origin}/tasks/56`);
   await popup.close();
 
-  await page.click('#progress-list li[data-card="57"] .todo-go');
+  // The long title wraps in its own block, its first line beside the card number.
+  const tops = await page.evaluate(() => {
+    const row = document.querySelector('#progress-list li[data-card="56"]')!;
+    const firstLetter = (selector: string) => {
+      const range = document.createRange(), text = row.querySelector(selector)!.firstChild!;
+      range.setStart(text, 0); range.setEnd(text, 1);
+      return Math.round(range.getBoundingClientRect().top);
+    };
+    const title = row.querySelector(".todo-title")!.getBoundingClientRect();
+    return { card: firstLetter(".todo-card"), title: firstLetter(".todo-title"), lines: Math.round(title.height / parseFloat(getComputedStyle(row).lineHeight)) };
+  });
+  expect(tops.title).toBe(tops.card);
+  expect(tops.lines).toBeGreaterThan(1);
+
+  await page.click('#progress-list li[data-card="57"] a.todo-title');
   await page.waitForSelector(`#issue-detail[data-issue-id="${issueId}"]`);
   expect(await page.getAttribute("#tab-issues", "aria-selected")).toBe("true");
   await page.goBack();
