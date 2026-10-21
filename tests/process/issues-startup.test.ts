@@ -186,6 +186,46 @@ test("the state carries the progress board from the data root, re-read on every 
   await x.runtime.close();
 });
 
+// LR-56 (spec 2026-10-21-progress-list.md, acceptance 1), through the Router itself: the lane-grouped
+// list is read from Vikunja with the file's read-only token, and that token appears in nothing the
+// Router answers. A local server stands in for Vikunja and refuses any other token.
+test("the progress route reads the board from Vikunja with the token, and the board state never shows the token", async () => {
+  const { createServer } = await import("node:http");
+  const vikunja = createServer((request, response) => {
+    if (request.headers.authorization !== "Bearer tk_fixture_secret") { response.writeHead(401).end(); return; }
+    if (request.url !== "/api/v1/projects/12/views/48/tasks") { response.writeHead(404).end(); return; }
+    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify([
+      { id: 34, title: "正在做", tasks: [{ id: 465, identifier: "LR-56", title: "待办表", done: false, updated: "2026-10-21T15:04:51+08:00", owner_lane: "lane-router/design", source_lane: "lane-router/design", labels: [] }] },
+      { id: 36, title: "已上线", tasks: [] },
+    ]));
+  });
+  await new Promise<void>((resolve) => vikunja.listen(0, "127.0.0.1", resolve));
+  const vikunjaPort = (vikunja.address() as { port: number }).port;
+  try {
+    const path = root();
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const x = await boot(path);
+    const { url } = JSON.parse(readFileSync(join(path, "discovery.json"), "utf8"));
+    const progress = async (query = "") => ((await (await fetch(`${url}/dashboard/progress${query}`)).json()) as { result: any }).result;
+    expect(await progress()).toMatchObject({ unconfigured: true, boards: [] });
+
+    const board = `http://127.0.0.1:${vikunjaPort}/projects/12/48`;
+    writeFileSync(join(path, "progress-board.json"), JSON.stringify({ url: board, token: "tk_fixture_secret" }));
+    const result = await progress("?fresh=1");
+    expect(result.boards).toEqual([expect.objectContaining({
+      project: "lane-router", boardUrl: board, error: null,
+      items: [expect.objectContaining({ identifier: "LR-56", column: { id: 34, title: "正在做", kind: "doing" }, cardUrl: `http://127.0.0.1:${vikunjaPort}/tasks/465` })],
+    })]);
+    const state = await (await fetch(`${url}/dashboard/state`)).text();
+    expect(state).toContain(board);
+    expect(state).not.toContain("tk_fixture_secret");
+    expect(JSON.stringify(result)).not.toContain("tk_fixture_secret");
+    expect(stderr.mock.calls.map(([line]) => String(line)).join("")).not.toContain("tk_fixture_secret");
+    stderr.mockRestore();
+    await x.runtime.close();
+  } finally { await new Promise((resolve) => vikunja.close(resolve)); }
+});
+
 test("failed module recovery closes its started worker and leaves its configured entry unavailable", async () => {
   const path = root(); fake.moduleStartError = true;
   const x = await boot(path);

@@ -24,6 +24,11 @@ export class DashboardHttp {
     readonly dashboardLaneSets?: (input: DashboardLaneSetsInput) => Promise<unknown>;
     /** Mails every lane of one backend after a manual account switch; the 问答 page presses it too. */
     readonly continueAfterSwitch?: (backend: ContinueBackend) => Promise<ContinueResult>;
+    /**
+     * The 问答 page's lane-grouped list, read from Vikunja (spec 2026-10-21-progress-list.md, 4.3).
+     * Read-only and same-origin like the state, so no action token; fresh skips the minute's snapshot.
+     */
+    readonly progress?: (fresh: boolean) => Promise<unknown>;
   }) {}
 
   /** Returns false without reading the body when this method and URL belong to another entry. */
@@ -47,6 +52,11 @@ export class DashboardHttp {
             ? snapshot
             : { ...(snapshot as object), actionToken: this.options.actionToken });
         }
+        return true;
+      }
+      if (url.pathname === "/dashboard/progress") {
+        if (!this.options.progress) json(response, 404, { error: "not found" });
+        else json(response, 200, { result: await this.options.progress(url.searchParams.get("fresh") === "1") });
         return true;
       }
     }

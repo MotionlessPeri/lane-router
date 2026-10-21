@@ -56,6 +56,23 @@ test("the page is self-contained with only the local account-page navigation URL
   } finally { await server.close(); }
 });
 
+// LR-56 (spec 2026-10-21-progress-list.md, 4.3): the 问答 page's list is a plain same-origin GET, and
+// ?fresh=1 is what its 刷新 sends to skip the minute's snapshot.
+test("the progress route answers with what the feed returns, passing fresh through, and is absent unwired", async () => {
+  const progress = vi.fn(async (fresh: boolean) => ({ fetchedAt: 1, boards: [], fresh }));
+  const server = new LocalRouterServer({ tools: { call: vi.fn() } as never, instanceId: "instance-1", dashboardState: () => ({}), dashboardProgress: progress });
+  const discovery = await server.start();
+  try {
+    expect(await (await fetch(`${discovery.url}/dashboard/progress`)).json()).toEqual({ result: { fetchedAt: 1, boards: [], fresh: false } });
+    expect(await (await fetch(`${discovery.url}/dashboard/progress?fresh=1`)).json()).toEqual({ result: { fetchedAt: 1, boards: [], fresh: true } });
+    expect(progress.mock.calls).toEqual([[false], [true]]);
+  } finally { await server.close(); }
+  const bare = startServer(() => ({}));
+  const bareDiscovery = await bare.start();
+  try { expect((await fetch(`${bareDiscovery.url}/dashboard/progress`)).status).toBe(404); }
+  finally { await bare.close(); }
+});
+
 // Acceptance 11. The dashboard is an optional face, exactly like /lanes/archived: a Router built
 // without it must not answer these paths at all, rather than answer them emptily.
 test("both paths are absent when the dashboard is not wired in", async () => {

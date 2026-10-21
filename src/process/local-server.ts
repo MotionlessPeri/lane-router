@@ -594,6 +594,8 @@ export class LocalRouterServer {
      * page has another origin and none of the board's token.
      */
     readonly continueAfterSwitch?: (backend: ContinueBackend) => Promise<ContinueResult>;
+    /** The 问答 page's lane-grouped list from Vikunja; absent means the board has no such route. */
+    readonly dashboardProgress?: (fresh: boolean) => Promise<unknown>;
   }) {
     this.host = options.host ?? "127.0.0.1";
     if (this.host !== "127.0.0.1" && this.host !== "::1") throw new Error("Router internal server must bind to loopback");
@@ -609,6 +611,7 @@ export class LocalRouterServer {
       dashboardOpen: options.dashboardOpen,
       dashboardLaneSets: options.dashboardLaneSets,
       continueAfterSwitch: options.continueAfterSwitch,
+      progress: options.dashboardProgress,
     });
     this.issues = options.issues === undefined ? undefined : new IssuesHttp({
       ...options.issues, origin: () => this.discovery().url, actionToken: this.dashboardActionToken,

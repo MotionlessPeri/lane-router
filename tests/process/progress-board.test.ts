@@ -72,6 +72,35 @@ test("acceptance 1: an edit takes effect on the next read, without a restart", (
   expect(x.source.read()).toBeNull();
 });
 
+// LR-56 (spec 2026-10-21-progress-list.md, 4.2): the same file carries the read-only Vikunja token
+// and, optionally, a board per lane project. The token is for the Router's own requests only.
+test("LR-56: the token and boards are read for the Router, and the board list defaults to the one url", () => {
+  const x = setup();
+  x.write(JSON.stringify({ url: "http://localhost:3456/projects/12/48", token: "tk_secret" }));
+  expect(x.source.config()).toEqual({ token: "tk_secret", boards: [{ project: "lane-router", boardUrl: "http://localhost:3456/projects/12/48" }] });
+  x.write(JSON.stringify({ url: "http://localhost:3456/projects/12/48", token: "tk_secret", boards: { "lane-router": "http://localhost:3456/projects/12/48", curvenet_maya: "http://localhost:3456/projects/7/21" } }));
+  expect(x.source.config().boards).toEqual([
+    { project: "lane-router", boardUrl: "http://localhost:3456/projects/12/48" },
+    { project: "curvenet_maya", boardUrl: "http://localhost:3456/projects/7/21" },
+  ]);
+  x.write(JSON.stringify({ url: "http://localhost:3456/projects/12/48" }));
+  expect(x.source.config().token).toBeNull();
+  rmSync(join(x.dataRoot, PROGRESS_BOARD_FILE));
+  expect(x.source.config()).toEqual({ token: null, boards: [] });
+});
+
+test("LR-56: the token never reaches what the board state publishes, nor the log", () => {
+  const x = setup();
+  x.write(JSON.stringify({ url: "http://localhost:3456/projects/12/48", token: "tk_secret" }));
+  expect(JSON.stringify(x.source.read())).not.toContain("tk_secret");
+  x.write(JSON.stringify({ url: "https://example.com/board", token: "tk_secret" }));
+  x.source.read(); x.source.config();
+  x.write("{ \"token\": \"tk_secret\", ");
+  x.source.read(); x.source.config();
+  expect(x.lines.length).toBeGreaterThan(0);
+  expect(x.lines.join("\n")).not.toContain("tk_secret");
+});
+
 // The board polls /dashboard/state every few seconds: one line per change of reason, not per poll.
 test("the same reason is logged once, not on every read, and again once it changes back", () => {
   const x = setup();
