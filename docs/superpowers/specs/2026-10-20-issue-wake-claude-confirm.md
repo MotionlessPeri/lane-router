@@ -1,6 +1,6 @@
 # 问答页唤醒 Claude lane：说清要点一下确认 —— 需求与设计（补充稿）
 
-**状态：** 补充稿，2026-10-20 由 `lane-router/inbox` 起草，补[新问答稿](2026-10-20-issue-start-from-page.md)的页面文案。由 `lane-router/inbox-impl` 实现。
+**状态：** 补充稿，2026-10-20 由 `lane-router/inbox` 起草，补[新问答稿](2026-10-20-issue-start-from-page.md)的页面文案。由 `lane-router/inbox-impl` 实现。插件迁移后作废（[LR-24 迁移稿](2026-10-21-channel-plugin-migration.md) 4.6）：Claude lane 不再弹确认框，页面上 Claude 和 Codex 的说法相同；唤醒结果里的 `backend` 字段保留。
 
 ## 一、问题
 
