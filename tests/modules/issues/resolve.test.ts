@@ -56,7 +56,8 @@ test("1: the page's entry answers with its token and refuses a bad query; the la
   const get = async (query: string) => { const response = await fetch(`${url}/issues/api/resolve${query}`); return { status: response.status, body: await response.json() as any }; };
   const found = await get(`?refs=${A},abcdef01,205a897d`);
   expect(found.status).toBe(200);
-  expect(found.body).toEqual({ result: x.service.resolveRefs([A, "abcdef01", "205a897d"]), actionToken: expect.any(String) });
+  // Commit ids are another batch's (commit-refs.test.ts): none asked, none answered.
+  expect(found.body).toEqual({ result: { ...x.service.resolveRefs([A, "abcdef01", "205a897d"]), commits: [] }, actionToken: expect.any(String) });
   expect(found.body.result.items.map((item: any) => item.ref)).toEqual([A, "205a897d"]);
   for (const query of ["", "?refs=", "?refs=nothex00", `?refs=${A}&x=1`, `?refs=${A}&refs=${A}`, `?refs=${Array(101).fill("205a897d").join(",")}`]) {
     expect((await get(query)).status, query).toBe(400);

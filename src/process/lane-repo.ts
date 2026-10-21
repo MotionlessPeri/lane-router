@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 
 import type { LaneRepo, LaneRepoPort } from "../modules/issues/ports.js";
+import type { IssueCommitRef } from "../modules/issues/types.js";
 
 /** What a lane's directory is read from: its open session's, or the latest any lane of its project reported. */
 export interface LaneCwdSource {
@@ -29,13 +30,18 @@ export function githubWebUrl(remote: string): string | null {
   return match === null ? null : `https://github.com/${match[1]}/${match[2]}`;
 }
 
-type Git = (args: readonly string[], cwd: string) => Promise<{ readonly code: number; readonly stdout: string }>;
+type Git = (args: readonly string[], cwd: string, input?: string) => Promise<{ readonly code: number; readonly stdout: string }>;
 
-const runGit: Git = (args, cwd) => new Promise((resolve) => {
-  execFile("git", [...args], { cwd, windowsHide: true, timeout: 5_000 }, (error, stdout) => {
+/** Git in `cwd`, `input` on its standard input; only cat-file reads it, and the rest get it closed. */
+export const runGit: Git = (args, cwd, input) => new Promise((resolve) => {
+  const child = execFile("git", [...args], { cwd, windowsHide: true, timeout: 5_000 }, (error, stdout) => {
     resolve({ code: error === null ? 0 : typeof error.code === "number" ? error.code : 1, stdout: String(stdout) });
   });
+  child.stdin?.end(input ?? "");
 });
+
+// What cat-file --batch-check says of an id it peeled to a commit: the whole id, "commit", the size.
+const COMMIT_LINE = /^([0-9a-f]{40}|[0-9a-f]{64}) commit \d+$/u;
 
 /**
  * Which repository a lane works in (spec docs/superpowers/specs/2026-10-21-issue-page-usability.md,
@@ -57,6 +63,25 @@ export class LaneRepoLocator implements LaneRepoPort {
       this.byDirectory.set(cwd, found);
     }
     return found;
+  }
+
+  /**
+   * One cat-file answers every id, a line each in order. Each is asked as `<id>^{commit}`, so a tree,
+   * a blob, an id the repository lacks and a prefix of several objects all come back "missing" (or
+   * "ambiguous"), and only a commit is taken. With no GitHub remote there is nowhere to link, so git
+   * is not asked at all.
+   */
+  async commitsForLane(laneId: string, refs: readonly string[]): Promise<readonly IssueCommitRef[]> {
+    const repo = await this.repoForLane(laneId);
+    if (repo === null || repo.webUrl === null || refs.length === 0) return [];
+    const git = this.options.git ?? runGit;
+    const answer = await git(["cat-file", "--batch-check"], repo.root, refs.map((ref) => `${ref}^{commit}\n`).join(""));
+    if (answer.code !== 0) return [];
+    const lines = answer.stdout.split(/\r?\n/u);
+    return refs.flatMap((ref, index) => {
+      const sha = COMMIT_LINE.exec(lines[index] ?? "")?.[1];
+      return sha === undefined ? [] : [{ ref, sha, url: `${repo.webUrl}/commit/${sha}` }];
+    });
   }
 
   private async locate(cwd: string): Promise<LaneRepo | null> {

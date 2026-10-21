@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { IssueAttachments, IssuesService, openIssueStore, type IssueWakePort } from "../../../src/modules/issues/index.js";
+import { IssueAttachments, IssuesService, openIssueStore, type IssueWakePort, type LaneRepoPort } from "../../../src/modules/issues/index.js";
 import type { RestorePresence } from "../../../src/router/backend.js";
 import type { LaneAccess, LaneAccessFacts, LaneCallerIdentity } from "../../../src/router/lane-access.js";
 import type { CallerContext } from "../../../src/router/types.js";
@@ -11,7 +11,7 @@ import type { CallerContext } from "../../../src/router/types.js";
  * IDs are short and numbered unless `newId` is given, e.g. real UUIDs where a page shortens them.
  * Time ticks by one per read unless `now` is given. Attachments keep their own random IDs.
  */
-export function setupIssues(options: { newId?: () => string; wake?: IssueWakePort; now?: () => number } = {}) {
+export function setupIssues(options: { newId?: () => string; wake?: IssueWakePort; now?: () => number; repos?: LaneRepoPort } = {}) {
   const root = mkdtempSync(join(tmpdir(), "lane-issues-"));
   const path = join(root, "issues.sqlite");
   const attachmentsRoot = join(root, "issue-attachments");
@@ -55,7 +55,7 @@ export function setupIssues(options: { newId?: () => string; wake?: IssueWakePor
   };
   const now = options.now ?? (() => ++tick);
   const makeService = () => new IssuesService({ store, lanes: access, now, newId: options.newId ?? (() => `id-${++sequence}`),
-    ...(options.wake ? { wake: options.wake } : {}) });
+    ...(options.wake ? { wake: options.wake } : {}), ...(options.repos ? { repos: options.repos } : {}) });
   let service = makeService();
   const makeAttachments = () => new IssueAttachments({ store, root: attachmentsRoot, now });
   let attachments = makeAttachments();

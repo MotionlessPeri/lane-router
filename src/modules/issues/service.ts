@@ -9,7 +9,7 @@ import {
   IssueError,
   type AppendIssueInput, type AttentionReason, type CloseIssueInput, type CreateIssueInput, type IssueAttachment, type IssueAttachmentInfo, type IssueDetail,
   type IssueEntry, type IssueEntryResult, type IssueHistoryQuery, type IssueList,
-  type IssueCloser, type IssueFilter, type IssueListQuery, type IssueOwner, type IssuePresence, type IssueProcessedResult, type IssueProjectCount,
+  type IssueCloser, type IssueCommitRef, type IssueFilter, type IssueListQuery, type IssueOwner, type IssuePresence, type IssueProcessedResult, type IssueProjectCount,
   type IssueProjects, type IssueQuestion, type IssueRefs, type IssueThread,
   type IssueTaskResult, type IssueWakeResult, type LaneCloseIssueInput, type PublishIssueInput, type ReadIssueInput, type RecordProcessedInput, type ReplyIssueInput,
   type SetIssueTaskInput, type UpdateIssueQuestionInput,
@@ -219,6 +219,24 @@ export class IssuesService {
       }
     }
     return { items, lanes: lanes.flatMap((address) => known.has(address) ? [{ address, project: known.get(address)! }] : []) };
+  }
+
+  /**
+   * Which of these hex ids are commits of the repository the issue's own lane works in, as written,
+   * with each commit's whole id and GitHub page; the page's alone. Another repository's commit is not
+   * found there, and with no repository port nothing is linked. Git itself is the port's to run.
+   */
+  async resolveCommits(issueId: string, commits: readonly string[]): Promise<readonly IssueCommitRef[]> {
+    if (!Array.isArray(commits) || commits.length > 100) invalid("commits must be a list of at most 100 commit ids");
+    for (const commit of commits) if (typeof commit !== "string" || !COMMIT_REF.test(commit)) invalid("A commit id is 7 to 40 hex digits");
+    const { ownerLaneId } = this.requireThread(text(issueId, "issue"));
+    const repos = this.options.repos;
+    if (!repos || commits.length === 0) return [];
+    const found = new Map((await repos.commitsForLane(ownerLaneId, [...new Set(commits.map((commit) => commit.toLowerCase()))])).map((commit) => [commit.ref, commit]));
+    return commits.flatMap((ref) => {
+      const commit = found.get(ref.toLowerCase());
+      return commit === undefined ? [] : [{ ref, sha: commit.sha, url: commit.url }];
+    });
   }
 
   /** Each project that has an issue, with lanes gone gathered under null at the end. */
@@ -565,6 +583,7 @@ function text(value: unknown, name: string): string {
 }
 
 const ISSUE_REF = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8})$/iu;
+const COMMIT_REF = /^[0-9a-f]{7,40}$/iu;
 /** `<project>/<lane>`, each part by the address rule. */
 function isLaneAddress(value: unknown): value is string {
   if (typeof value !== "string") return false;

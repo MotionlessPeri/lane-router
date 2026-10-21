@@ -1,5 +1,5 @@
 import type { LaneAccess } from "../../router/lane-access.js";
-import type { IssueAttachment, IssueDelivery, IssueEntry, IssueFilter, IssueListQuery, IssueOperation, IssueQuestion, IssueThread, IssueWakeResult } from "./types.js";
+import type { IssueAttachment, IssueCommitRef, IssueDelivery, IssueEntry, IssueFilter, IssueListQuery, IssueOperation, IssueQuestion, IssueThread, IssueWakeResult } from "./types.js";
 
 export interface IssueListRow extends IssueThread {
   readonly waitingUserCount: number;
@@ -91,6 +91,12 @@ export interface LaneRepo {
 /** Finds the repository a lane works in; null when it has no known directory or that is not a checkout. */
 export interface LaneRepoPort {
   repoForLane(laneId: string): Promise<LaneRepo | null>;
+  /**
+   * Which of these hex ids name a commit of the lane's repository, each with its whole id and where
+   * GitHub shows it; none when the repository is unknown or has no GitHub remote. The ids are checked
+   * hex already.
+   */
+  commitsForLane(laneId: string, refs: readonly string[]): Promise<readonly IssueCommitRef[]>;
 }
 
 export interface IssuesServiceOptions {

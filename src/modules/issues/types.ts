@@ -141,6 +141,8 @@ export interface IssueRef {
 /** A lane address that some lane holding issues has had, and its project. */
 export interface IssueLaneRef { readonly address: string; readonly project: string }
 export interface IssueRefs { readonly items: readonly IssueRef[]; readonly lanes: readonly IssueLaneRef[] }
+/** A commit id as written, the commit's whole id, and its page on GitHub. */
+export interface IssueCommitRef { readonly ref: string; readonly sha: string; readonly url: string }
 export interface IssueHistoryQuery { readonly afterSeq?: number; readonly limit?: number }
 export interface IssueOwner {
   readonly laneId: string;

@@ -65,7 +65,10 @@ export class IssuesHttp {
         } else if (projects) {
           json(response, 200, { result: service.projects(projectsQuery(url.searchParams)), actionToken: this.options.actionToken });
         } else if (resolving) {
-          json(response, 200, { result: service.resolveRefs(...refsQuery(url.searchParams)), actionToken: this.options.actionToken });
+          const { refs, lanes, commits, issue } = refsQuery(url.searchParams);
+          const found = service.resolveRefs(refs, lanes);
+          const result = { ...found, commits: issue === null ? [] : await service.resolveCommits(issue, commits) };
+          json(response, 200, { result, actionToken: this.options.actionToken });
         } else {
           const result = detail ? service.detail(decodeURIComponent(detail[1]!), historyQuery(url.searchParams)) : service.list(listQuery(url.searchParams));
           json(response, 200, { result, actionToken: this.options.actionToken });
@@ -176,11 +179,13 @@ function listQuery(params: URLSearchParams): IssueListQuery {
 }
 
 /** Issue references and lane addresses, each comma-separated, at least one of the two; the service judges each. */
-function refsQuery(params: URLSearchParams): [string[], string[]] {
-  queryFields(params, ["refs", "lanes"]);
-  const refs = params.get("refs"), lanes = params.get("lanes");
-  if (refs === null && lanes === null) throw new IssueError("INVALID_INPUT", "refs or lanes is required");
-  return [refs === null ? [] : refs.split(","), lanes === null ? [] : lanes.split(",")];
+/** Commit ids are looked for in one issue's lane's repository, so they come with that issue and it with them. */
+function refsQuery(params: URLSearchParams): { refs: string[]; lanes: string[]; commits: string[]; issue: string | null } {
+  queryFields(params, ["refs", "lanes", "commits", "issue"]);
+  const refs = params.get("refs"), lanes = params.get("lanes"), commits = params.get("commits"), issue = params.get("issue");
+  if (refs === null && lanes === null && commits === null) throw new IssueError("INVALID_INPUT", "refs, lanes or commits is required");
+  if ((commits === null) !== (issue === null)) throw new IssueError("INVALID_INPUT", "commits and issue go together");
+  return { refs: refs === null ? [] : refs.split(","), lanes: lanes === null ? [] : lanes.split(","), commits: commits === null ? [] : commits.split(","), issue };
 }
 
 function projectsQuery(params: URLSearchParams): { filter: IssueFilter } {
