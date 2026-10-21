@@ -30,7 +30,7 @@ const publish = { operationKey: "publish", title: "选择方案", kind: "questio
 describe("issue inbox across real adapters and independent durable stores", () => {
   it("publishes, replies, reads full mailbox context, processes with tools, ends on user close and reopens on a later reply", async () => {
     const x = setup(); const a = await adapters(x);
-    expect(a.applicationTools.catalog.definitions).toHaveLength(13);
+    expect(a.applicationTools.catalog.definitions).toHaveLength(15);
     const question = await a.call("lane_issue_publish", publish) as IssueEntryResult;
     expect((await result<IssueList>(await a.get())).items[0]).toMatchObject({ id: question.issueId, waitingUserCount: 1 });
     const detail = await result<IssueDetail>(await a.get(`/issues/api/threads/${question.issueId}`));

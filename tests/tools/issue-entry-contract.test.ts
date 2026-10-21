@@ -19,7 +19,7 @@ test.each(["claude", "zcode"] as const)("%s MCP lists SDK-valid product tools an
   closers.push(async () => { await client.close(); await server.close(); });
   const listed = (await client.listTools()).tools;
   expect(listed.map(tool => tool.name)).toEqual(productToolCatalog.definitions.map(tool => tool.name));
-  expect(listed).toHaveLength(13);
+  expect(listed).toHaveLength(15);
   expect((await client.callTool({ name: "lane_issue_read", arguments: { issueId: "saved" } })).isError).not.toBe(true);
   expect(call).toHaveBeenCalledWith("lane_issue_read", { issueId: "saved" }, expect.objectContaining({ backend, conversationId: "session" }));
   expect((await client.callTool({ name: "lane_issue_read", arguments: { issueId: "saved", generation: 2 } })).isError).toBe(true);

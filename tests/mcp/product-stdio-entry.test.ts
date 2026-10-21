@@ -17,13 +17,13 @@ vi.mock("../../src/modules/issues/store.js", () => { throw new Error("MCP import
 const closers: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of closers.splice(0)) await close(); });
 
-test.each(["claude", "zcode"] as const)("actual %s stdio entry assembles all thirteen pure tools", async backend => {
+test.each(["claude", "zcode"] as const)("actual %s stdio entry assembles all fifteen pure tools", async backend => {
   const [a, b] = InMemoryTransport.createLinkedPair(); fixture.transport = b;
   const client = new Client({ name: "stdio-product-consumer", version: "1" });
   const [runtime] = await Promise.all([backend === "claude" ? runLaneMcpStdio() : runZcodeLaneMcpStdio(), client.connect(a)]);
   closers.push(async () => { await client.close(); await runtime.close(); });
   const listed = (await client.listTools()).tools;
-  expect(listed.map(tool => tool.name)).toEqual(["lane_directory", "lane_attach_current", "lane_send", "lane_ack", "lane_restore_project", "lane_issue_publish", "lane_issue_read", "lane_issue_append", "lane_issue_update", "lane_graph_create", "lane_graph_read", "lane_graph_lock", "lane_graph_apply"]);
+  expect(listed.map(tool => tool.name)).toEqual(["lane_directory", "lane_attach_current", "lane_send", "lane_ack", "lane_restore_project", "lane_issue_publish", "lane_issue_read", "lane_issue_append", "lane_issue_update", "lane_graph_create", "lane_graph_read", "lane_graph_lock", "lane_graph_apply", "lane_kb_search", "lane_kb_record"]);
   const result = await client.callTool({ name: "lane_issue_read", arguments: { issueId: "saved" } });
   expect(result.isError).not.toBe(true);
   expect(JSON.parse((result.content as any)[0].text)).toMatchObject({ name: "lane_issue_read", args: { issueId: "saved" }, context: { backend } });

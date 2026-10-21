@@ -5,7 +5,7 @@ import { flattenRootUnion } from "../../src/application/flat-root-schema.js";
 
 type Schema = Record<string, any>;
 const TARGETS = [undefined, "draft-7"] as const;
-const UNION_TOOLS = ["lane_issue_publish", "lane_issue_read", "lane_issue_update", "lane_graph_read", "lane_graph_lock"];
+const UNION_TOOLS = ["lane_issue_publish", "lane_issue_read", "lane_issue_update", "lane_graph_read", "lane_graph_lock", "lane_kb_search", "lane_kb_record"];
 const published = (target: (typeof TARGETS)[number]) => new Map(productToolCatalog.jsonTools(target).map((tool) => [tool.name, tool]));
 const definition = (name: string) => productToolCatalog.definitions.find((tool) => tool.name === name)!;
 /** What the schema was before any flattening: the branches a union tool's Zod schema actually has. */
