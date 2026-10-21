@@ -1,3 +1,4 @@
+import { parseLaneAddress } from "./address.js";
 import type { LaneRecord } from "./types.js";
 
 /**
@@ -13,12 +14,24 @@ export function isTaskLane(roleDescription: string): boolean {
   return roleDescription.trimStart().startsWith(TASK_LANE_PREFIX);
 }
 
-/** Where the work the lane was opened for continues: its issue and its parent, from the first sentence. */
+/**
+ * Where the work the lane was opened for continues: its issue and its parent, from the first sentence.
+ * The spec puts both in backticks, but roles are typed by hand and the backticks get left out, so a
+ * bare value is read too, as long as it looks like what it is: an issue id of eight hex characters
+ * or a whole UUID, and a lane address the Router itself would accept.
+ */
 export function taskLaneOrigin(roleDescription: string): { readonly issue: string | null; readonly parent: string | null } {
-  return {
-    issue: /问答\s*`([^`]+)`/u.exec(roleDescription)?.[1] ?? null,
-    parent: /归属\s*`([^`]+)`/u.exec(roleDescription)?.[1] ?? null,
-  };
+  const issue = /问答\s*`([^`]+)`/u.exec(roleDescription)?.[1]
+    ?? /问答\s*([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)(?![0-9a-z-])/iu.exec(roleDescription)?.[1]
+    ?? null;
+  const parent = /归属\s*`([^`]+)`/u.exec(roleDescription)?.[1]
+    ?? laneAddressOrNull(/归属\s*([^\s，,。；;`]+)/u.exec(roleDescription)?.[1]);
+  return { issue, parent };
+}
+
+function laneAddressOrNull(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  try { return parseLaneAddress(value).address; } catch { return null; }
 }
 
 /** The refusal a finished lane's sender reads, naming where a follow-up should go instead. */
