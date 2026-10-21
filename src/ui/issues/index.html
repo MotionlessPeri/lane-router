@@ -56,11 +56,24 @@
   .view-tabs { display: flex; gap: 4px; padding: 0 4px; }
   .view-tabs [role="tab"] { padding: 2px 8px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); font-size: 13px; }
   .view-tabs [aria-selected="true"] { border-bottom-color: var(--text); color: var(--text); }
-  /* The board keeps a fixed height where the content follows the list; wide screens give it the rest. */
-  #progress-view { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 8px 16px 16px; background: var(--panel); }
+  /* 进度: the todo list read from Vikunja, by lane. Its rows wrap rather than scroll sideways. */
+  #progress-view { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 8px 16px 16px; background: var(--panel); }
   #progress-note { margin: 0; }
-  #progress-open { margin-left: 4px; }
-  #progress-view iframe { width: 100%; height: 80vh; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  #progress-refresh { padding: 0; border: 0; background: transparent; color: var(--blue); font: inherit; }
+  #progress-refresh::before, #progress-open::before { content: "·"; display: inline-block; margin: 0 6px; color: var(--muted); }
+  #progress-list { display: grid; gap: 16px; min-width: 0; }
+  .todo-decide, .todo-board, .todo-lane { display: grid; gap: 6px; min-width: 0; }
+  .todo-decide { padding: 10px 12px; border: 1px solid var(--line); border-left: 3px solid var(--warm); border-radius: 8px; }
+  .todo-decide h3, .todo-project { margin: 0; font-size: 15px; }
+  .todo-lane h4 { margin: 6px 0 0; font-size: 14px; font-weight: 600; }
+  .todo-segment h5 { margin: 0; color: var(--muted); font-size: 12px; font-weight: 500; }
+  .todo-decide ul, .todo-segment ul, .todo-shelved ul { display: grid; gap: 3px; margin: 2px 0 0; padding: 0; list-style: none; }
+  .todo-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; font-size: 13px; }
+  .todo-title { min-width: 0; overflow-wrap: anywhere; }
+  .todo-time { color: var(--muted); font-size: 12px; }
+  .todo-go { padding: 0 6px; font-size: 12px; }
+  .todo-board-error { margin: 0; font-size: 12px; }
+  .todo-shelved summary { cursor: pointer; color: var(--muted); font-size: 12px; }
   /* A group's head reads as a label over its issues: the project, how many, and what waits on the user,
      that last kept to the right edge where it lines up from group to group. */
   .project-group + .project-group { margin-top: 8px; }
@@ -198,8 +211,7 @@
     #compose-region { max-height: 50%; overflow-y: auto; }
     #reply-body { resize: none; }
     #new-issue-view { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 16px 32px; }
-    #progress-view { flex: 1 1 0; min-height: 0; padding: 8px 32px 16px; }
-    #progress-view iframe { flex: 1 1 0; height: auto; min-height: 0; }
+    #progress-view { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 8px 32px 16px; }
   }
   @media (max-width: 680px) {
     .sidebar { padding: 14px 14px 0; border-bottom: 1px solid var(--line); }
@@ -279,7 +291,8 @@
     <div id="new-recovery" hidden><button type="button" id="retry-new">用同一操作重试</button><button type="button" id="check-new">查看后端历史</button></div>
   </section>
   <section id="progress-view" aria-label="进度" hidden>
-    <p id="progress-note" class="meta"><span id="progress-text"></span><a id="progress-open" target="_blank" rel="noopener noreferrer" hidden>在新窗口打开 ↗</a></p>
+    <p id="progress-note" class="meta"><span id="progress-text"></span><button type="button" id="progress-refresh">刷新</button><a id="progress-open" target="_blank" rel="noopener noreferrer" hidden>在 Vikunja 里打开看板 ↗</a></p>
+    <div id="progress-list"></div>
   </section>
 </main>
 <script src="/issues/assets/markdown-it.js"></script>
@@ -1726,12 +1739,10 @@
   }
 
   /**
-   * 进度 shows the Vikunja board where an issue would be (spec 2026-10-21-progress-tab.md). Its address
-   * is read from the Router as the page starts, serving LR-n links too (spec
-   * 2026-10-21-issue-page-usability.md, section five), and again on each visit to 进度 until there is
-   * one; the iframe, once built, is only ever hidden, so the board keeps its scroll and filters. The
-   * read is a fetch of its own: request() would take that answer's actionToken, or its lack of one,
-   * for the page's writes.
+   * The Vikunja board's address, for LR-n links and 「在 Vikunja 里打开看板」: read from the Router as
+   * the page starts (spec 2026-10-21-issue-page-usability.md, section five), and again on each visit to
+   * 进度 until there is one. The read is a fetch of its own: request() would take that answer's
+   * actionToken, or its lack of one, for the page's writes.
    */
   let board = null, boardRead = null;
   function readBoard() {
@@ -1750,11 +1761,17 @@
   }
   function showView(name) {
     shownView = name;
+    // This history entry remembers the tab, so back from an issue opened on 进度 returns to 进度.
+    const history = document.defaultView.history;
+    history.replaceState({ ...(history.state ?? {}), view: name }, "", document.defaultView.location.href);
     byId("tab-issues").setAttribute("aria-selected", String(name === "issues"));
     byId("tab-progress").setAttribute("aria-selected", String(name === "progress"));
     byId("progress-view").hidden = name !== "progress";
     renderNew();
-    if (name === "progress") void loadBoard();
+    if (name === "progress") {
+      if (!board) void readBoard().then(renderProgress);
+      void loadProgress(false);
+    }
     // A narrow window puts the content under the list, out of sight of the tab just pressed.
     if (name === "progress" && document.defaultView.matchMedia?.("(max-width: 680px)").matches) byId("progress-view").scrollIntoView?.({ block: "start" });
   }
@@ -1762,19 +1779,138 @@
   function localBoard(url) {
     try { const parsed = new URL(url); return parsed.protocol === "http:" && ["localhost", "127.0.0.1"].includes(parsed.hostname); } catch { return false; }
   }
-  /** The board in 进度: built once its address is known, read again while it is not. */
-  async function loadBoard() {
-    const text = byId("progress-text"), open = byId("progress-open");
-    const result = board ? {} : (text.textContent = "正在读取进度板的配置…", open.hidden = true, await readBoard());
-    if (!board) {
-      text.textContent = result.error ? "读不到进度板的配置：" + result.error.message + "。再点一次「进度」会重读。"
-        : "进度板还没配置：在 ~/.lane-router/progress-board.json 写 { \"url\": \"<Vikunja 看板地址>\" }，写好后再点一次「进度」。";
-      return;
+  /**
+   * 进度 is a todo list from the Router's /dashboard/progress, which reads the Vikunja boards (specs
+   * 2026-10-21-progress-list.md, 4.4, and 2026-10-21-progress-list-page.md). It is read on a visit to
+   * 进度 when there is none yet, it is over a minute old, or the last answer was that nothing is
+   * configured; 刷新 reads afresh. One read at a time, never on a timer, and a fetch of its own, for
+   * the reason the board's address is.
+   */
+  let progress = null, progressAt = 0, progressReading = null, progressError = "", shownProgress;
+  function loadProgress(fresh) {
+    if (progressReading) return progressReading;
+    if (!fresh && progress && !progress.unconfigured && Date.now() - progressAt < 60_000) { renderProgress(); return Promise.resolve(); }
+    progressReading = (async () => {
+      try {
+        const response = await fetch("/dashboard/progress" + (fresh ? "?fresh=1" : ""), { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error((data.error || "请求失败") + "（" + response.status + "）");
+        progress = data.result; progressAt = Date.now(); progressError = "";
+      } catch (error) { progressError = error.message; }
+      finally { progressReading = null; renderProgress(); }
+    })();
+    renderProgress();
+    return progressReading;
+  }
+  /** The head line says where the list stands; the list itself is redrawn only when a new one came. */
+  function renderProgress() {
+    const text = byId("progress-text"), open = byId("progress-open"), list = byId("progress-list");
+    open.hidden = !board;
+    if (board) open.setAttribute("href", board);
+    text.removeAttribute("title");
+    if (progressReading) text.textContent = "正在读取…";
+    else if (progressError) text.textContent = "待办表没读到：" + progressError;
+    else if (progress?.unconfigured) text.textContent = "待办表还没配置：在 ~/.lane-router/progress-board.json 加 token（Vikunja 只读 API 令牌），写好以后再点一次「进度」。";
+    else if (progress) { text.textContent = "数据来自 Vikunja，" + ago(progress.fetchedAt) + "更新"; text.title = time(progress.fetchedAt); }
+    else text.textContent = "";
+    if (progress === shownProgress) return;
+    shownProgress = progress;
+    list.replaceChildren(...(progress && !progress.unconfigured ? progressSections(progress.boards ?? []) : []));
+    void resolveIssueRefs();
+  }
+  const newestFirst = (a, b) => b.updatedAt - a.updatedAt;
+  const WEEK = 7 * 24 * 60 * 60 * 1000;
+  /**
+   * What waits on the user first, from every board; then each board's lanes in address order, the
+   * lane-less last, each with what is being done, what waits to be deployed, what went live this
+   * week and any other column; what is shelved folded at the board's end.
+   */
+  function progressSections(boards) {
+    const sections = [];
+    const decisions = boards.flatMap(each => each.items.filter(item => item.column?.kind === "decide")).sort(newestFirst);
+    if (decisions.length) {
+      const section = node("section", "todo-decide");
+      section.append(node("h3", null, "等你决定"), todoList(decisions, { lane: true, go: true }));
+      sections.push(section);
     }
-    if (byId("progress-view").querySelector("iframe")) return;
-    const frame = node("iframe"); frame.src = board; frame.title = "进度看板（Vikunja）";
-    byId("progress-view").append(frame);
-    text.textContent = "这是 Vikunja 看板，拖动卡片、点开卡片都在里面做；"; open.setAttribute("href", board); open.hidden = false;
+    for (const each of boards) {
+      const section = node("section", "todo-board"); section.dataset.project = each.project;
+      if (boards.length > 1) section.append(node("h3", "todo-project", each.project));
+      if (each.error) section.append(node("p", "warning todo-board-error", "Vikunja 没读到：" + each.error.reason + "（" + time(each.error.at) + "），下面是上一份数据"));
+      const lanes = new Map();
+      for (const item of each.items) {
+        if (item.column?.kind === "decide" || item.column?.kind === "shelved") continue;
+        lanes.set(item.ownerLane || "", [...lanes.get(item.ownerLane || "") ?? [], item]);
+      }
+      const order = [...lanes.keys()].sort((a, b) => a === "" ? 1 : b === "" ? -1 : a.localeCompare(b, undefined, { sensitivity: "base" }));
+      for (const address of order) {
+        const items = lanes.get(address), segments = [];
+        for (const [kind, title] of [["doing", "正在做"], ["deploy", "做完待部署"], ["live", "已上线"]]) {
+          const rows = items.filter(item => item.column?.kind === kind && (kind !== "live" || Date.now() - item.updatedAt <= WEEK));
+          if (rows.length) segments.push([kind, title, rows]);
+        }
+        const others = items.filter(item => !["doing", "deploy", "live"].includes(item.column?.kind));
+        for (const title of [...new Set(others.map(item => item.column?.title ?? ""))].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))) {
+          segments.push(["other:" + title, title, others.filter(item => (item.column?.title ?? "") === title)]);
+        }
+        if (!segments.length) continue;
+        const lane = node("section", "todo-lane"); lane.dataset.lane = address;
+        const heading = node("h4"); heading.append(address ? laneButton(address, address.split("/")[0]) : "还没定负责 lane");
+        lane.append(heading, ...segments.map(([kind, title, rows]) => {
+          const segment = node("section", "todo-segment"); segment.dataset.segment = kind;
+          segment.append(node("h5", null, title), todoList(rows.sort(newestFirst), {}));
+          return segment;
+        }));
+        section.append(lane);
+      }
+      const shelved = each.items.filter(item => item.column?.kind === "shelved").sort(newestFirst);
+      if (shelved.length) {
+        const details = node("details", "todo-shelved");
+        details.append(node("summary", null, "搁置 " + shelved.length + " 件"), todoList(shelved, { lane: true }));
+        section.append(details);
+      }
+      sections.push(section);
+    }
+    return sections;
+  }
+  function todoList(items, options) {
+    const list = node("ul");
+    list.append(...items.map(item => todoRow(item, options)));
+    return list;
+  }
+  /**
+   * A card: its number, opening it in Vikunja; its title, as text; its lane where the section does not
+   * say it; the issue it came from, linked once the Router knows it; and how long ago it moved.
+   */
+  function todoRow(item, { lane, go }) {
+    const row = node("li", "todo-row"); row.dataset.card = String(item.id);
+    const card = node("a", "todo-card", item.identifier || "#" + item.id);
+    if (/^https?:\/\//i.test(item.cardUrl ?? "")) card.setAttribute("href", item.cardUrl);
+    card.target = "_blank"; card.rel = "noopener noreferrer";
+    row.append(card, node("span", "todo-title", item.title));
+    if (lane && item.ownerLane) row.append(laneButton(item.ownerLane, item.ownerLane.split("/")[0]));
+    if (item.sourceIssue && WHOLE_REF.test(item.sourceIssue)) {
+      const ref = node("span", "issue-ref-candidate", item.sourceIssue.slice(0, 8)); ref.dataset.ref = item.sourceIssue.toLowerCase();
+      row.append(ref);
+    }
+    const when = node("span", "todo-time", ago(item.updatedAt)); when.title = time(item.updatedAt);
+    row.append(when);
+    if (go && item.sourceIssue) {
+      const button = node("button", "todo-go", "去问答 ↩"); button.type = "button";
+      button.addEventListener("click", () => selectIssue(item.sourceIssue, "push"));
+      row.append(button);
+    }
+    return row;
+  }
+  /** How long ago, coarsely, as the list is drawn; never kept current by a timer. */
+  function ago(at) {
+    const seconds = (Date.now() - at) / 1000;
+    if (seconds < 60) return "刚刚";
+    if (seconds < 3600) return Math.floor(seconds / 60) + " 分钟前";
+    if (seconds < 86400) return Math.floor(seconds / 3600) + " 小时前";
+    if (seconds < 30 * 86400) return Math.floor(seconds / 86400) + " 天前";
+    const day = new Date(at);
+    return (day.getMonth() + 1) + "/" + day.getDate();
   }
 
   /** Only this address's issues, in its project; the project chosen as if picked by hand. */
@@ -1800,6 +1936,7 @@
   byId("clear-lane-filter").addEventListener("click", () => { laneFilter = null; renderLaneFilter(); showFilter(filter); });
   byId("new-issue").addEventListener("click", openNew);
   byId("tab-issues").addEventListener("click", () => showView("issues"));
+  byId("progress-refresh").addEventListener("click", () => { void loadProgress(true); });
   byId("tab-progress").addEventListener("click", () => showView("progress"));
   for (const button of document.querySelectorAll("[data-continue]")) button.addEventListener("click", () => { void continueLanes(button.dataset.continue); });
   byId("cancel-new").addEventListener("click", closeNew);
@@ -1830,7 +1967,10 @@
   // An operation in flight or of unknown outcome holds a key a reload would lose, so leaving asks
   // first. A draft alone does not: it is kept in storage.
   document.defaultView.addEventListener("beforeunload", event => { if (fresh.operation || [...views.values()].some(view => view.operation)) event.preventDefault(); });
-  document.defaultView.addEventListener("popstate", () => { void openFromAddress(false); });
+  document.defaultView.addEventListener("popstate", event => {
+    if (event.state?.view === "progress") showView("progress");
+    else void openFromAddress(false);
+  });
   void loadList();
   void readBoard();
   void openFromAddress(true);

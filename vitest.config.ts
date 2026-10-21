@@ -10,7 +10,7 @@ const BROWSER = [
   "tests/modules/issues/send-shortcut-browser.test.ts",
   "tests/modules/issues/project-groups-browser.test.ts",
   "tests/modules/issues/continue-after-switch-browser.test.ts",
-  "tests/modules/issues/progress-tab-browser.test.ts",
+  "tests/modules/issues/progress-list-browser.test.ts",
   "tests/modules/issues/usability-browser.test.ts",
   "tests/modules/issues/mermaid-browser.test.ts",
 ];

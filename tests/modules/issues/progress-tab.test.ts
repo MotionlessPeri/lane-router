@@ -6,9 +6,10 @@ import { LocalRouterServer } from "../../../src/process/local-server.js";
 import { publishQuestion, setupIssues } from "../../fixtures/issues/setup.js";
 
 /**
- * Spec 2026-10-21-progress-tab.md, 4.2 and acceptance 2: a 进度 tab on the 问答 page that shows the
- * Vikunja board in an iframe. The page runs in happy-dom against the real issues HTTP service, so a
- * write still meets the real token check; /dashboard/state is stubbed, and no iframe page is loaded.
+ * Spec 2026-10-21-progress-tab.md, 4.2 and acceptance 2, as 2026-10-21-progress-list-page.md section
+ * one leaves it: the 进度 tab, its switching, and the board's address it reads. Its iframe gave way to
+ * the todo list, whose own cases are progress-list.test.ts. The page runs in happy-dom against the
+ * real issues HTTP service, so a write still meets the real token check; /dashboard/state is stubbed.
  */
 const page = readFileSync(new URL("../../../src/ui/issues/index.html", import.meta.url), "utf8");
 const cleanup: Array<() => unknown | Promise<unknown>> = [];
@@ -59,29 +60,23 @@ async function open(states: Answer[]) {
 
 // The page reads the board's address once as it starts, for 进度 and for LR-n links alike (spec
 // 2026-10-21-issue-page-usability.md, section five), where it once read it on the first visit to 进度.
-test("2: the board's address read as the page starts serves 进度 with no further read; its iframe is kept when hidden", async () => {
+test("2: the board's address read as the page starts gives 进度 its link to Vikunja, with no further read", async () => {
   const p = await open([{ status: 200, body: { progressBoard: { url: BOARD }, actionToken: "dashboard" } }]);
   expect(p.shown()).toEqual({ issues: "true", progress: "false", progressView: false, detail: true, compose: false });
   await vi.waitFor(() => expect(p.stateReads).toHaveLength(1));
-  expect(p.query("#progress-view iframe")).toBeNull();
   await p.toProgress(1);
   expect(p.shown()).toEqual({ issues: "false", progress: "true", progressView: true, detail: false, compose: false });
-  const frame = p.query("#progress-view iframe");
-  expect(frame.getAttribute("src")).toBe(BOARD);
-  expect(p.query("#progress-open").getAttribute("href")).toBe(BOARD);
-  expect(p.query("#progress-open").getAttribute("target")).toBe("_blank");
-  expect(p.query("#progress-note").textContent).toContain("这是 Vikunja 看板");
-
+  const open_ = p.query("#progress-open");
+  expect([open_.hidden, open_.getAttribute("href"), open_.getAttribute("target"), open_.textContent]).toEqual([false, BOARD, "_blank", "在 Vikunja 里打开看板 ↗"]);
+  expect(p.query("#progress-view iframe")).toBeNull();
   p.query("#tab-issues").click();
   expect(p.shown()).toEqual({ issues: "true", progress: "false", progressView: false, detail: true, compose: false });
-  expect(p.query("#progress-view iframe")).toBe(frame);
   p.query("#tab-progress").click(); await p.settle();
-  expect(p.query("#progress-view iframe")).toBe(frame);
   expect(p.stateReads).toHaveLength(1);
   expect(p.errors).toEqual([]);
 });
 
-test("2: with no board configured there is no iframe but a note, and each visit to 进度 reads again until there is one", async () => {
+test("2: while no board is known each visit to 进度 reads the address again, and the link comes once there is one", async () => {
   const p = await open([
     { status: 200, body: { progressBoard: null } },
     { status: 200, body: { progressBoard: null } },
@@ -90,17 +85,14 @@ test("2: with no board configured there is no iframe but a note, and each visit 
   ]);
   await vi.waitFor(() => expect(p.stateReads).toHaveLength(1));
   await p.toProgress(2);
-  expect(p.query("#progress-view iframe")).toBeNull();
-  expect(p.query("#progress-note").textContent).toContain("~/.lane-router/progress-board.json");
   expect(p.query("#progress-open").hidden).toBe(true);
   p.query("#tab-issues").click();
   await p.toProgress(3);
-  expect(p.query("#progress-view iframe")).toBeNull();
-  expect(p.query("#progress-note").textContent).toContain("router busy");
+  expect(p.query("#progress-open").hidden).toBe(true);
   p.query("#tab-issues").click();
   await p.toProgress(4);
-  expect(p.query("#progress-view iframe").getAttribute("src")).toBe(BOARD);
-  expect(p.query("#progress-open").hidden).toBe(false);
+  await vi.waitFor(() => expect(p.query("#progress-open").hidden).toBe(false));
+  expect(p.query("#progress-open").getAttribute("href")).toBe(BOARD);
   p.query("#tab-issues").click(); p.query("#tab-progress").click(); await p.settle();
   expect(p.stateReads).toHaveLength(4);
   expect(p.errors).toEqual([]);
@@ -127,7 +119,8 @@ test("2: reading the board's address leaves the page's own token alone, so a lat
 test("2: choosing an issue or 新问答 while on 进度 goes back to 问答", async () => {
   const p = await open([{ status: 200, body: { progressBoard: { url: BOARD } } }]);
   await p.toProgress(1);
-  p.query(`[data-issue-id="${p.issue.issueId}"]`).click();  expect(p.shown()).toEqual({ issues: "true", progress: "false", progressView: false, detail: true, compose: false });
+  p.query(`[data-issue-id="${p.issue.issueId}"]`).click();
+  expect(p.shown()).toEqual({ issues: "true", progress: "false", progressView: false, detail: true, compose: false });
   await vi.waitFor(() => expect(p.query("#issue-detail").getAttribute("data-issue-id")).toBe(p.issue.issueId));
   p.query("#tab-progress").click();
   expect(p.shown()).toMatchObject({ progress: "true", progressView: true, detail: false });
@@ -135,6 +128,5 @@ test("2: choosing an issue or 新问答 while on 进度 goes back to 问答", as
   expect(p.shown()).toEqual({ issues: "true", progress: "false", progressView: false, detail: false, compose: true });
   p.query("#cancel-new").click();
   expect(p.shown()).toEqual({ issues: "true", progress: "false", progressView: false, detail: true, compose: false });
-  expect(p.query("#progress-view iframe").getAttribute("src")).toBe(BOARD);
   expect(p.errors).toEqual([]);
 });
