@@ -554,7 +554,8 @@ lane-router-lane kb record --json-file record.json
 
 自动测试：
 - `tests/modules/issues/continue-after-switch.test.ts`（happy-dom，路由用替身）：两个按钮、请求的头和正文、三类结果的说法、报错、等回答时不能再点。
-- 去掉结果里的「没开着」一类、请求不带 `actionToken`、等回答时按钮不禁用，三个变异各让用例变红。
+- `tests/modules/issues/continue-after-switch-browser.test.ts`（浏览器组）：真 Edge 按真的看板路由，后面是和 `main.ts` 一样接起来的 Router（夹具 `tests/fixtures/issues/page-router.ts`：真信箱，两个后端用替身）。核对信进了开着和没开着的 Claude lane 的信箱、Codex lane 没收到、只有开着的窗口收到通知帧；页面依次写出三类结果、60 秒内重复、Codex 那一轮，以及路由拒收时的原因。
+- 去掉结果里的「没开着」一类、请求不带 `actionToken`、等回答时按钮不禁用，三个变异各让 happy-dom 用例变红；前两个也让浏览器组那条变红。
 
 ### 进度：问答页里看 Vikunja 看板
 
@@ -569,7 +570,8 @@ lane-router-lane kb record --json-file record.json
 
 自动测试：
 - `tests/modules/issues/progress-tab.test.ts`（happy-dom，`/dashboard/state` 用替身，iframe 不真加载）覆盖验收第 2 条。
-- 稿子第七节归页面的四个变异各让用例变红：切回「问答」时销毁 iframe、`null` 仍渲染 iframe、读 state 时覆盖了页面的 `actionToken`、`null` 之后再点不重读。
+- `tests/modules/issues/progress-tab-browser.test.ts`（浏览器组）覆盖验收第 4 条：真 Edge、和 `main.ts` 一样接起来的 Router，数据根里先没有 `progress-board.json`（看到说明），写上一份指向本机替身页的再点「进度」，iframe 里加载出那一页；切走再切回，还是同一个 iframe。
+- 稿子第七节归页面的四个变异各让 happy-dom 用例变红：切回「问答」时销毁 iframe、`null` 仍渲染 iframe、读 state 时覆盖了页面的 `actionToken`、`null` 之后再点不重读。第一个和最后一个也让浏览器组那条变红。
 
 #### TC-ISSUES-GROUP-1：在真实问答页上按项目看（尚未执行）
 
