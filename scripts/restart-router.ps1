@@ -56,13 +56,28 @@ function Get-AppServerChildren($parent) {
 }
 
 function Stop-OwnedProcess($process, [string]$label) {
-    Stop-Process -Id $process.ProcessId
+    # Gone already is stopped: under "Stop" a pid that exited since it was found would abort the
+    # restart halfway, with the Router down and nothing started in its place.
+    try { Stop-Process -Id $process.ProcessId -ErrorAction Stop } catch {
+        if (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue) { throw }
+    }
     try {
         Wait-Process -Id $process.ProcessId -Timeout 10 -ErrorAction Stop
     } catch {
         if (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue) {
             throw "$label PID $($process.ProcessId) did not stop within 10 seconds."
         }
+    }
+}
+
+# An App Server usually goes down with its parent, and its pid may name some other process by the
+# time this runs. Only the process that was found - same name, same start time - is stopped, and
+# one that has already exited is simply done.
+function Stop-AppServerChild($child) {
+    $current = Get-CimInstance Win32_Process -Filter "ProcessId = $($child.ProcessId)" -ErrorAction SilentlyContinue
+    if ($null -eq $current -or $current.Name -ne $child.Name -or $current.CreationDate -ne $child.CreationDate) { return }
+    try { Stop-Process -Id $child.ProcessId -ErrorAction Stop } catch {
+        if (Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue) { throw }
     }
 }
 
@@ -91,19 +106,25 @@ if ($WhatIfPreference) {
     return
 }
 
+# From the moment the Router is stopped until a new one answers, a failure leaves nothing running.
+# Saying so is the least a halfway restart owes: run again, this script finds no Router to stop and
+# goes straight to starting one.
+$routerDown = $false
+trap {
+    if ($routerDown) { Write-Warning "Lane Router is not running: the restart stopped partway. Run this script again to start it." }
+    break
+}
+
 if ($null -ne $routerProcess -and $PSCmdlet.ShouldProcess("Lane Router PID $($routerProcess.ProcessId)", "Restart")) {
+    $routerDown = $true
     Stop-OwnedProcess $routerProcess "Lane Router"
-    foreach ($child in $routerAppServers) {
-        if (Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue) { Stop-Process -Id $child.ProcessId }
-    }
+    foreach ($child in $routerAppServers) { Stop-AppServerChild $child }
 }
 
 # After the Router, so that a Router still running cannot bring the old host straight back.
 if ($null -ne $hostProcess -and $PSCmdlet.ShouldProcess("Codex host PID $($hostProcess.ProcessId)", "Restart")) {
     Stop-OwnedProcess $hostProcess "Codex host"
-    foreach ($child in $hostAppServers) {
-        if (Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue) { Stop-Process -Id $child.ProcessId }
-    }
+    foreach ($child in $hostAppServers) { Stop-AppServerChild $child }
 }
 
 function Invoke-Ensure([string]$module, [string]$function, [string]$label) {
@@ -140,6 +161,7 @@ function Invoke-Ensure([string]$module, [string]$function, [string]$label) {
 }
 
 $router = Invoke-Ensure "ensure-router.js" "ensureRouter" "Lane Router"
+$routerDown = $false
 Write-Host "Lane Router restarted successfully."
 Write-Host "PID: $($router.pid)"
 Write-Host "Dashboard: $($router.url)/dashboard"
