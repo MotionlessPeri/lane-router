@@ -103,6 +103,7 @@
   .entry-body .local-path code { color: inherit; }
   /* Another issue named in an entry: the reference as written, then that issue's title, quieter. */
   .issue-ref-title { margin-left: 2px; color: var(--muted); font-size: .85em; }
+  .copy-id { padding: 0 6px; font-size: 11px; line-height: 1.6; }
   /* Files under an entry: images as thumbnails that open full size, others by name. */
   .entry-files { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 8px; }
   .entry-files img { display: block; max-height: 160px; max-width: 100%; border: 1px solid var(--line); border-radius: 6px; }
@@ -436,6 +437,19 @@
   // clipboard. The label stays on "已复制" until the issue is next opened, when its entries are
   // rebuilt (polls keep them as they are): no timer, because the page's timers are reserved for
   // request timeouts.
+  /** The whole ID, which is what a lane or the address bar takes; the label stays as addCopyButton's does. */
+  function copyIdButton(id) {
+    const button = node("button", "copy-id", "复制"); button.type = "button"; button.title = "复制完整 id：" + id;
+    button.addEventListener("click", async () => {
+      const clipboard = document.defaultView.navigator && document.defaultView.navigator.clipboard;
+      try {
+        if (!clipboard || typeof clipboard.writeText !== "function") throw new Error("no clipboard");
+        await clipboard.writeText(id);
+        button.textContent = "已复制";
+      } catch { button.textContent = "复制失败"; }
+    });
+    return button;
+  }
   function addCopyButton(pre) {
     const button = node("button", "copy-code", "复制");
     button.type = "button";
@@ -648,6 +662,8 @@
     // Where the reader was in the issue being left, to come back to.
     if (selectedId && byId("issue-detail").dataset.issueId === selectedId) viewFor(selectedId).scrollTop = region.scrollTop;
     selectedId = id; renderList();
+    // The meta line is drawn anew, so its 复制 reads 复制 again.
+    byId("detail-meta").dataset.signature = "";
     const view = viewFor(id);
     view.positioning = view.detail ? "return" : "open";
     view.pickTarget = true; view.targetChosen = false;
@@ -789,7 +805,7 @@
     if (meta.dataset.signature !== metaSignature) {
       const shortId = node("span", "issue-id", id.slice(0, 8)); shortId.title = id;
       const state = closed ? "已结束（" + (detail.thread.closedBy === "lane" ? "lane 结束的" : "你结束的") + "）" : "进行中";
-      meta.replaceChildren(...ownerNodes(detail.owner), " · " + state + " · ", shortId);
+      meta.replaceChildren(...ownerNodes(detail.owner), " · " + state + " · ", shortId, " ", copyIdButton(id));
       meta.dataset.signature = metaSignature;
     }
     byId("detail-status").textContent = view.loadError;

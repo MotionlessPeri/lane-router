@@ -137,6 +137,31 @@ test("3: a plain click opens the issue on this page and pushes it; back returns;
   expect(p.errors).toEqual([]);
 });
 
+test("5: 复制 after the short ID copies the whole ID; with no clipboard it says it failed, until the issue is opened again", async () => {
+  const p = await open();
+  const copied: string[] = [];
+  Object.defineProperty(p.window.navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { copied.push(text); } } });
+  await p.select(TARGET);
+  const button = () => p.query("#detail-meta .copy-id");
+  expect(p.query("#detail-meta .issue-id").textContent).toBe("205a897d");
+  expect(button().textContent).toBe("复制");
+  button().click();
+  await vi.waitFor(() => expect(button().textContent).toBe("已复制"));
+  expect(copied).toEqual([TARGET]);
+
+  Object.defineProperty(p.window.navigator, "clipboard", { configurable: true, value: undefined });
+  await p.select(SOURCE);
+  expect(button().textContent).toBe("复制");
+  button().click();
+  await vi.waitFor(() => expect(button().textContent).toBe("复制失败"));
+  Object.defineProperty(p.window.navigator, "clipboard", { configurable: true, value: { writeText: async () => { throw new Error("denied"); } } });
+  await p.select(TARGET);
+  expect(button().textContent).toBe("复制");
+  button().click();
+  await vi.waitFor(() => expect(button().textContent).toBe("复制失败"));
+  expect(p.errors).toEqual([]);
+});
+
 test("4: ?issue= opens a whole ID, or a prefix whose whole ID then replaces it; one that names nothing says so", async () => {
   const whole = await open({ search: `?issue=${TARGET}` });
   await vi.waitFor(() => expect(whole.opened()).toBe(TARGET));
