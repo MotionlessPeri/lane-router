@@ -36,7 +36,7 @@
 - `.claude-plugin/marketplace.json`：`name: "lane-local"`，一条插件 `lane`，`source: "./plugins/lane"`。
 - `plugins/lane/.claude-plugin/plugin.json`：`name: "lane"`，`channels: [{ server: "lane", displayName: "Lane Router" }]`。
 - `plugins/lane/.mcp.json`：**改成可移植**——`"command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/server.mjs"]`（现在写死的绝对路径作废）。
-- `plugins/lane/server.mjs`（新增，一行）：`import "../../../../dist/mcp/lane-mcp-server.js";`——按文件位置解析，不在 `args` 里用 `..`，不依赖机器路径；仓库搬家也跟着走。
+- `plugins/lane/server.mjs`（新增）：`import { runLaneMcpStdio } from "../../../../dist/mcp/lane-mcp-server.js"; runLaneMcpStdio()`——按文件位置解析，不在 `args` 里用 `..`，不依赖机器路径；仓库搬家也跟着走。（impl 2026-10-21 更正：原稿写「只 import 一行」不行，那个模块只在自己被 node 直接运行时才启动，只 import 会让进程静默退出；冒烟用例已核。）**取证 2026-10-21 16:02**：`claude plugin install` 会把插件复制到 `~/.claude/plugins/cache/lane-local/lane/<版本>/`，但 `${CLAUDE_PLUGIN_ROOT}` 指向的是 `readFromFolder`（仓库里的插件目录），不是缓存——缓存副本里的 `server.mjs` 相对路径解析不到 `dist`，而服务器照样起来了（MCP 日志 `Connection established … lane-router 0.1.0`）。所以相对 import 可用；别往缓存目录里找东西。
 - 名字就用 `lane-local` / `lane`（用户未提异议）。`claude plugin validate tools/channel-plugin` 必须通过。
 
 ### 4.2 每台机器一次性安装：`scripts/install-channel-plugin.ps1`
