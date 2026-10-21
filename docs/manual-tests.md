@@ -556,6 +556,21 @@ lane-router-lane kb record --json-file record.json
 - `tests/modules/issues/continue-after-switch.test.ts`（happy-dom，路由用替身）：两个按钮、请求的头和正文、三类结果的说法、报错、等回答时不能再点。
 - 去掉结果里的「没开着」一类、请求不带 `actionToken`、等回答时按钮不禁用，三个变异各让用例变红。
 
+### 进度：问答页里看 Vikunja 看板
+
+需求与设计见 `docs/superpowers/specs/2026-10-21-progress-tab.md`（4.2 标签页、验收第 2、4 条）。看板地址的配置和 `/dashboard/state.progressBoard` 归 impl。
+
+- 左栏标题行下面单独一行「问答｜进度」，选中的那项下面有一道线。点「进度」，右边的内容区换成 Vikunja 看板（iframe）；点「问答」换回来。看板只是藏起来，不会重建，滚动位置和筛选都还在。在「进度」时点左栏的某条问答或「新问答」，会自动回到「问答」。
+- 宽屏上看板占满内容区；窄屏（≤680px）内容区在列表下面，看板固定高 80vh，点「进度」时页面滚到看板那里。
+- 看板上面一行小字：「这是 Vikunja 看板，拖动卡片、点开卡片都在里面做；在新窗口打开 ↗」。
+- 第一次点「进度」时，页面读一次 `GET /dashboard/state`，只取 `progressBoard`。读到地址就建 iframe，以后不再读。没配置时显示「进度板还没配置：在 ~/.lane-router/progress-board.json 写 { "url": "<Vikunja 看板地址>" }，写好后再点一次「进度」。」每次再点「进度」都会重读；读失败也是这样。页面自己也只接受本机地址（`http://localhost`、`http://127.0.0.1`）。
+- 这次读取用单独的 `fetch`，不经过页面的 `request()`，所以不会改动页面写操作用的 `actionToken`。
+- 2026-10-21 在真 Edge 155 里实测过：`127.0.0.1` 的页面嵌 `localhost` 的 iframe，iframe 能读到那个源自己的 localStorage（Vikunja 的登录令牌就存在那里）。所以浏览器里已经登录 Vikunja 的话，iframe 里也是登录状态。
+
+自动测试：
+- `tests/modules/issues/progress-tab.test.ts`（happy-dom，`/dashboard/state` 用替身，iframe 不真加载）覆盖验收第 2 条。
+- 稿子第七节归页面的四个变异各让用例变红：切回「问答」时销毁 iframe、`null` 仍渲染 iframe、读 state 时覆盖了页面的 `actionToken`、`null` 之后再点不重读。
+
 #### TC-ISSUES-GROUP-1：在真实问答页上按项目看（尚未执行）
 
 **前提：** 主检出构建到含此改动的版本，并重启 Router。重启和构建的时机都归用户。

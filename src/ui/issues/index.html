@@ -43,6 +43,16 @@
   .list-panel { margin: 0 -12px; padding: 8px 12px 12px; border-top: 1px solid var(--line); }
   main { min-width: 0; background: var(--panel); }
   #markdown-status { margin: 0; padding: 12px 16px 0; }
+  /* What the content area shows: the issues, or the progress board. A row of its own under the title,
+     which has no room left at the sidebar's narrowest; underlined, so it does not read as a list filter. */
+  .view-tabs { display: flex; gap: 4px; padding: 0 4px; }
+  .view-tabs [role="tab"] { padding: 2px 8px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); font-size: 13px; }
+  .view-tabs [aria-selected="true"] { border-bottom-color: var(--text); color: var(--text); }
+  /* The board keeps a fixed height where the content follows the list; wide screens give it the rest. */
+  #progress-view { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 8px 16px 16px; background: var(--panel); }
+  #progress-note { margin: 0; }
+  #progress-open { margin-left: 4px; }
+  #progress-view iframe { width: 100%; height: 80vh; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
   /* A group's head reads as a label over its issues: the project, how many, and what waits on the user,
      that last kept to the right edge where it lines up from group to group. */
   .project-group + .project-group { margin-top: 8px; }
@@ -161,6 +171,8 @@
     #history-region { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
     #compose-region { max-height: 50%; overflow-y: auto; }
     #new-issue-view { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 16px 32px; }
+    #progress-view { flex: 1 1 0; min-height: 0; padding: 8px 32px 16px; }
+    #progress-view iframe { flex: 1 1 0; height: auto; min-height: 0; }
   }
   @media (max-width: 680px) {
     .sidebar { padding: 14px 14px 0; border-bottom: 1px solid var(--line); }
@@ -174,6 +186,10 @@
 <body>
 <aside class="sidebar">
   <div class="sidebar-head"><h1 title="集中查看答复与问题。看不懂可以继续追问，一轮回复不会自动结束议题。&#10;可以在这里新开问答，也可以接着已有的问答讨论">问答</h1><button type="button" id="new-issue" class="primary">新问答</button><a href="/dashboard">运行看板</a></div>
+  <nav class="view-tabs" role="tablist" aria-label="右侧显示">
+    <button type="button" role="tab" id="tab-issues" aria-selected="true">问答</button>
+    <button type="button" role="tab" id="tab-progress" aria-selected="false" aria-controls="progress-view">进度</button>
+  </nav>
   <div class="continue-bar" role="group" aria-label="切号后继续" title="手动切换账号以后点：给这个后端在用的每条 lane 发一封信。因额度停下的从中断处继续，没停下的确认已读即可">
     <button type="button" id="continue-claude" data-continue="claude">继续 Claude lane</button>
     <button type="button" id="continue-codex" data-continue="codex">继续 Codex lane</button>
@@ -231,6 +247,9 @@
     <p id="new-status" role="status"></p>
     <div id="new-recovery" hidden><button type="button" id="retry-new">用同一操作重试</button><button type="button" id="check-new">查看后端历史</button></div>
   </section>
+  <section id="progress-view" aria-label="进度" hidden>
+    <p id="progress-note" class="meta"><span id="progress-text"></span><a id="progress-open" target="_blank" rel="noopener noreferrer" hidden>在新窗口打开 ↗</a></p>
+  </section>
 </main>
 <script src="/issues/assets/markdown-it.js"></script>
 <script>
@@ -252,6 +271,8 @@
     try { const names = JSON.parse(stored(COLLAPSED_KEY) || "[]"); return new Set(Array.isArray(names) ? names : []); } catch { return new Set(); }
   })();
   const chosenProject = () => projectNames.includes(wantedProject) ? wantedProject : "";
+  /** "issues" or "progress": what the content area shows. */
+  let shownView = "issues";
   const byId = id => document.getElementById(id);
   const node = (tag, className, text) => {
     const element = document.createElement(tag);
@@ -549,6 +570,7 @@
    * marks read.
    */
   function selectIssue(id) {
+    if (shownView !== "issues") showView("issues");
     if (composing) { composing = false; renderNew(); }
     const region = byId("history-region");
     // Where the reader was in the issue being left, to come back to.
@@ -1179,6 +1201,7 @@
     });
   }
   function openNew() {
+    if (shownView !== "issues") showView("issues");
     if (composing) { byId("new-body").focus(); return; }
     if (selectedId && byId("issue-detail").dataset.issueId === selectedId) viewFor(selectedId).scrollTop = byId("history-region").scrollTop;
     selectedId = null; historyFor = null; sight?.observer.disconnect(); sight = null;
@@ -1204,7 +1227,7 @@
     renderNew();
   }
   function renderNew() {
-    byId("new-issue-view").hidden = !composing; byId("issue-detail").hidden = composing;
+    byId("new-issue-view").hidden = !composing || shownView !== "issues"; byId("issue-detail").hidden = composing || shownView !== "issues";
     if (!composing) return;
     const select = byId("new-lane"), signature = JSON.stringify(lanes);
     if (signature !== renderedLanes) {
@@ -1319,6 +1342,50 @@
     finally { for (const button of buttons) button.disabled = false; }
   }
 
+  /**
+   * 进度 shows the Vikunja board where an issue would be (spec 2026-10-21-progress-tab.md). Its address
+   * comes from the Router on the first visit, and on every visit after until there is one; the iframe,
+   * once built, is only ever hidden, so the board keeps its scroll and filters. The read is a fetch of
+   * its own: request() would take that answer's actionToken, or its lack of one, for the page's writes.
+   */
+  let board = null, boardReading = false;
+  function showView(name) {
+    shownView = name;
+    byId("tab-issues").setAttribute("aria-selected", String(name === "issues"));
+    byId("tab-progress").setAttribute("aria-selected", String(name === "progress"));
+    byId("progress-view").hidden = name !== "progress";
+    renderNew();
+    if (name === "progress" && !board) void loadBoard();
+    // A narrow window puts the content under the list, out of sight of the tab just pressed.
+    if (name === "progress" && document.defaultView.matchMedia?.("(max-width: 680px)").matches) byId("progress-view").scrollIntoView?.({ block: "start" });
+  }
+  /** Only an address on this machine is shown, as the Router itself only accepts one. */
+  function localBoard(url) {
+    try { const parsed = new URL(url); return parsed.protocol === "http:" && ["localhost", "127.0.0.1"].includes(parsed.hostname); } catch { return false; }
+  }
+  async function loadBoard() {
+    if (boardReading) return;
+    boardReading = true;
+    const text = byId("progress-text"), open = byId("progress-open");
+    text.textContent = "正在读取进度板的配置…"; open.hidden = true;
+    try {
+      const response = await fetch("/dashboard/state", { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) throw new Error((data.error || "请求失败") + "（" + response.status + "）");
+      const url = data.progressBoard?.url;
+      if (typeof url !== "string" || !localBoard(url)) {
+        text.textContent = "进度板还没配置：在 ~/.lane-router/progress-board.json 写 { \"url\": \"<Vikunja 看板地址>\" }，写好后再点一次「进度」。";
+        return;
+      }
+      board = url;
+      const frame = node("iframe"); frame.src = url; frame.title = "进度看板（Vikunja）";
+      byId("progress-view").append(frame);
+      text.textContent = "这是 Vikunja 看板，拖动卡片、点开卡片都在里面做；"; open.setAttribute("href", url); open.hidden = false;
+    } catch (error) {
+      text.textContent = "读不到进度板的配置：" + error.message + "。再点一次「进度」会重读。";
+    } finally { boardReading = false; }
+  }
+
   function showFilter(name) {
     filter = name; listPages = 1; listCursor = null; listItems = []; shownTopics = []; listVersion++; listLoading = false;
     for (const tab of document.querySelectorAll("[data-filter]")) tab.setAttribute("aria-pressed", String(tab.dataset.filter === name));
@@ -1327,6 +1394,8 @@
   for (const button of document.querySelectorAll("[data-filter]")) button.addEventListener("click", () => showFilter(button.dataset.filter));
   byId("project-filter").addEventListener("change", () => { wantedProject = byId("project-filter").value; store(PROJECT_KEY, wantedProject); showFilter(filter); });
   byId("new-issue").addEventListener("click", openNew);
+  byId("tab-issues").addEventListener("click", () => showView("issues"));
+  byId("tab-progress").addEventListener("click", () => showView("progress"));
   for (const button of document.querySelectorAll("[data-continue]")) button.addEventListener("click", () => { void continueLanes(button.dataset.continue); });
   byId("cancel-new").addEventListener("click", closeNew);
   byId("new-lane").addEventListener("change", () => { if (!fresh.operation) { fresh.laneId = byId("new-lane").value; store(NEW_LANE, fresh.laneId); renderNew(); } });
